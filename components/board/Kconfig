@@ -71,6 +71,21 @@ menu "Sipwire board"
             int "Touch IRQ (PENIRQ)"
             depends on SIPWIRE_TOUCH_ENABLE
             default 17
+        comment "Touch axes map raw XPT2046 X/Y to the screen, independent of the panel."
+        config SIPWIRE_TOUCH_SWAP_XY
+            bool "Touch: swap X/Y"
+            depends on SIPWIRE_TOUCH_ENABLE
+            default n
+        config SIPWIRE_TOUCH_MIRROR_X
+            bool "Touch: mirror X"
+            depends on SIPWIRE_TOUCH_ENABLE
+            default n
+        config SIPWIRE_TOUCH_MIRROR_Y
+            bool "Touch: mirror Y"
+            depends on SIPWIRE_TOUCH_ENABLE
+            default y
+            help
+                Reference build. Touch rotated 180 degrees: toggle both mirror options.
         config SIPWIRE_TOUCH_SPI_HZ
             int "Touch SPI clock (Hz)"
             depends on SIPWIRE_TOUCH_ENABLE

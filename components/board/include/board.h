@@ -20,6 +20,7 @@ typedef struct {
         bool present;
         gpio_num_t cs, irq;
         int spi_hz;
+        bool swap_xy, mirror_x, mirror_y;  /* raw axes -> screen, after mirror then swap */
     } touch;
     struct {
         gpio_num_t bclk, ws, dout, en;

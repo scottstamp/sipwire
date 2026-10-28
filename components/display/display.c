@@ -274,8 +274,9 @@ static inline int32_t clamp_i32(int32_t v, int32_t lo, int32_t hi)
 }
 
 /* Raw XPT2046 axes (0..4095) -> screen pixels. All swap/mirror handling is done here
- * (the esp_lcd_touch flags stay clear), following the panel's own configuration:
- * mirror acts on the native axes, then swap_xy exchanges them. With a valid calibration
+ * (the esp_lcd_touch flags stay clear), using the touch's own board options, since a
+ * module's touch axes need not match its panel: mirror acts on the raw axes, then
+ * swap_xy exchanges them. With a valid calibration
  * the raw range is mapped directly (direction is encoded by min/max) and mirror is skipped. */
 static void touch_to_screen(int32_t rx, int32_t ry, int32_t *sx, int32_t *sy)
 {
@@ -286,19 +287,19 @@ static void touch_to_screen(int32_t rx, int32_t ry, int32_t *sx, int32_t *sy)
     portEXIT_CRITICAL(&s.cal_lock);
 
     if (cal.valid && cal.x_max != cal.x_min && cal.y_max != cal.y_min) {
-        int32_t ax = b->lcd.swap_xy ? ry : rx;
-        int32_t ay = b->lcd.swap_xy ? rx : ry;
+        int32_t ax = b->touch.swap_xy ? ry : rx;
+        int32_t ay = b->touch.swap_xy ? rx : ry;
         *sx = (ax - cal.x_min) * (s.hres - 1) / (cal.x_max - cal.x_min);
         *sy = (ay - cal.y_min) * (s.vres - 1) / (cal.y_max - cal.y_min);
     } else {
         int32_t nx = rx, ny = ry;
-        if (b->lcd.mirror_x) {
+        if (b->touch.mirror_x) {
             nx = XPT2046_ADC_MAX - 1 - nx;
         }
-        if (b->lcd.mirror_y) {
+        if (b->touch.mirror_y) {
             ny = XPT2046_ADC_MAX - 1 - ny;
         }
-        if (b->lcd.swap_xy) {
+        if (b->touch.swap_xy) {
             int32_t t = nx;
             nx = ny;
             ny = t;

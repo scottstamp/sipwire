@@ -124,7 +124,8 @@ defaults.
 | `TOUCH_ENABLE` | y | `KP_COL0` / `COL1` / `COL2` | 38 / 40 / 42 |
 | `TOUCH_CS` | 16 | `KP_MAP` | `123456789*0#` |
 | `TOUCH_IRQ` | 17 | `SD_ENABLE` | n |
-| `STATUS_LED` | 48 | | |
+| `STATUS_LED` | 48 | `LCD_MIRROR_X` | y |
+| `TOUCH_MIRROR_Y` | y (touch axes differ from the panel's) | | |
 
 `sdkconfig.defaults` also sets 16 MB flash and octal PSRAM
 (`CONFIG_SPIRAM_MODE_OCT`, malloc may use it; boot continues if absent).

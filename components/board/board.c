@@ -50,6 +50,9 @@ static board_cfg_t s_cfg = {
         .cs = PIN(CONFIG_SIPWIRE_TOUCH_CS),
         .irq = PIN(CONFIG_SIPWIRE_TOUCH_IRQ),
         .spi_hz = CONFIG_SIPWIRE_TOUCH_SPI_HZ,
+        .swap_xy = IS_ENABLED(CONFIG_SIPWIRE_TOUCH_SWAP_XY),
+        .mirror_x = IS_ENABLED(CONFIG_SIPWIRE_TOUCH_MIRROR_X),
+        .mirror_y = IS_ENABLED(CONFIG_SIPWIRE_TOUCH_MIRROR_Y),
 #else
         .cs = GPIO_NUM_NC,
         .irq = GPIO_NUM_NC,
