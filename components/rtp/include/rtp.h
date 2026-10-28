@@ -37,8 +37,9 @@ typedef struct {
 rtp_session_t *rtp_session_create(const rtp_config_t *cfg);
 void rtp_session_destroy(rtp_session_t *s);
 
-/** Encode one 20 ms frame of 8 kHz PCM and build a packet into `out`.
- *  Returns packet length, 0 if suppressed (e.g. DTMF in progress). */
+/** Encode one 20 ms frame of 8 kHz PCM and build a packet into `out`; while
+ *  a DTMF event is in progress this builds the event packet instead (PCM is
+ *  ignored). Call every 20 ms. Returns packet length, 0 on bad args/out_cap. */
 size_t rtp_build_audio(rtp_session_t *s, const int16_t pcm[RTP_SAMPLES_8K],
                        uint8_t *out, size_t out_cap);
 
