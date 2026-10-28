@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "nvs.h"
+#include "sdkconfig.h"
 #include "sipwire_events.h"
 
 static const char *TAG = "storage";
@@ -14,6 +15,17 @@ static const char *TAG = "storage";
 #define NVS_NAMESPACE "sipwire"
 #define POST_TIMEOUT pdMS_TO_TICKS(100)
 #define CODEC_PREF_DEFAULT "g722,pcmu,pcma"
+
+/* Defaults live in main/Kconfig.projbuild (the fallbacks only matter if it is not part of the build). */
+#ifndef CONFIG_SIPWIRE_NTP_SERVER
+#define CONFIG_SIPWIRE_NTP_SERVER "pool.ntp.org"
+#endif
+#ifndef CONFIG_SIPWIRE_TZ
+#define CONFIG_SIPWIRE_TZ "UTC0"
+#endif
+#ifndef CONFIG_SIPWIRE_OTA_URL
+#define CONFIG_SIPWIRE_OTA_URL "http://192.168.2.154:8090/ota.bin"
+#endif
 
 /* One NVS key per settings_t field (max 15 chars). A missing key means "use the
  * default", so fields added later never invalidate data written by old firmware. */
@@ -33,6 +45,10 @@ static const char *TAG = "storage";
 #define K_MIC_GAIN    "mic_gain"
 #define K_BACKLIGHT   "backlight"
 #define K_BL_TIMEOUT  "bl_timeout"
+#define K_NTP_SERVER  "ntp_server"
+#define K_TZ          "tz"
+#define K_CLOCK_24H   "clock_24h"
+#define K_OTA_URL     "ota_url"
 #define K_TC_VALID    "tc_valid"
 #define K_TC_X_MIN    "tc_x_min"
 #define K_TC_X_MAX    "tc_x_max"
@@ -54,6 +70,10 @@ static void settings_defaults(settings_t *s)
     s->mic_gain = 50;
     s->backlight = 80;
     s->backlight_timeout_s = 30;
+    strcpy(s->ntp_server, CONFIG_SIPWIRE_NTP_SERVER);
+    strcpy(s->tz, CONFIG_SIPWIRE_TZ);
+    s->clock_24h = false;
+    strcpy(s->ota_url, CONFIG_SIPWIRE_OTA_URL);
 }
 
 /* ---- NVS load: a missing (or unusable) key leaves the default in place ---- */
@@ -64,6 +84,14 @@ static void load_str(nvs_handle_t h, const char *key, char *dst, size_t size)
     if (nvs_get_str(h, key, dst, &len) != ESP_OK) {
         dst[0] = '\0';
     }
+}
+
+/* Like load_str, but a missing key keeps the default already in `dst`
+ * (nvs_get_str leaves the buffer alone when it fails). */
+static void load_str_or_keep(nvs_handle_t h, const char *key, char *dst, size_t size)
+{
+    size_t len = size;
+    (void)nvs_get_str(h, key, dst, &len);
 }
 
 static void load_u8_max100(nvs_handle_t h, const char *key, uint8_t *dst)
@@ -90,6 +118,19 @@ static void load_all(nvs_handle_t h, settings_t *s)
     size_t len = sizeof(s->codec_pref);
     if (nvs_get_str(h, K_CODEC_PREF, s->codec_pref, &len) != ESP_OK) {
         strcpy(s->codec_pref, CODEC_PREF_DEFAULT);  /* key added after release: keep the default */
+    }
+
+    load_str_or_keep(h, K_NTP_SERVER, s->ntp_server, sizeof(s->ntp_server));
+    load_str_or_keep(h, K_TZ, s->tz, sizeof(s->tz));
+    load_str_or_keep(h, K_OTA_URL, s->ota_url, sizeof(s->ota_url));
+    if (s->ntp_server[0] == '\0') {
+        strcpy(s->ntp_server, CONFIG_SIPWIRE_NTP_SERVER);
+    }
+    if (s->tz[0] == '\0') {
+        strcpy(s->tz, CONFIG_SIPWIRE_TZ);
+    }
+    if (nvs_get_u8(h, K_CLOCK_24H, &u8) == ESP_OK) {
+        s->clock_24h = u8 != 0;
     }
 
     if (nvs_get_u16(h, K_SIP_PORT, &u16) == ESP_OK && u16 != 0) {
@@ -131,8 +172,13 @@ static esp_err_t validate(const settings_t *s)
                         str_ok(s->sip_auth_user, sizeof(s->sip_auth_user)) &&
                         str_ok(s->sip_password, sizeof(s->sip_password)) &&
                         str_ok(s->sip_display_name, sizeof(s->sip_display_name)) &&
-                        str_ok(s->codec_pref, sizeof(s->codec_pref)),
+                        str_ok(s->codec_pref, sizeof(s->codec_pref)) &&
+                        str_ok(s->ntp_server, sizeof(s->ntp_server)) &&
+                        str_ok(s->tz, sizeof(s->tz)) &&
+                        str_ok(s->ota_url, sizeof(s->ota_url)),
                         ESP_ERR_INVALID_ARG, TAG, "string not NUL-terminated");
+    ESP_RETURN_ON_FALSE(s->ntp_server[0] != '\0' && s->tz[0] != '\0', ESP_ERR_INVALID_ARG, TAG,
+                        "ntp_server and tz must not be empty");
     ESP_RETURN_ON_FALSE(s->sip_port != 0, ESP_ERR_INVALID_ARG, TAG, "sip_port is 0");
     ESP_RETURN_ON_FALSE((unsigned)s->sip_transport <= SIP_TRANSPORT_TCP, ESP_ERR_INVALID_ARG, TAG,
                         "bad sip_transport");
@@ -167,6 +213,12 @@ static esp_err_t store_changed(nvs_handle_t h, const settings_t *in)
     STORE_STR(K_SIP_PASS, sip_password);
     STORE_STR(K_SIP_NAME, sip_display_name);
     STORE_STR(K_CODEC_PREF, codec_pref);
+    STORE_STR(K_NTP_SERVER, ntp_server);
+    STORE_STR(K_TZ, tz);
+    STORE_STR(K_OTA_URL, ota_url);
+    if (in->clock_24h != s_cur.clock_24h) {
+        ESP_RETURN_ON_ERROR(nvs_set_u8(h, K_CLOCK_24H, in->clock_24h ? 1 : 0), TAG, K_CLOCK_24H);
+    }
 
     STORE_NUM(nvs_set_u16, K_SIP_PORT, sip_port);
     if (in->sip_transport != s_cur.sip_transport) {

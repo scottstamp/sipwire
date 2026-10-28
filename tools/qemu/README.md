@@ -28,9 +28,21 @@ tools/qemu/smoke.sh     # → RESULT OK; log in build_qemu/smoke.log
 ```
 
 `smoke.sh [scenario] [log]` takes another scenario file. Format, one step per
-line: `send <text>`, `expect <regex> [timeout_s]`, `sleep <s>`, `shell <cmd>`
-(`$ASTX '<cli command>'` runs an Asterisk CLI command), `# comment`. The first
+line: `send <text>`, `expect <regex> [timeout_s]`, `absent <regex> [seconds]` (fails
+if a matching line appears), `sleep <s>`, `shell <cmd>`
+(`$ASTX '<cli command>'` runs an Asterisk CLI command), `# comment`. `${NAME}` in
+send/expect/absent lines expands environment variables (`${OTA_BASE}`, see below). The first
 failed step stops the run. Wait for a reply before the next `send`: characters
 typed while the firmware is logging can be lost.
 
 Every run boots a fresh copy of the flash image, so NVS starts empty.
+
+## OTA scenario
+
+The last steps of `smoke.txt` test `components/ota`. `smoke.sh` serves three files over
+HTTP on a free host port (`$OTA_BASE`, guest `http://10.0.2.2:<port>`): `sipwire.bin` (the
+firmware just built), `other.bin` (same image, other `project_name`) and `junk.bin`
+(random bytes). The firmware runs `ota <url>`: the last two and a 404 must be refused with a
+reason and no reboot; `sipwire.bin` must show progress, reboot (QEMU keeps running, so the
+written flash image stays), boot from `ota_1` (offset 0x320000) and mark itself valid.
+`ota-http.log` next to `smoke.log` has the server's access log.

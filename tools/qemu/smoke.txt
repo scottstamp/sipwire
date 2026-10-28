@@ -81,3 +81,56 @@ send sip
 expect registration: not registered
 send tasks
 sleep 2
+
+# 7b: time settings apply live (TZ + SNTP server, no reboot) and persist
+send cfg set tz CET-1CEST,M3.5.0,M10.5.0/3
+expect tz\s+= CET-1CEST
+expect ui_bridge: time zone: CET-1CEST 5
+sleep 1
+send cfg set ntp_server 10.0.2.2
+expect ntp_server\s+= 10.0.2.2
+expect ui_bridge: ntp server: 10.0.2.2 5
+sleep 1
+send cfg set clock_24h true
+expect clock_24h\s+= true
+sleep 1
+
+# 8: OTA, negative cases first: each must be refused with a reason, no reboot,
+# and we keep running from ota_0 (the first slot, flashed by the image).
+send ota status
+expect ^running partition: ota_0
+expect ^app state: (valid|n/a|undefined)
+send ota ${OTA_BASE}/other.bin
+expect ota: update failed: Wrong firmware: otherapp 30
+sleep 3
+send ota ${OTA_BASE}/junk.bin
+expect ota: update failed: Not a firmware image 30
+sleep 3
+send ota ${OTA_BASE}/missing.bin
+expect ota: update failed: Download failed 30
+sleep 3
+send ota status
+expect ^running partition: ota_0
+expect ^update: failed
+absent ESP-ROM:esp32s3 5
+absent Guru Meditation
+
+# 9: OTA, the real update: progress -> done -> reboot -> boots from ota_1 -> marked valid.
+send ota ${OTA_BASE}/sipwire.bin
+expect update started from
+expect ota: version .* -> 20
+expect ota: progress 0% 60
+expect ota: progress 5\d% 300
+expect ota: progress 100% 300
+expect ota: update done, rebooting in 3 s 60
+expect ESP-ROM:esp32s3 30
+expect boot: Loaded app from partition at offset 0x320000 30
+expect ota: new firmware on ota_1 is pending verification 60
+expect ui_bridge: time zone: CET-1CEST 30
+expect ota: new firmware marked valid \(UI started and network up\) 60
+sleep 2
+send ota status
+expect ^running partition: ota_1
+expect ^app state: valid
+expect ^next slot: ota_0
+shell grep -c 'GET /sipwire.bin' ${HTTP_LOG}

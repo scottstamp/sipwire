@@ -39,4 +39,11 @@ typedef struct {
      * screen is left because of an incoming call). `cal` is the result to
      * store, or NULL when cancelled. Persist off the LVGL task. */
     void (*touch_cal_end)(void *ctx, const ui_touch_cal_t *cal);
+    /* Settings > Time: NTP server, POSIX TZ string and 12/24-hour display.
+     * Applied live (no reboot); the strings are never empty. */
+    void (*save_time)(void *ctx, const char *ntp, const char *tz_posix, bool clock_24h);
+    /* Settings > Update: install the firmware at `url` (http:// or https://).
+     * The device stores the URL if it changed. Progress comes back through the
+     * model's ota_* fields. Not called while a call is active. */
+    void (*ota_start)(void *ctx, const char *url);
 } ui_actions_t;

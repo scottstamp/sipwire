@@ -1,8 +1,13 @@
 """Drive the sipwire firmware in QEMU over its serial console.
 
 usage: python -I run.py <build_dir> <script-file> [log-file]
-script lines:  send <text> | expect <regex> [timeout_s] | sleep <s> | shell <cmd> | # comment
-Exits non-zero on the first failed expect / shell step.
+script lines:  send <text> | expect <regex> [timeout_s] | absent <regex> [seconds] | sleep <s>
+               | shell <cmd> | # comment
+`${NAME}` in send/expect/absent lines is replaced by the environment variable NAME (when set).
+`absent` fails if a matching line shows up within the window (default 3 s).
+Exits non-zero on the first failed expect / absent / shell step.
+The same QEMU process (and so the same flash image, OTA slots included) lives for the whole
+script: a firmware reboot (esp_restart) does not restart QEMU.
 """
 import binascii
 import os
@@ -53,6 +58,10 @@ def reader():
             log.flush()
 
 
+def expand(text):
+    return re.sub(r'\$\{(\w+)\}', lambda m: os.environ.get(m.group(1), m.group(0)), text)
+
+
 threading.Thread(target=reader, daemon=True).start()
 pos = 0
 rc = 0
@@ -62,6 +71,8 @@ try:
         if not ln or ln.startswith('#'):
             continue
         cmd, _, arg = ln.partition(' ')
+        if cmd in ('send', 'expect', 'absent'):
+            arg = expand(arg)
         if cmd == 'send':
             print(f'>>> {arg}', flush=True)
             for ch in (arg + '\r').encode():
@@ -87,6 +98,22 @@ try:
                     time.sleep(0.05)
             print(f'### expect {pat.pattern}: {"OK" if found else "TIMEOUT"}', flush=True)
             if not found:
+                rc = 1
+                break
+        elif cmd == 'absent':
+            m = re.match(r'(.*?)(?:\s+(\d+))?$', arg)
+            pat, secs = re.compile(m.group(1)), float(m.group(2) or 3)
+            end = time.time() + secs
+            hit = None
+            while time.time() < end and hit is None:
+                with lock:
+                    while pos < len(buf) and hit is None:
+                        if pat.search(buf[pos]):
+                            hit = buf[pos]
+                        pos += 1
+                time.sleep(0.05)
+            print(f'### absent {pat.pattern}: {"OK" if hit is None else "FOUND " + hit}', flush=True)
+            if hit is not None:
                 rc = 1
                 break
         elif cmd == 'shell':

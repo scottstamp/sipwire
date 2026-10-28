@@ -4,6 +4,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "esp_app_desc.h"
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -16,6 +17,7 @@
 #include "freertos/task.h"
 #include "display.h"
 #include "net.h"
+#include "ota.h"
 #include "phone.h"
 #include "sdkconfig.h"
 #include "settings.h"
@@ -46,7 +48,8 @@ typedef struct {
 static struct {
     QueueHandle_t q;
     SemaphoreHandle_t mtx;
-    bool sntp_started;              /* event loop task only */
+    SemaphoreHandle_t time_mtx;     /* guards sntp_started and the applied TZ / NTP server */
+    bool sntp_started;
 
     /* ---- under mtx ---- */
     ui_bridge_local_t loc;
@@ -61,7 +64,18 @@ static struct {
     char dname[sizeof(((settings_t *)0)->sip_display_name)];
     bool cal_pending;
     ui_touch_cal_t cal;
+    bool time_pending;
+    char ntp[sizeof(((settings_t *)0)->ntp_server)];
+    char tz[sizeof(((settings_t *)0)->tz)];
+    bool clock_24h;
+    bool ota_pending;
+    char ota_url[sizeof(((settings_t *)0)->ota_url)];
 } b;
+
+/* What SNTP and the C library are using right now. The NTP buffer must stay valid
+ * for as long as SNTP runs: lwIP keeps the server name pointer. */
+static char s_ntp[sizeof(((settings_t *)0)->ntp_server)];
+static char s_tz[sizeof(((settings_t *)0)->tz)];
 
 static void kick(void)
 {
@@ -76,6 +90,7 @@ static void update_settings_locked(void)
     settings_get(&st);
     ui_bridge_fill_settings(&b.loc, st.wifi_ssid, st.wifi_pass, st.sip_server, st.sip_port, st.sip_user,
                             st.sip_password, st.sip_display_name);
+    ui_bridge_fill_time_ota(&b.loc, st.ntp_server, st.tz, st.clock_24h, st.ota_url);
     memset(st.wifi_pass, 0, sizeof(st.wifi_pass));
     memset(st.sip_password, 0, sizeof(st.sip_password));
 }
@@ -208,6 +223,37 @@ static void act_touch_cal_end(void *ctx, const ui_touch_cal_t *cal)
     kick();
 }
 
+/* Time settings and the update URL go through NVS and the network: the bridge task does them. */
+static void act_save_time(void *ctx, const char *ntp, const char *tz, bool clock_24h)
+{
+    (void)ctx;
+    if (!ntp || !ntp[0] || !tz || !tz[0] || !fits(ntp, sizeof(b.ntp)) || !fits(tz, sizeof(b.tz))) {
+        ESP_LOGW(TAG, "time settings empty or too long");
+        return;
+    }
+    xSemaphoreTake(b.mtx, portMAX_DELAY);
+    strlcpy(b.ntp, ntp, sizeof(b.ntp));
+    strlcpy(b.tz, tz, sizeof(b.tz));
+    b.clock_24h = clock_24h;
+    b.time_pending = true;
+    xSemaphoreGive(b.mtx);
+    kick();
+}
+
+static void act_ota_start(void *ctx, const char *url)
+{
+    (void)ctx;
+    if (!url || !url[0] || !fits(url, sizeof(b.ota_url))) {
+        ESP_LOGW(TAG, "update URL empty or too long");
+        return;
+    }
+    xSemaphoreTake(b.mtx, portMAX_DELAY);
+    strlcpy(b.ota_url, url, sizeof(b.ota_url));
+    b.ota_pending = true;
+    xSemaphoreGive(b.mtx);
+    kick();
+}
+
 static const ui_actions_t s_actions = {
     .dial = act_dial,
     .answer = act_answer,
@@ -221,18 +267,18 @@ static const ui_actions_t s_actions = {
     .save_account = act_save_account,
     .touch_cal_begin = act_touch_cal_begin,
     .touch_cal_end = act_touch_cal_end,
+    .save_time = act_save_time,
+    .ota_start = act_ota_start,
 };
 
 /* ------------------------------------------------------------------ */
 /* event handlers (default loop task): update state, kick the task    */
 /* ------------------------------------------------------------------ */
 
-static void start_sntp(void)
+/* Caller holds b.time_mtx. */
+static void sntp_init_locked(void)
 {
-    if (b.sntp_started) {
-        return;
-    }
-    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG(CONFIG_SIPWIRE_NTP_SERVER);
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG(s_ntp);
     cfg.wait_for_sync = false;
     esp_err_t err = esp_netif_sntp_init(&cfg);
     if (err != ESP_OK) {
@@ -240,6 +286,49 @@ static void start_sntp(void)
         return;
     }
     b.sntp_started = true;
+}
+
+static void start_sntp(void)
+{
+    xSemaphoreTake(b.time_mtx, portMAX_DELAY);
+    if (!b.sntp_started) {
+        sntp_init_locked();
+    }
+    xSemaphoreGive(b.time_mtx);
+}
+
+/* Make the C library and SNTP follow the stored TZ / NTP server, live: no reboot.
+ * The next refresh formats the clock in the new zone; SNTP re-queries the new server. */
+static void apply_time_cfg(const char *ntp, const char *tz)
+{
+    xSemaphoreTake(b.time_mtx, portMAX_DELAY);
+    if (strcmp(tz, s_tz) != 0) {
+        strlcpy(s_tz, tz, sizeof(s_tz));
+        setenv("TZ", s_tz, 1);
+        tzset();
+        ESP_LOGI(TAG, "time zone: %s", s_tz);
+    }
+    if (strcmp(ntp, s_ntp) != 0) {
+        if (b.sntp_started) {
+            esp_netif_sntp_deinit();
+            b.sntp_started = false;
+        }
+        strlcpy(s_ntp, ntp, sizeof(s_ntp));
+        ESP_LOGI(TAG, "ntp server: %s", s_ntp);
+        if (net_is_connected()) {
+            sntp_init_locked();
+        }
+    }
+    xSemaphoreGive(b.time_mtx);
+}
+
+static void apply_time_from_settings(void)
+{
+    static settings_t st;           /* default loop task (and init, before the handlers exist) */
+    settings_get(&st);
+    apply_time_cfg(st.ntp_server, st.tz);
+    memset(st.wifi_pass, 0, sizeof(st.wifi_pass));
+    memset(st.sip_password, 0, sizeof(st.sip_password));
 }
 
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -302,6 +391,9 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     if (base == SIPWIRE_NET_EVENT && id == NET_EVENT_GOT_IP) {
         start_sntp();
     }
+    if (base == SIPWIRE_SETTINGS_EVENT) {
+        apply_time_from_settings();
+    }
     kick();
 }
 
@@ -312,13 +404,16 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 static void do_saves(void)
 {
     static settings_t st;           /* bridge task only */
-    bool wifi, acc, cal;
+    static char ota_url[sizeof(b.ota_url)];
+    bool wifi, acc, cal, tm, ota;
 
     xSemaphoreTake(b.mtx, portMAX_DELAY);
     wifi = b.wifi_pending;
     acc = b.acc_pending;
     cal = b.cal_pending;
-    if (!wifi && !acc && !cal) {
+    tm = b.time_pending;
+    ota = b.ota_pending;
+    if (!wifi && !acc && !cal && !tm && !ota) {
         xSemaphoreGive(b.mtx);
         return;
     }
@@ -345,21 +440,39 @@ static void do_saves(void)
         st.touch_cal.y_min = b.cal.y_min;
         st.touch_cal.y_max = b.cal.y_max;
     }
+    if (tm) {
+        strlcpy(st.ntp_server, b.ntp, sizeof(st.ntp_server));
+        strlcpy(st.tz, b.tz, sizeof(st.tz));
+        st.clock_24h = b.clock_24h;
+    }
+    if (ota) {
+        strlcpy(ota_url, b.ota_url, sizeof(ota_url));
+        strlcpy(st.ota_url, ota_url, sizeof(st.ota_url));   /* remember what was installed from */
+    }
     b.wifi_pending = false;
     b.acc_pending = false;
     b.cal_pending = false;
+    b.time_pending = false;
+    b.ota_pending = false;
     memset(b.wpass, 0, sizeof(b.wpass));
     memset(b.apass, 0, sizeof(b.apass));
     xSemaphoreGive(b.mtx);
 
-    esp_err_t err = settings_set(&st);
+    esp_err_t err = settings_set(&st);   /* no-op when nothing changed */
     memset(st.wifi_pass, 0, sizeof(st.wifi_pass));
     memset(st.sip_password, 0, sizeof(st.sip_password));
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "saving settings: %s", esp_err_to_name(err));
-    } else {
-        ESP_LOGI(TAG, "settings saved from the UI (%s%s%s%s%s)", wifi ? "wifi" : "", wifi && acc ? ", " : "",
-                 acc ? "account" : "", (wifi || acc) && cal ? ", " : "", cal ? "touch calibration" : "");
+    } else if (wifi || acc || cal || tm) {
+        ESP_LOGI(TAG, "settings saved from the UI (%s%s%s%s%s%s%s)", wifi ? "wifi" : "",
+                 wifi && (acc || cal || tm) ? ", " : "", acc ? "account" : "",
+                 acc && (cal || tm) ? ", " : "", cal ? "touch calibration" : "", cal && tm ? ", " : "",
+                 tm ? "time" : "");
+    }
+    if (ota) {
+        /* Progress and refusals (e.g. a call is active) come back through ota_get_status(). */
+        err = ota_start(ota_url);
+        ESP_LOGI(TAG, "update requested from the UI: %s", esp_err_to_name(err));
     }
 }
 
@@ -381,6 +494,10 @@ static void refresh(void)
         loc.hour = tm.tm_hour;
         loc.minute = tm.tm_min;
     }
+
+    ota_status_t os;
+    ota_get_status(&os);
+    ui_bridge_fill_ota(&loc, &os);
 
     phone_get_status(&ph);
     ui_bridge_build_model(&loc, &ph, esp_timer_get_time(), &model);
@@ -429,13 +546,15 @@ esp_err_t ui_bridge_init(lv_display_t *disp)
     b.mtx = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(b.q && b.mtx, ESP_ERR_NO_MEM, TAG, "no memory");
 
-    setenv("TZ", CONFIG_SIPWIRE_TZ, 1);
-    tzset();
+    b.time_mtx = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(b.time_mtx != NULL, ESP_ERR_NO_MEM, TAG, "no memory");
+    apply_time_from_settings();     /* TZ now; SNTP starts at the first IP (or right below) */
 
     xSemaphoreTake(b.mtx, portMAX_DELAY);
     b.loc.net = net_is_connected() ? UI_NET_CONNECTED : UI_NET_OFF;
     strlcpy(b.loc.ip, net_ip_str(), sizeof(b.loc.ip));
     update_settings_locked();
+    ui_bridge_fill_fw(&b.loc, esp_app_get_description()->version, ota_running_partition());
     xSemaphoreGive(b.mtx);
 
     lvgl_port_lock(0);
@@ -444,6 +563,7 @@ esp_err_t ui_bridge_init(lv_display_t *disp)
 
     static const esp_event_base_t *const bases[] = {
         &SIPWIRE_NET_EVENT, &SIPWIRE_SIP_EVENT, &SIPWIRE_CALL_EVENT, &SIPWIRE_KEY_EVENT, &SIPWIRE_SETTINGS_EVENT,
+        &SIPWIRE_OTA_EVENT,
     };
     for (size_t i = 0; i < sizeof(bases) / sizeof(bases[0]); i++) {
         ESP_RETURN_ON_ERROR(esp_event_handler_register(*bases[i], ESP_EVENT_ANY_ID, on_event, NULL), TAG,

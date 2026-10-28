@@ -66,8 +66,10 @@ muted_call: (sim) => {
 `set_net(state, rssi)`, `set_reg(state)`, `set_battery(pct, charging)`,
 `incoming(number, name)`, `remote_hangup(code)`, `set_call(state, number,
 name, seconds)` (jump to a call state without the mock's timers),
-`key(char, action)` (0 press, 1 long, 2 repeat), `set_time('HH:MM')` and
-`model()`. Enum values follow `components/ui/include/ui_model.h`. Anything
+`key(char, action)` (0 press, 1 long, 2 repeat), `set_time('HH:MM')` (24 h local
+time; the mock formats it as 12 h "3:07 PM" or 24 h like the bridge does),
+`set_clock24(bool)`, `set_ota(state, percent, message)` (0 idle, 1 running, 2 done,
+3 failed; jump to an update state without the fake download) and `model()`. Enum values follow `components/ui/include/ui_model.h`. Anything
 else the screen needs (new model fields) should get a new `sim_*` function
 there, added to `SIM_EXPORTS` in `CMakeLists.txt` and wrapped in `shell.html`.
 
@@ -101,3 +103,6 @@ ticks); `hangup` -> ENDED -> 1.5 s -> IDLE; `answer` from RINGING_IN -> ACTIVE.
   SDL2 port version; see `upstream/emscripten/tools/ports/sdl2.py`).
 - Blank canvas in a headless/VM browser: WebGL is required (SDL's renderer);
   `screenshot.mjs` launches Chromium with SwiftShader for this.
+
+Settings > Update in the sim runs a fake download (about 15 s, 0 to 100 %, then
+"Rebooting in 3 s..." and back to idle) when "Check & install" is tapped.

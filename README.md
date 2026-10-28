@@ -16,6 +16,8 @@ components/display/  ILI9341 + XPT2046 + PWM backlight via esp_lcd / esp_lvgl_po
   idf_component.yml  managed deps: lvgl/lvgl ~9.6, espressif/esp_lvgl_port ^2.9,
                      espressif/esp_lcd_ili9341 ^2.1, atanisoft/esp_lcd_touch_xpt2046 ^1.0.6
                      (which pulls espressif/esp_lcd_touch)
+components/ota/      firmware update over HTTP(S) (`ota <url>`, Settings > Update), rollback safety;
+                     uses ESP-IDF's own esp_https_ota (no managed component added)
 sdkconfig.defaults   FreeRTOS + LVGL Kconfig defaults
 ```
 

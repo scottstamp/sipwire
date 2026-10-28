@@ -29,6 +29,17 @@ typedef enum {
     UI_CALL_ENDED,
 } ui_call_state_t;
 
+typedef enum {
+    UI_OTA_IDLE,
+    UI_OTA_RUNNING,            /* connecting / downloading / verifying */
+    UI_OTA_DONE,               /* installed, device reboots shortly */
+    UI_OTA_FAILED,             /* ota_message says why */
+} ui_ota_state_t;
+
+/* Longest preformatted clock text: "12:34 PM" (12 h, no leading zero) or "03:07"
+ * (24 h); "" until the clock is set. The home screen splits off the AM/PM at the space. */
+#define UI_TIME_STR_LEN 12
+
 typedef struct {
     ui_net_state_t net;
     int8_t rssi;               /* dBm, valid when net == UI_NET_CONNECTED */
@@ -48,7 +59,7 @@ typedef struct {
     uint8_t volume;            /* 0-100 current output (ring or call) */
     int8_t battery_pct;        /* -1 = no battery */
     bool charging;
-    char time_hhmm[6];         /* "" until SNTP sync */
+    char time_hhmm[UI_TIME_STR_LEN]; /* "3:07 PM" / "15:07" per clock_24h; "" until SNTP sync */
 
     /* Stored settings that prefill the Settings forms. No secrets: the
      * password fields only learn whether one is set. */
@@ -59,4 +70,17 @@ typedef struct {
     char sip_user[64];
     char sip_display_name[64];
     bool sip_pass_set;
+
+    /* Time settings (Settings > Time) */
+    char ntp_server[64];
+    char tz[64];               /* POSIX TZ string */
+    bool clock_24h;            /* false = 12-hour with AM/PM */
+
+    /* Firmware (Settings > Update) */
+    char fw_version[32];
+    char fw_partition[16];     /* running slot, e.g. "ota_0" */
+    char ota_url[192];         /* stored update URL (prefill) */
+    ui_ota_state_t ota_state;
+    uint8_t ota_percent;       /* 0-100 */
+    char ota_message[64];      /* status line, e.g. "Downloading 42%"; may be empty */
 } ui_model_t;

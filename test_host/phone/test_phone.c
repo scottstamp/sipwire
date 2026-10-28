@@ -250,17 +250,58 @@ static void test_call_seconds(void)
     TEST_ASSERT_EQUAL_UINT32(0, ui_bridge_call_seconds(CALL_ACTIVE, 6000000, 1000000));
 }
 
-static void test_hhmm(void)
+static void test_time_24h(void)
 {
-    char t[6];
-    ui_bridge_format_hhmm(true, 9, 5, t);
+    char t[UI_TIME_STR_LEN];
+    ui_bridge_format_time(true, 9, 5, true, t);
     TEST_ASSERT_EQUAL_STRING("09:05", t);
-    ui_bridge_format_hhmm(true, 23, 59, t);
+    ui_bridge_format_time(true, 23, 59, true, t);
     TEST_ASSERT_EQUAL_STRING("23:59", t);
-    ui_bridge_format_hhmm(false, 9, 5, t);
+    ui_bridge_format_time(true, 0, 5, true, t);
+    TEST_ASSERT_EQUAL_STRING("00:05", t);
+    ui_bridge_format_time(true, 12, 0, true, t);
+    TEST_ASSERT_EQUAL_STRING("12:00", t);
+    ui_bridge_format_time(false, 9, 5, true, t);
     TEST_ASSERT_EQUAL_STRING("", t);
-    ui_bridge_format_hhmm(true, 24, 0, t);
+    ui_bridge_format_time(true, 24, 0, true, t);
     TEST_ASSERT_EQUAL_STRING("", t);
+    ui_bridge_format_time(true, 3, 60, true, t);
+    TEST_ASSERT_EQUAL_STRING("", t);
+    ui_bridge_format_time(true, -1, 0, false, t);
+    TEST_ASSERT_EQUAL_STRING("", t);
+}
+
+static void test_time_12h(void)
+{
+    char t[UI_TIME_STR_LEN];
+    ui_bridge_format_time(true, 0, 5, false, t);        /* midnight hour is 12 AM */
+    TEST_ASSERT_EQUAL_STRING("12:05 AM", t);
+    ui_bridge_format_time(true, 0, 0, false, t);
+    TEST_ASSERT_EQUAL_STRING("12:00 AM", t);
+    ui_bridge_format_time(true, 12, 0, false, t);       /* noon is 12 PM */
+    TEST_ASSERT_EQUAL_STRING("12:00 PM", t);
+    ui_bridge_format_time(true, 12, 59, false, t);
+    TEST_ASSERT_EQUAL_STRING("12:59 PM", t);
+    ui_bridge_format_time(true, 1, 0, false, t);
+    TEST_ASSERT_EQUAL_STRING("1:00 AM", t);
+    ui_bridge_format_time(true, 9, 5, false, t);
+    TEST_ASSERT_EQUAL_STRING("9:05 AM", t);
+    ui_bridge_format_time(true, 11, 59, false, t);
+    TEST_ASSERT_EQUAL_STRING("11:59 AM", t);
+    ui_bridge_format_time(true, 13, 0, false, t);
+    TEST_ASSERT_EQUAL_STRING("1:00 PM", t);
+    ui_bridge_format_time(true, 15, 7, false, t);
+    TEST_ASSERT_EQUAL_STRING("3:07 PM", t);
+    ui_bridge_format_time(true, 23, 59, false, t);
+    TEST_ASSERT_EQUAL_STRING("11:59 PM", t);
+    ui_bridge_format_time(false, 15, 7, false, t);
+    TEST_ASSERT_EQUAL_STRING("", t);
+    ui_bridge_format_time(true, 24, 0, false, t);
+    TEST_ASSERT_EQUAL_STRING("", t);
+    /* the longest string fits the model field with its NUL */
+    ui_bridge_format_time(true, 10, 59, false, t);
+    TEST_ASSERT_EQUAL_STRING("10:59 AM", t);
+    TEST_ASSERT_TRUE(strlen(t) < UI_TIME_STR_LEN);
 }
 
 static void test_state_maps(void)
@@ -317,7 +358,11 @@ static void test_build_model(void)
     TEST_ASSERT_FALSE(m.speaker);
     TEST_ASSERT_EQUAL(55, m.volume);
     TEST_ASSERT_EQUAL(-1, m.battery_pct);
+    TEST_ASSERT_EQUAL_STRING("7:03 AM", m.time_hhmm);   /* 12 h is the default */
+    loc.clock_24h = true;
+    ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
     TEST_ASSERT_EQUAL_STRING("07:03", m.time_hhmm);
+    loc.clock_24h = false;
     TEST_ASSERT_EQUAL_STRING("homenet", m.wifi_ssid);
     TEST_ASSERT_TRUE(m.wifi_pass_set);
     TEST_ASSERT_EQUAL_STRING("pbx.lan", m.sip_server);
@@ -371,6 +416,49 @@ static void test_fill_settings(void)
     TEST_ASSERT_EQUAL_STRING("", loc.sip_server);
     TEST_ASSERT_EQUAL_UINT16(0, loc.sip_port);
     TEST_ASSERT_EQUAL_STRING("", loc.account);
+}
+
+static void test_fill_time_ota(void)
+{
+    ui_bridge_local_t loc;
+    memset(&loc, 0, sizeof(loc));
+    ui_bridge_fill_time_ota(&loc, "ntp.lan", "CET-1CEST,M3.5.0,M10.5.0/3", true, "http://10.0.0.5:8090/ota.bin");
+    ui_bridge_fill_fw(&loc, "v1.2-3-gabc", "ota_1");
+    ota_status_t os = { .state = OTA_STATE_RUNNING, .percent = 42, .bytes = 1234 };
+    strcpy(os.message, "Downloading 42%");
+    ui_bridge_fill_ota(&loc, &os);
+
+    phone_status_t ph;
+    memset(&ph, 0, sizeof(ph));
+    ui_model_t m;
+    ui_bridge_build_model(&loc, &ph, 0, &m);
+    TEST_ASSERT_EQUAL_STRING("ntp.lan", m.ntp_server);
+    TEST_ASSERT_EQUAL_STRING("CET-1CEST,M3.5.0,M10.5.0/3", m.tz);
+    TEST_ASSERT_TRUE(m.clock_24h);
+    TEST_ASSERT_EQUAL_STRING("http://10.0.0.5:8090/ota.bin", m.ota_url);
+    TEST_ASSERT_EQUAL_STRING("v1.2-3-gabc", m.fw_version);
+    TEST_ASSERT_EQUAL_STRING("ota_1", m.fw_partition);
+    TEST_ASSERT_EQUAL(UI_OTA_RUNNING, m.ota_state);
+    TEST_ASSERT_EQUAL_UINT8(42, m.ota_percent);
+    TEST_ASSERT_EQUAL_STRING("Downloading 42%", m.ota_message);
+
+    /* states map one to one; out-of-range percent is clamped */
+    TEST_ASSERT_EQUAL(UI_OTA_IDLE, ui_bridge_map_ota(OTA_STATE_IDLE));
+    TEST_ASSERT_EQUAL(UI_OTA_DONE, ui_bridge_map_ota(OTA_STATE_DONE));
+    TEST_ASSERT_EQUAL(UI_OTA_FAILED, ui_bridge_map_ota(OTA_STATE_FAILED));
+    os.state = OTA_STATE_DONE;
+    os.percent = 250;
+    ui_bridge_fill_ota(&loc, &os);
+    TEST_ASSERT_EQUAL_UINT8(100, loc.ota_percent);
+
+    /* NULL -> empty */
+    ui_bridge_fill_time_ota(&loc, NULL, NULL, false, NULL);
+    ui_bridge_fill_fw(&loc, NULL, NULL);
+    TEST_ASSERT_EQUAL_STRING("", loc.ntp_server);
+    TEST_ASSERT_EQUAL_STRING("", loc.tz);
+    TEST_ASSERT_FALSE(loc.clock_24h);
+    TEST_ASSERT_EQUAL_STRING("", loc.ota_url);
+    TEST_ASSERT_EQUAL_STRING("", loc.fw_version);
 }
 
 static void test_build_model_is_deterministic(void)
@@ -440,7 +528,9 @@ int main(void)
     RUN_TEST(test_codec_pref_parse);
     RUN_TEST(test_account_format);
     RUN_TEST(test_call_seconds);
-    RUN_TEST(test_hhmm);
+    RUN_TEST(test_time_24h);
+    RUN_TEST(test_time_12h);
+    RUN_TEST(test_fill_time_ota);
     RUN_TEST(test_state_maps);
     RUN_TEST(test_build_model);
     RUN_TEST(test_fill_settings);

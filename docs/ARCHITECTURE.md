@@ -15,6 +15,7 @@ components/
   cli/               serial REPL (esp_console): cfg/wifi/ip/free/tasks; console_register_command()
   net/               wifi manager, reconnect, SNTP, mDNS (optional)
   storage/           NVS config (settings), SD card: contacts, call log, ringtones
+  ota/               firmware update (esp_https_ota, http or https), rollback health watch
   phone/             call state machine, ties sip+rtp+audio; emits UI events
   ui/                LVGL screens: home, dialer, incoming, in-call, settings, contacts
                      (pure LVGL, no IDF deps — also built for the web simulator)
@@ -38,7 +39,15 @@ sim/web/             Emscripten build of components/ui + mock model → browser
   model and handles actions; in `sim/web` an HTML panel does. UI code must
   compile for both without `#ifdef`.
 - The model carries the non-secret settings that prefill the Settings forms
-  (passwords only as "is set"; an empty password on save keeps the stored one).
+  (passwords only as "is set"; an empty password on save keeps the stored one),
+  plus the time settings (`ntp_server`, `tz`, `clock_24h`), the firmware
+  (`fw_version`, `fw_partition`, `ota_url`) and the update progress
+  (`ota_state`, `ota_percent`, `ota_message`). `time_hhmm` is preformatted by
+  the bridge (`ui_bridge_format_time`): "3:07 PM" or "15:07"; the home screen
+  splits the AM/PM off at the space and draws it smaller.
+- Settings actions: `save_time(ntp, tz_posix, clock_24h)` and `ota_start(url)`.
+  The bridge task persists (NVS) and calls `ota_start()`; the UI only sees
+  the model change.
 - Touch calibration: `ui_actions_t.touch_cal_begin/end` + `ui_touch_raw()`. The
   bridge installs `display_touch_raw_hook()` (raw samples to the UI, none to LVGL)
   between begin and end and stores the result in `settings.touch_cal`.
@@ -65,8 +74,32 @@ three are 64 kbit/s with an 8000 Hz RTP clock (RFC 3551, G.722 included).
 
 ## Config (NVS)
 wifi ssid/pass, sip server/port/transport, user, auth user, password,
-display name, codec prefs, ring volume, call volume, touch calibration.
+display name, codec prefs, ring volume, call volume, touch calibration,
+`ntp_server` (default CONFIG_SIPWIRE_NTP_SERVER), `tz` (POSIX TZ, default
+CONFIG_SIPWIRE_TZ), `clock_24h` (default false = 12 h), `ota_url` (default
+CONFIG_SIPWIRE_OTA_URL).
 Set via UI settings, serial console (`sipwire>` REPL), or `config.json` on SD.
+
+## OTA update (`components/ota`)
+`ota_start(url)` (console `ota [url]`, Settings > Update) downloads with
+`esp_https_ota` into the inactive slot (`partitions.csv`: ota_0 / ota_1, 3 MB
+each) in its own task. Plain http is allowed (`CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP`,
+LAN update server; https uses the mbedtls cert bundle). Refused while a call is
+not idle or another update runs. After the first block and before anything
+else is written: the image header must be for esp32s3 (esp_https_ota rejects
+other chips) and the app descriptor's `project_name` must be `sipwire`. Events
+on `SIPWIRE_OTA_EVENT`: STARTED, PROGRESS {percent, bytes}, DONE, FAILED
+{esp_err, reason}; DONE reboots after 3 s.
+
+Rollback: `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`. A freshly installed image boots
+PENDING_VERIFY. It is marked valid (`esp_ota_mark_app_valid_cancel_rollback`)
+as soon as the UI has started AND the network has an IP, or 60 s after boot,
+whichever comes first. A crash/reset before that makes the bootloader boot the
+previous slot again. `ota status` shows slot, version and app state.
+
+Version: `esp_app_get_description()->version` is `git describe --always --tags
+--dirty` at configure time (root `CMakeLists.txt`; override with
+`-DPROJECT_VER=...` or `version.txt`; "0.0-nogit" without a repository).
 
 ## UI simulator
 `sim/web`: Emscripten + SDL2 backend of LVGL 9 renders `components/ui` to a

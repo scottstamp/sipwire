@@ -1,5 +1,5 @@
-/* Settings: list -> Wi-Fi / SIP account forms (on-screen keyboard) / About /
- * touch calibration screen. The forms are prefilled from the model when opened
+/* Settings: scrolling list -> Wi-Fi / SIP account / Time / Update forms
+ * (on-screen keyboard) / About / touch calibration screen. The forms are prefilled from the model when opened
  * (passwords are never in the model: an empty field keeps the stored one).
  * All pages live in one screen and are switched by hiding; the keyboard is
  * shared and only shown while a field is being edited. */
@@ -15,8 +15,40 @@
 #define KB_H 168
 #define FIELD_H 44
 #define DEFAULT_SIP_PORT 5060
+#define OTA_URL_MAX_CHARS 191       /* ota.h OTA_URL_MAX - 1 */
 
-typedef enum { PG_LIST, PG_WIFI, PG_ACCOUNT, PG_ABOUT, PG_COUNT } page_t;
+typedef enum { PG_LIST, PG_WIFI, PG_ACCOUNT, PG_TIME, PG_UPDATE, PG_ABOUT, PG_COUNT } page_t;
+
+/* Time zones offered in Settings > Time: friendly name -> POSIX TZ string. The last
+ * entry, "Custom", shows a text field for a raw POSIX TZ string instead. */
+#define ZONES(X)                                           \
+    X("UTC", "UTC0")                                        \
+    X("US Eastern", "EST5EDT,M3.2.0,M11.1.0")               \
+    X("US Central", "CST6CDT,M3.2.0,M11.1.0")               \
+    X("US Mountain", "MST7MDT,M3.2.0,M11.1.0")              \
+    X("US Pacific", "PST8PDT,M3.2.0,M11.1.0")               \
+    X("US Alaska", "AKST9AKDT,M3.2.0,M11.1.0")              \
+    X("Hawaii", "HST10")                                    \
+    X("UK", "GMT0BST,M3.5.0/1,M10.5.0")                     \
+    X("Central Europe", "CET-1CEST,M3.5.0,M10.5.0/3")       \
+    X("Eastern Europe", "EET-2EEST,M3.5.0/3,M10.5.0/4")     \
+    X("India", "IST-5:30")                                  \
+    X("China", "CST-8")                                     \
+    X("Japan", "JST-9")                                     \
+    X("Australia East", "AEST-10AEDT,M10.1.0,M4.1.0/3")     \
+    X("New Zealand", "NZST-12NZDT,M9.5.0,M4.1.0/3")
+
+typedef struct {
+    const char *name;
+    const char *posix;          /* NULL = Custom */
+} zone_t;
+
+#define ZONE_ENTRY(n, p) {n, p},
+#define ZONE_NAME(n, p) n "\n"
+static const zone_t ZONE[] = {ZONES(ZONE_ENTRY){"Custom", NULL}};
+static const char ZONE_OPTIONS[] = ZONES(ZONE_NAME) "Custom";
+#define ZONE_COUNT ((uint32_t)(sizeof(ZONE) / sizeof(ZONE[0])))
+#define ZONE_CUSTOM (ZONE_COUNT - 1)
 
 typedef struct {
     lv_obj_t *title;
@@ -27,13 +59,16 @@ typedef struct {
 
     lv_obj_t *ssid, *wpass;
     lv_obj_t *server, *port, *user, *apass, *dname;
+    lv_obj_t *ntp, *tz_dd, *tz_custom, *h24;
+    uint32_t tz_prev;               /* dropdown index before the last change */
+    lv_obj_t *fw, *ota_url, *ota_btn, *ota_bar, *ota_msg;
 
-    lv_obj_t *about_ip, *about_acc, *about_reg, *about_wifi;
+    lv_obj_t *about_ip, *about_acc, *about_reg, *about_wifi, *about_fw;
 } settings_t;
 
 static settings_t *s_s;
 
-static const char *const TITLES[PG_COUNT] = {"Settings", "Wi-Fi", "Account", "About"};
+static const char *const TITLES[PG_COUNT] = {"Settings", "Wi-Fi", "Account", "Time", "Update", "About"};
 
 static void on_delete(lv_event_t *e)
 {
@@ -48,14 +83,14 @@ static void on_delete(lv_event_t *e)
 
 static bool is_form(page_t p)
 {
-    return p == PG_WIFI || p == PG_ACCOUNT;
+    return p == PG_WIFI || p == PG_ACCOUNT || p == PG_TIME || p == PG_UPDATE;
 }
 
 static void kb_hide(settings_t *s)
 {
     lv_keyboard_set_textarea(s->kb, NULL);
     lv_obj_set_hidden(s->kb, true);
-    for (page_t p = PG_WIFI; p <= PG_ACCOUNT; p++) {
+    for (page_t p = PG_WIFI; p <= PG_UPDATE; p++) {
         lv_obj_set_height(s->page[p], BODY_H);
     }
 }
@@ -103,10 +138,58 @@ static void set_pass_placeholder(lv_obj_t *ta, bool is_set, const char *required
                                 LV_PART_TEXTAREA_PLACEHOLDER);
 }
 
+/* Show or hide a field made by field_create (caption + row). */
+static void field_set_hidden(lv_obj_t *ta, bool hidden)
+{
+    lv_obj_t *row = lv_obj_get_parent(ta);
+    lv_obj_t *cap = lv_obj_get_child(lv_obj_get_parent(row), (int32_t)lv_obj_get_index(row) - 1);
+    lv_obj_set_hidden(row, hidden);
+    lv_obj_set_hidden(cap, hidden);
+}
+
+static void tz_select(settings_t *s, uint32_t idx)
+{
+    lv_dropdown_set_selected(s->tz_dd, idx);
+    s->tz_prev = idx;
+    field_set_hidden(s->tz_custom, idx != ZONE_CUSTOM);
+}
+
+static void prefill_time(settings_t *s, const ui_model_t *m)
+{
+    uint32_t idx = ZONE_CUSTOM;
+    for (uint32_t i = 0; i < ZONE_CUSTOM; i++) {
+        if (strcmp(m->tz, ZONE[i].posix) == 0) {
+            idx = i;
+            break;
+        }
+    }
+    lv_textarea_set_text(s->ntp, m->ntp_server);
+    lv_textarea_set_text(s->tz_custom, m->tz);
+    lv_obj_update_layout(s->tz_custom);
+    lv_textarea_set_cursor_pos(s->tz_custom, 0);
+    lv_obj_scroll_to_x(s->tz_custom, 0, LV_ANIM_OFF);
+    tz_select(s, idx);
+    if (m->clock_24h) {
+        lv_obj_add_state(s->h24, LV_STATE_CHECKED);
+    } else {
+        lv_obj_remove_state(s->h24, LV_STATE_CHECKED);
+    }
+}
+
+static void update_ota(settings_t *s, const ui_model_t *m);
+
 static void prefill(settings_t *s, page_t p)
 {
     const ui_model_t *m = ui_model();
-    if (p == PG_WIFI) {
+    if (p == PG_TIME) {
+        prefill_time(s, m);
+    } else if (p == PG_UPDATE) {
+        lv_textarea_set_text(s->ota_url, m->ota_url);
+        lv_obj_update_layout(s->ota_url);
+        lv_textarea_set_cursor_pos(s->ota_url, 0);   /* show the start of the URL, not its end */
+        lv_obj_scroll_to_x(s->ota_url, 0, LV_ANIM_OFF);
+        update_ota(s, m);
+    } else if (p == PG_WIFI) {
         lv_textarea_set_text(s->ssid, m->wifi_ssid);
         lv_textarea_set_text(s->wpass, "");
         set_pass_placeholder(s->wpass, m->wifi_pass_set, "required");
@@ -138,7 +221,7 @@ static void show_page(settings_t *s, page_t p)
     lv_label_set_text(s->title, TITLES[p]);
     if (is_form(p)) {
         prefill(s, p);
-        lv_obj_set_hidden(s->save, false);
+        lv_obj_set_hidden(s->save, p == PG_UPDATE);   /* Update has its own button */
         lv_obj_scroll_to_y(s->page[p], 0, LV_ANIM_OFF);
     } else {
         lv_obj_set_hidden(s->save, true);
@@ -163,7 +246,7 @@ static void on_row(lv_event_t *e)
         return;
     }
     show_page(s, p);
-    if (p == PG_ABOUT) {
+    if (p == PG_ABOUT || p == PG_UPDATE) {
         ui_ops_settings.update(ui_model());
     }
 }
@@ -174,12 +257,11 @@ static void on_calibrate(lv_event_t *e)
     ui_goto(UI_SCR_CALIBRATE, NULL);
 }
 
-#define ROW_H 54
-#define ROW_PITCH 60
+#define ROW_H 48
 
-static void list_row(lv_obj_t *page, int row, page_t target, const char *icon, const char *text)
+static void list_row(lv_obj_t *page, page_t target, const char *icon, const char *text)
 {
-    lv_obj_t *b = ui_btn_create(page, UI_BTN_NEUTRAL, NULL, 6, 6 + row * ROW_PITCH, 228, ROW_H);
+    lv_obj_t *b = ui_btn_create(page, UI_BTN_NEUTRAL, NULL, 0, 0, 228, ROW_H);
     if (target == PG_COUNT) { /* not a page: the calibration screen */
         lv_obj_add_event_cb(b, on_calibrate, LV_EVENT_CLICKED, NULL);
     } else {
@@ -187,10 +269,7 @@ static void list_row(lv_obj_t *page, int row, page_t target, const char *icon, c
     }
     lv_obj_t *ic = ui_label_create(b, &lv_font_montserrat_24, UI_COL_BLUE, icon);
     lv_obj_align(ic, LV_ALIGN_LEFT_MID, 12, 0);
-    /* 24 pt, or 14 pt when the text would not fit between icon and chevron */
-    bool small = strlen(text) > 11;
-    lv_obj_t *t = ui_label_create(b, small ? &lv_font_montserrat_14 : &lv_font_montserrat_24,
-                                  UI_COL_TEXT, text);
+    lv_obj_t *t = ui_label_create(b, &lv_font_montserrat_24, UI_COL_TEXT, text);
     lv_obj_align(t, LV_ALIGN_LEFT_MID, 48, 0);
     lv_obj_t *ch = ui_label_create(b, &lv_font_montserrat_24, UI_COL_DIM, LV_SYMBOL_RIGHT);
     lv_obj_align(ch, LV_ALIGN_RIGHT_MID, -10, 0);
@@ -223,6 +302,7 @@ static lv_obj_t *field_create(settings_t *s, lv_obj_t *form, const char *caption
     lv_textarea_set_placeholder_text(ta, placeholder);
     lv_textarea_set_max_length(ta, max_len);
     lv_obj_set_scroll_on_focus(ta, false);
+    lv_obj_set_scrollbar_mode(ta, LV_SCROLLBAR_MODE_OFF);   /* no scroll indicator under long text */
     lv_obj_add_event_cb(ta, field_clicked, LV_EVENT_CLICKED, s);
     if (password) {
         lv_textarea_set_password_mode(ta, true);
@@ -241,6 +321,100 @@ static lv_obj_t *about_row(lv_obj_t *page, const char *caption, int32_t y)
     lv_obj_t *val = ui_fit_create(page, 12, y + 18, 216, 30, UI_COL_TEXT);
     lv_obj_set_style_text_align(lv_obj_get_child(val, 0), LV_TEXT_ALIGN_LEFT, 0);
     return val;
+}
+
+static void style_dropdown(lv_obj_t *dd)
+{
+    lv_obj_set_style_bg_color(dd, UI_COL_SURFACE, 0);
+    lv_obj_set_style_bg_opa(dd, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(dd, UI_COL_SURFACE2, 0);
+    lv_obj_set_style_border_width(dd, 2, 0);
+    lv_obj_set_style_radius(dd, 8, 0);
+    lv_obj_set_style_text_color(dd, UI_COL_TEXT, 0);
+    lv_obj_set_style_text_font(dd, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_pad_hor(dd, 8, 0);
+    lv_obj_set_style_pad_ver(dd, 6, 0);
+    lv_obj_set_style_shadow_width(dd, 0, 0);
+    lv_obj_set_style_border_color(dd, UI_COL_BLUE, LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_width(dd, 0, LV_STATE_FOCUS_KEY);
+
+    /* The popup list lives on the screen, not inside the dropdown: style it separately.
+     * Line space makes every option a 44 px touch target. */
+    lv_obj_t *list = lv_dropdown_get_list(dd);
+    lv_obj_set_style_bg_color(list, UI_COL_SURFACE, 0);
+    lv_obj_set_style_bg_opa(list, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(list, UI_COL_BLUE, 0);
+    lv_obj_set_style_border_width(list, 2, 0);
+    lv_obj_set_style_radius(list, 8, 0);
+    lv_obj_set_style_pad_hor(list, 8, 0);
+    lv_obj_set_style_text_color(list, UI_COL_TEXT, 0);
+    lv_obj_set_style_text_font(list, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_line_space(list, 16, 0);
+    lv_obj_set_style_shadow_width(list, 0, 0);
+    lv_obj_set_style_bg_color(list, UI_COL_BLUE, LV_PART_SELECTED | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(list, UI_COL_SURFACE2, LV_PART_SELECTED | LV_STATE_PRESSED);
+    lv_obj_set_style_text_color(list, UI_COL_TEXT, LV_PART_SELECTED | LV_STATE_CHECKED);
+}
+
+static void tz_pressed(lv_event_t *e)
+{
+    kb_hide(lv_event_get_user_data(e));
+}
+
+static void tz_changed(lv_event_t *e)
+{
+    settings_t *s = lv_event_get_user_data(e);
+    uint32_t idx = lv_dropdown_get_selected(s->tz_dd);
+    if (idx == ZONE_CUSTOM && s->tz_prev != ZONE_CUSTOM && !lv_textarea_get_text(s->tz_custom)[0]) {
+        lv_textarea_set_text(s->tz_custom, ZONE[s->tz_prev].posix);   /* start editing from it */
+    }
+    s->tz_prev = idx;
+    field_set_hidden(s->tz_custom, idx != ZONE_CUSTOM);
+}
+
+static void on_ota_install(lv_event_t *e)
+{
+    settings_t *s = lv_event_get_user_data(e);
+    const char *url = lv_textarea_get_text(s->ota_url);
+    if (!url[0]) {
+        ui_toast("Enter the firmware URL");
+        return;
+    }
+    kb_hide(s);
+    ui_act_ota_start(url);
+}
+
+/* Update page widgets from the model: version line, button enable, bar, status text. */
+static void update_ota(settings_t *s, const ui_model_t *m)
+{
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%s - %s", m->fw_version[0] ? m->fw_version : "?",
+             m->fw_partition[0] ? m->fw_partition : "?");
+    ui_fit_set(s->fw, buf, &lv_font_montserrat_24, false);
+
+    bool busy = m->ota_state == UI_OTA_RUNNING || m->ota_state == UI_OTA_DONE;
+    bool in_call = m->call != UI_CALL_IDLE;
+    if (busy || in_call) {
+        lv_obj_add_state(s->ota_btn, LV_STATE_DISABLED);
+    } else {
+        lv_obj_remove_state(s->ota_btn, LV_STATE_DISABLED);
+    }
+    lv_obj_set_hidden(s->ota_bar, !busy);
+    lv_bar_set_value(s->ota_bar, m->ota_percent, LV_ANIM_OFF);
+
+    const char *msg = m->ota_message;
+    lv_color_t col = UI_COL_DIM;
+    if (m->ota_state == UI_OTA_FAILED) {
+        col = UI_COL_BAD;
+    } else if (m->ota_state == UI_OTA_DONE) {
+        col = UI_COL_OK;
+    } else if (busy) {
+        col = UI_COL_TEXT;
+    } else if (in_call) {
+        msg = "Not available during a call";
+    }
+    lv_label_set_text(s->ota_msg, msg);
+    lv_obj_set_style_text_color(s->ota_msg, col, 0);
 }
 
 static void settings_toast_back(settings_t *s, const char *msg)
@@ -276,6 +450,20 @@ static void on_save(lv_event_t *e)
         ui_act_save_account(server, (uint16_t)port, user, lv_textarea_get_text(s->apass),
                             lv_textarea_get_text(s->dname));
         settings_toast_back(s, "Account saved");
+    } else if (s->cur == PG_TIME) {
+        const char *ntp = lv_textarea_get_text(s->ntp);
+        uint32_t idx = lv_dropdown_get_selected(s->tz_dd);
+        const char *tz = idx == ZONE_CUSTOM ? lv_textarea_get_text(s->tz_custom) : ZONE[idx].posix;
+        if (!ntp[0]) {
+            ui_toast("Enter an NTP server");
+            return;
+        }
+        if (!tz[0]) {
+            ui_toast("Enter a TZ string");
+            return;
+        }
+        ui_act_save_time(ntp, tz, lv_obj_has_state(s->h24, LV_STATE_CHECKED));
+        settings_toast_back(s, "Time saved");
     }
 }
 
@@ -290,11 +478,15 @@ static lv_obj_t *settings_create(const char *arg)
     lv_obj_add_event_cb(scr, on_delete, LV_EVENT_DELETE, s);
 
     /* pages first so the header/status bar sit above scrolled content */
-    s->page[PG_LIST] = ui_box_create(scr, 0, BODY_Y, UI_W, BODY_H);
-    list_row(s->page[PG_LIST], 0, PG_WIFI, LV_SYMBOL_WIFI, "Wi-Fi");
-    list_row(s->page[PG_LIST], 1, PG_ACCOUNT, LV_SYMBOL_CALL, "SIP account");
-    list_row(s->page[PG_LIST], 2, PG_COUNT, LV_SYMBOL_EDIT, "Calibrate");
-    list_row(s->page[PG_LIST], 3, PG_ABOUT, LV_SYMBOL_LIST, "About");
+    lv_obj_t *list = form_create(s, scr);
+    s->page[PG_LIST] = list;
+    lv_obj_set_style_pad_row(list, 6, 0);
+    list_row(list, PG_WIFI, LV_SYMBOL_WIFI, "Wi-Fi");
+    list_row(list, PG_ACCOUNT, LV_SYMBOL_CALL, "SIP account");
+    list_row(list, PG_COUNT, LV_SYMBOL_EDIT, "Calibrate");
+    list_row(list, PG_TIME, LV_SYMBOL_BELL, "Time");
+    list_row(list, PG_UPDATE, LV_SYMBOL_DOWNLOAD, "Update");
+    list_row(list, PG_ABOUT, LV_SYMBOL_LIST, "About");
 
     s->page[PG_WIFI] = form_create(s, scr);
     s->ssid = field_create(s, s->page[PG_WIFI], "Network name (SSID)", "SSID", 32, false);
@@ -308,17 +500,66 @@ static lv_obj_t *settings_create(const char *arg)
     s->apass = field_create(s, s->page[PG_ACCOUNT], "Password", "SIP password", 63, true);
     s->dname = field_create(s, s->page[PG_ACCOUNT], "Display name", "Optional", 63, false);
 
+    lv_obj_t *tf = form_create(s, scr);
+    s->page[PG_TIME] = tf;
+    s->ntp = field_create(s, tf, "NTP server", "pool.ntp.org", 63, false);
+    lv_obj_t *tzcap = ui_label_create(tf, &lv_font_montserrat_14, UI_COL_DIM, "Time zone");
+    lv_obj_set_style_pad_top(tzcap, 6, 0);
+    s->tz_dd = lv_dropdown_create(tf);
+    lv_dropdown_set_options_static(s->tz_dd, ZONE_OPTIONS);
+    lv_obj_set_size(s->tz_dd, 228, FIELD_H);
+    style_dropdown(s->tz_dd);
+    lv_obj_add_event_cb(s->tz_dd, tz_pressed, LV_EVENT_PRESSED, s);
+    lv_obj_add_event_cb(s->tz_dd, tz_changed, LV_EVENT_VALUE_CHANGED, s);
+    s->tz_custom = field_create(s, tf, "POSIX TZ string", "EST5EDT,M3.2.0,M11.1.0", 63, false);
+    lv_obj_t *hcap = ui_label_create(tf, &lv_font_montserrat_14, UI_COL_DIM, "Clock");
+    lv_obj_set_style_pad_top(hcap, 6, 0);
+    lv_obj_t *hrow = ui_box_create(tf, 0, 0, 228, FIELD_H);
+    ui_label_create(hrow, &lv_font_montserrat_24, UI_COL_TEXT, "24-hour");
+    lv_obj_align(lv_obj_get_child(hrow, 0), LV_ALIGN_LEFT_MID, 4, 0);
+    s->h24 = lv_switch_create(hrow);
+    lv_obj_set_size(s->h24, 64, 34);
+    lv_obj_align(s->h24, LV_ALIGN_RIGHT_MID, -4, 0);
+    lv_obj_set_style_bg_color(s->h24, UI_COL_SURFACE2, 0);
+    lv_obj_set_style_bg_color(s->h24, UI_COL_GREEN, LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(s->h24, UI_COL_TEXT, LV_PART_KNOB);
+    lv_obj_add_event_cb(s->h24, tz_pressed, LV_EVENT_PRESSED, s);
+
+    lv_obj_t *uf = form_create(s, scr);
+    s->page[PG_UPDATE] = uf;
+    lv_obj_t *fwcap = ui_label_create(uf, &lv_font_montserrat_14, UI_COL_DIM, "Firmware - running slot");
+    lv_obj_set_style_pad_top(fwcap, 4, 0);
+    s->fw = ui_fit_create(uf, 0, 0, 228, 30, UI_COL_TEXT);
+    lv_obj_set_style_text_align(lv_obj_get_child(s->fw, 0), LV_TEXT_ALIGN_LEFT, 0);
+    s->ota_url = field_create(s, uf, "Firmware URL", "http://host:8090/ota.bin", OTA_URL_MAX_CHARS, false);
+    s->ota_btn = ui_btn_create(uf, UI_BTN_BLUE, "Check & install", 0, 0, 228, FIELD_H + 4);
+    lv_obj_set_style_margin_top(s->ota_btn, 8, 0);
+    lv_obj_set_style_opa(s->ota_btn, LV_OPA_40, LV_STATE_DISABLED);
+    lv_obj_add_event_cb(s->ota_btn, on_ota_install, LV_EVENT_CLICKED, s);
+    s->ota_bar = lv_bar_create(uf);
+    lv_obj_set_size(s->ota_bar, 228, 14);
+    lv_obj_set_style_margin_top(s->ota_bar, 6, 0);
+    lv_obj_set_style_bg_color(s->ota_bar, UI_COL_SURFACE2, 0);
+    lv_obj_set_style_bg_opa(s->ota_bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s->ota_bar, 7, 0);
+    lv_obj_set_style_bg_color(s->ota_bar, UI_COL_GREEN, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(s->ota_bar, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(s->ota_bar, 7, LV_PART_INDICATOR);
+    lv_bar_set_range(s->ota_bar, 0, 100);
+    s->ota_msg = ui_label_create(uf, &lv_font_montserrat_14, UI_COL_DIM, "");
+    lv_obj_set_width(s->ota_msg, 228);
+    lv_obj_set_style_pad_top(s->ota_msg, 4, 0);
+
     lv_obj_t *about = ui_box_create(scr, 0, BODY_Y, UI_W, BODY_H);
     s->page[PG_ABOUT] = about;
-    s->about_ip = about_row(about, "IP address", 6);
-    s->about_wifi = about_row(about, "Wi-Fi", 56);
-    s->about_acc = about_row(about, "Account", 106);
-    s->about_reg = about_row(about, "Registration", 156);
-    char ver[40];
-    snprintf(ver, sizeof(ver), "sipwire  -  LVGL %d.%d.%d", LVGL_VERSION_MAJOR,
-             LVGL_VERSION_MINOR, LVGL_VERSION_PATCH);
-    lv_obj_t *vl = ui_label_create(about, &lv_font_montserrat_14, UI_COL_DIM, ver);
-    lv_obj_align(vl, LV_ALIGN_BOTTOM_MID, 0, -8);
+    s->about_ip = about_row(about, "IP address", 2);
+    s->about_wifi = about_row(about, "Wi-Fi", 50);
+    s->about_acc = about_row(about, "Account", 98);
+    s->about_reg = about_row(about, "Registration", 146);
+    char cap[40];
+    snprintf(cap, sizeof(cap), "Firmware (LVGL %d.%d.%d)", LVGL_VERSION_MAJOR, LVGL_VERSION_MINOR,
+             LVGL_VERSION_PATCH);
+    s->about_fw = about_row(about, cap, 194);
 
     /* header + status bar on top of the pages */
     lv_obj_t *back = ui_header_create(scr, TITLES[PG_LIST], UI_BAR_H, &s->title);
@@ -359,12 +600,19 @@ static lv_obj_t *settings_create(const char *arg)
 static void settings_update(const ui_model_t *m)
 {
     settings_t *s = s_s;
-    if (!s || s->cur != PG_ABOUT) {
+    if (!s) {
+        return;
+    }
+    if (s->cur == PG_UPDATE) {
+        update_ota(s, m);
+        return;
+    }
+    if (s->cur != PG_ABOUT) {
         return;
     }
     ui_fit_set(s->about_ip, m->ip[0] ? m->ip : "-", &lv_font_montserrat_24, false);
 
-    char buf[40];
+    char buf[64];
     if (m->net == UI_NET_CONNECTED) {
         snprintf(buf, sizeof(buf), "%d dBm", m->rssi);
     } else if (m->net == UI_NET_CONNECTING) {
@@ -389,6 +637,10 @@ static void settings_update(const ui_model_t *m)
         reg = "Offline";
     }
     ui_fit_set(s->about_reg, reg, &lv_font_montserrat_24, false);
+
+    snprintf(buf, sizeof(buf), "%s - %s", m->fw_version[0] ? m->fw_version : "?",
+             m->fw_partition[0] ? m->fw_partition : "?");
+    ui_fit_set(s->about_fw, buf, &lv_font_montserrat_24, false);
 }
 
 const ui_screen_ops_t ui_ops_settings = {settings_create, settings_update, NULL, NULL, NULL};

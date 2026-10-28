@@ -21,11 +21,14 @@
 #define T_DIAL_TO_RINGING_MS 1000
 #define T_RINGING_TO_ACTIVE_MS 2000
 #define T_ENDED_TO_IDLE_MS 1500
+#define T_OTA_STEP_MS 120
 
 static ui_model_t s_model;
 static ui_actions_t s_actions;
 static lv_timer_t *s_phase_timer;   /* one-shot call state transitions */
-static char s_json[1536];
+static char s_json[3072];
+static int s_hour = -1, s_minute;   /* mock clock (local time), hour < 0 = not set */
+static lv_timer_t *s_ota_timer;     /* fake update progress */
 static lv_indev_t *s_mouse;         /* disabled while the calibration screen is open */
 static bool s_cal_active;
 
@@ -56,8 +59,23 @@ static void sim_log(const char *fmt, ...)
 
 /* ---- model plumbing ------------------------------------------------------ */
 
+/* Same text as main/ui_bridge_model.c ui_bridge_format_time (that file is device glue). */
+static void format_clock(void)
+{
+    if (s_hour < 0) {
+        s_model.time_hhmm[0] = '\0';
+    } else if (s_model.clock_24h) {
+        snprintf(s_model.time_hhmm, sizeof(s_model.time_hhmm), "%02d:%02d", s_hour, s_minute);
+    } else {
+        int h = s_hour % 12 == 0 ? 12 : s_hour % 12;
+        snprintf(s_model.time_hhmm, sizeof(s_model.time_hhmm), "%d:%02d %s", h, s_minute,
+                 s_hour < 12 ? "AM" : "PM");
+    }
+}
+
 static void push_model(void)
 {
+    format_clock();
     ui_update(&s_model);
     js_model_changed();
 }
@@ -244,6 +262,59 @@ static void act_save_account(void *ctx, const char *server, uint16_t port,
     push_model();
 }
 
+static void act_save_time(void *ctx, const char *ntp, const char *tz, bool clock_24h)
+{
+    (void)ctx;
+    sim_log("action save_time(ntp=\"%s\", tz=\"%s\", clock_24h=%d)", ntp ? ntp : "", tz ? tz : "",
+            clock_24h);
+    snprintf(s_model.ntp_server, sizeof(s_model.ntp_server), "%s", ntp ? ntp : "");
+    snprintf(s_model.tz, sizeof(s_model.tz), "%s", tz ? tz : "");
+    s_model.clock_24h = clock_24h;
+    push_model();
+}
+
+/* Fake update: 0 -> 100 % in ~6 s, then "Rebooting", then back to idle (the real device reboots). */
+static void ota_step_cb(lv_timer_t *t)
+{
+    if (s_model.ota_state == UI_OTA_RUNNING) {
+        if (s_model.ota_percent < 100) {
+            s_model.ota_percent++;
+            snprintf(s_model.ota_message, sizeof(s_model.ota_message), "Downloading %u%%",
+                     (unsigned)s_model.ota_percent);
+        } else {
+            s_model.ota_state = UI_OTA_DONE;
+            snprintf(s_model.ota_message, sizeof(s_model.ota_message), "Rebooting in 3 s...");
+            lv_timer_set_period(t, 3000);
+        }
+    } else {
+        s_model.ota_state = UI_OTA_IDLE;
+        s_model.ota_percent = 0;
+        s_model.ota_message[0] = '\0';
+        lv_timer_delete(t);
+        s_ota_timer = NULL;
+    }
+    push_model();
+}
+
+static void act_ota_start(void *ctx, const char *url)
+{
+    (void)ctx;
+    sim_log("action ota_start(\"%s\")", url ? url : "");
+    if (s_model.ota_state == UI_OTA_RUNNING || s_model.ota_state == UI_OTA_DONE ||
+        s_model.call != UI_CALL_IDLE) {
+        return;
+    }
+    snprintf(s_model.ota_url, sizeof(s_model.ota_url), "%s", url ? url : "");
+    s_model.ota_state = UI_OTA_RUNNING;
+    s_model.ota_percent = 0;
+    snprintf(s_model.ota_message, sizeof(s_model.ota_message), "Connecting...");
+    if (s_ota_timer) {
+        lv_timer_delete(s_ota_timer);
+    }
+    s_ota_timer = lv_timer_create(ota_step_cb, T_OTA_STEP_MS, NULL);
+    push_model();
+}
+
 static void act_touch_cal_begin(void *ctx)
 {
     (void)ctx;
@@ -380,15 +451,44 @@ EMSCRIPTEN_KEEPALIVE void sim_touch_raw(int ax, int ay, int pressed)
     ui_touch_raw(ax, ay, pressed != 0);
 }
 
+/* "HH:MM" local 24 h time (what the side panel types); "" clears the clock. */
 EMSCRIPTEN_KEEPALIVE void sim_set_time(const char *hhmm)
 {
-    snprintf(s_model.time_hhmm, sizeof(s_model.time_hhmm), "%s",
-             hhmm ? hhmm : "");
+    int h, m;
+    if (hhmm && sscanf(hhmm, "%d:%d", &h, &m) == 2 && h >= 0 && h < 24 && m >= 0 && m < 60) {
+        s_hour = h;
+        s_minute = m;
+    } else {
+        s_hour = -1;
+    }
+    push_model();
+}
+
+EMSCRIPTEN_KEEPALIVE void sim_set_clock24(int on)
+{
+    s_model.clock_24h = on != 0;
+    push_model();
+}
+
+/* Jump to an update state without running the fake download (screenshots). */
+EMSCRIPTEN_KEEPALIVE void sim_set_ota(int state, int percent, const char *message)
+{
+    if (state < UI_OTA_IDLE || state > UI_OTA_FAILED) {
+        return;
+    }
+    if (s_ota_timer) {
+        lv_timer_delete(s_ota_timer);
+        s_ota_timer = NULL;
+    }
+    s_model.ota_state = (ui_ota_state_t)state;
+    s_model.ota_percent = (uint8_t)(percent < 0 ? 0 : percent > 100 ? 100 : percent);
+    snprintf(s_model.ota_message, sizeof(s_model.ota_message), "%s", message ? message : "");
     push_model();
 }
 
 static const char *const NET_NAMES[] = {"OFF", "CONNECTING", "CONNECTED"};
 static const char *const REG_NAMES[] = {"NONE", "REGISTERING", "REGISTERED", "FAILED"};
+static const char *const OTA_NAMES[] = {"IDLE", "RUNNING", "DONE", "FAILED"};
 static const char *const CALL_NAMES[] = {"IDLE",        "DIALING", "RINGING_OUT", "RINGING_IN",
                                          "ACTIVE",      "HELD",    "ENDED"};
 
@@ -444,8 +544,27 @@ EMSCRIPTEN_KEEPALIVE const char *sim_get_model_json(void)
     PUTS(m->sip_user);
     PUT(",\"sip_display_name\":");
     PUTS(m->sip_display_name);
-    PUT(",\"sip_pass_set\":%s,\"cal_active\":%s}", m->sip_pass_set ? "true" : "false",
+    PUT(",\"sip_pass_set\":%s,\"cal_active\":%s,\"ntp_server\":", m->sip_pass_set ? "true" : "false",
         s_cal_active ? "true" : "false");
+    PUTS(m->ntp_server);
+    PUT(",\"tz\":");
+    PUTS(m->tz);
+    PUT(",\"clock_24h\":%s,\"time_raw\":", m->clock_24h ? "true" : "false");
+    char raw[8] = "";
+    if (s_hour >= 0) {
+        snprintf(raw, sizeof(raw), "%02d:%02d", s_hour, s_minute);
+    }
+    PUTS(raw);
+    PUT(",\"fw_version\":");
+    PUTS(m->fw_version);
+    PUT(",\"fw_partition\":");
+    PUTS(m->fw_partition);
+    PUT(",\"ota_url\":");
+    PUTS(m->ota_url);
+    PUT(",\"ota_state\":\"%s\",\"ota_percent\":%u,\"ota_message\":", OTA_NAMES[m->ota_state],
+        (unsigned)m->ota_percent);
+    PUTS(m->ota_message);
+    PUT("}");
 #undef PUT
 #undef PUTS
     return s_json;
@@ -485,6 +604,11 @@ int main(void)
     snprintf(s_model.sip_user, sizeof(s_model.sip_user), "alice");
     snprintf(s_model.sip_display_name, sizeof(s_model.sip_display_name), "Alice");
     s_model.sip_pass_set = true;
+    snprintf(s_model.ntp_server, sizeof(s_model.ntp_server), "pool.ntp.org");
+    snprintf(s_model.tz, sizeof(s_model.tz), "UTC0");
+    snprintf(s_model.fw_version, sizeof(s_model.fw_version), "v0.4.0-12-gabc1234");
+    snprintf(s_model.fw_partition, sizeof(s_model.fw_partition), "ota_0");
+    snprintf(s_model.ota_url, sizeof(s_model.ota_url), "http://192.168.2.154:8090/ota.bin");
 
     s_actions = (ui_actions_t){
         .ctx = NULL,
@@ -500,6 +624,8 @@ int main(void)
         .save_account = act_save_account,
         .touch_cal_begin = act_touch_cal_begin,
         .touch_cal_end = act_touch_cal_end,
+        .save_time = act_save_time,
+        .ota_start = act_ota_start,
     };
 
     ui_init(disp, &s_actions);

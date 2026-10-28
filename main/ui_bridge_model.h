@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "ota.h"
 #include "phone.h"
 #include "ui_model.h"
 
@@ -26,7 +27,30 @@ typedef struct {
     bool sip_pass_set;
     bool time_valid;                /* clock set by SNTP */
     int hour, minute;               /* local time, valid if time_valid */
+    /* time settings, firmware */
+    char ntp_server[64];
+    char tz[64];
+    bool clock_24h;
+    char ota_url[192];
+    char fw_version[32];
+    char fw_partition[16];
+    ui_ota_state_t ota_state;
+    uint8_t ota_percent;
+    char ota_message[64];
 } ui_bridge_local_t;
+
+/** Fill the time/update settings of `loc` (Settings > Time and > Update prefill).
+ *  NULL strings count as empty. */
+void ui_bridge_fill_time_ota(ui_bridge_local_t *loc, const char *ntp_server, const char *tz,
+                             bool clock_24h, const char *ota_url);
+
+/** Firmware version and running partition label (set once at start). */
+void ui_bridge_fill_fw(ui_bridge_local_t *loc, const char *version, const char *partition);
+
+/** Current update progress from the ota component. */
+void ui_bridge_fill_ota(ui_bridge_local_t *loc, const ota_status_t *st);
+
+ui_ota_state_t ui_bridge_map_ota(ota_state_t st);
 
 /** Fill the settings-derived fields of `loc` (account string, form prefill).
  *  The passwords are only looked at for "is one set"; they are never copied.
@@ -45,8 +69,11 @@ void ui_bridge_format_account(char *out, size_t size, const char *display_name, 
 /** Whole seconds since the call was answered; 0 outside ACTIVE/HELD. */
 uint32_t ui_bridge_call_seconds(call_state_t st, int64_t start_us, int64_t now_us);
 
-/** "HH:MM", or "" if the clock is not valid. */
-void ui_bridge_format_hhmm(bool valid, int hour, int minute, char out[6]);
+/** Clock text for the status bar / home screen, or "" if the clock is not valid
+ *  (or hour/minute are out of range).
+ *  24 h: "HH:MM" ("03:07", "00:05"). 12 h: "H:MM AM|PM" without a leading zero
+ *  ("3:07 PM"); midnight hour is 12 AM ("12:05 AM"), noon hour is 12 PM ("12:00 PM"). */
+void ui_bridge_format_time(bool valid, int hour, int minute, bool clock_24h, char out[UI_TIME_STR_LEN]);
 
 void ui_bridge_build_model(const ui_bridge_local_t *loc, const phone_status_t *ph, int64_t now_us,
                            ui_model_t *out);

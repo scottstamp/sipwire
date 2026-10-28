@@ -7,6 +7,7 @@
 
 typedef struct {
     lv_obj_t *clock;
+    lv_obj_t *ampm;             /* "AM"/"PM" next to the big clock; hidden in 24 h mode */
     lv_obj_t *name;
     lv_obj_t *id;
     lv_obj_t *state;
@@ -47,10 +48,15 @@ static lv_obj_t *home_create(const char *arg)
     lv_obj_add_event_cb(scr, on_delete, LV_EVENT_DELETE, h);
     ui_statusbar_create(scr);
 
-    h->clock = ui_label_create(scr, &lv_font_montserrat_40, UI_COL_TEXT, "");
-    lv_obj_set_width(h->clock, UI_W);
-    lv_obj_set_style_text_align(h->clock, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(h->clock, LV_ALIGN_TOP_MID, 0, 44);
+    /* "3:07" in 40 pt with a 24 pt "PM" beside it, the pair centred as one. */
+    lv_obj_t *crow = ui_box_create(scr, 0, 44, UI_W, 48);
+    lv_obj_set_flex_flow(crow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(crow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(crow, 6, 0);
+    h->clock = ui_label_create(crow, &lv_font_montserrat_40, UI_COL_TEXT, "");
+    h->ampm = ui_label_create(crow, &lv_font_montserrat_24, UI_COL_DIM, "");
+    lv_obj_set_style_translate_y(h->ampm, -3, 0);
+    lv_obj_set_hidden(h->ampm, true);
 
     h->name = ui_fit_create(scr, 6, 108, 228, 34, UI_COL_TEXT);
     h->id = ui_fit_create(scr, 6, 142, 228, 20, UI_COL_DIM);
@@ -108,11 +114,19 @@ static void home_update(const ui_model_t *m)
     }
 
     if (m->time_hhmm[0]) {
-        lv_label_set_text(h->clock, m->time_hhmm);
+        /* "3:07 PM" -> "3:07" + "PM"; 24 h mode has no suffix */
+        const char *sp = strchr(m->time_hhmm, ' ');
+        char hm[UI_TIME_STR_LEN];
+        snprintf(hm, sizeof(hm), "%.*s", sp ? (int)(sp - m->time_hhmm) : (int)sizeof(hm) - 1,
+                 m->time_hhmm);
+        lv_label_set_text(h->clock, hm);
         lv_obj_set_style_text_color(h->clock, UI_COL_TEXT, 0);
+        lv_label_set_text(h->ampm, sp ? sp + 1 : "");
+        lv_obj_set_hidden(h->ampm, sp == NULL);
     } else {
         lv_label_set_text(h->clock, "sipwire");
         lv_obj_set_style_text_color(h->clock, UI_COL_DIM, 0);
+        lv_obj_set_hidden(h->ampm, true);
     }
 
     char name[64], id[64];

@@ -30,6 +30,12 @@ typedef struct {
     /* display */
     uint8_t backlight;         /* 0-100 */
     uint16_t backlight_timeout_s;
+    /* clock / time */
+    char ntp_server[64];       /* default CONFIG_SIPWIRE_NTP_SERVER; never empty */
+    char tz[64];               /* POSIX TZ string, default CONFIG_SIPWIRE_TZ; never empty */
+    bool clock_24h;            /* false (default) = 12-hour display with AM/PM */
+    /* firmware update */
+    char ota_url[192];         /* default CONFIG_SIPWIRE_OTA_URL; "" = none */
     /* touch calibration (raw XPT2046 → screen). valid=false → uncalibrated */
     struct {
         bool valid;

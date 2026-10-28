@@ -43,3 +43,14 @@ CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# OTA (components/ota): plain http for the LAN update server (default
+# CONFIG_SIPWIRE_OTA_URL); a new image boots PENDING_VERIFY and must be marked valid
+# (ota.h: UI up + network, or 60 s) or the bootloader rolls back to the previous slot.
+CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Stacks: settings_t grew (NTP/TZ/OTA fields) and a few event handlers keep one on the stack
+# (net, display); the bridge restarts SNTP from the event loop task.
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=3584
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096

@@ -12,6 +12,7 @@ target_include_directories(test_phone PRIVATE
     ${SIPWIRE_COMPONENTS}/sip/include
     ${SIPWIRE_COMPONENTS}/rtp/include
     ${SIPWIRE_COMPONENTS}/common/include
+    ${SIPWIRE_COMPONENTS}/ota/include
     ${SIPWIRE_COMPONENTS}/ui/include
     ${SIPWIRE_ROOT}/main)
 target_link_libraries(test_phone PRIVATE unity)

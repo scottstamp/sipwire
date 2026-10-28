@@ -83,7 +83,8 @@
         <label style="width:auto"><input type="checkbox" id="chg"> charging</label></div>
       <div class="row"><label for="clock">Clock</label>
         <input type="text" id="clock" placeholder="HH:MM" maxlength="5" style="max-width:80px">
-        <button id="clocknow" type="button">now</button><button id="clockclr" type="button">clear</button></div>
+        <button id="clocknow" type="button">now</button><button id="clockclr" type="button">clear</button>
+        <label><input type="checkbox" id="c24"> 24 h</label></div>
     </div>
 
     <div class="card">
@@ -166,7 +167,10 @@
     remote_hangup: function (c) { Module.ccall('sim_remote_hangup', null, ['number'], [c || 0]); },
     set_call: function (st, n, nm, sec) { Module.ccall('sim_set_call', null, ['number', 'string', 'string', 'number'], [st, n || '', nm || '', sec || 0]); },
     key: function (k, a) { Module.ccall('sim_key', null, ['number', 'number'], [typeof k === 'string' ? k.charCodeAt(0) : k, a || 0]); },
-    set_time: function (s) { Module.ccall('sim_set_time', null, ['string'], [s]); },
+    set_time: function (s) { Module.ccall('sim_set_time', null, ['string'], [s]); },   // 'HH:MM', 24 h local time
+    set_clock24: function (on) { Module.ccall('sim_set_clock24', null, ['number'], [on ? 1 : 0]); },
+    // state: 0 idle, 1 running, 2 done, 3 failed (no fake download; use Settings > Update for that)
+    set_ota: function (st, pct, msg) { Module.ccall('sim_set_ota', null, ['number', 'number', 'string'], [st, pct || 0, msg || '']); },
     touch_raw: function (ax, ay, p) { Module.ccall('sim_touch_raw', null, ['number', 'number', 'number'], [ax, ay, p ? 1 : 0]); },
     model: function () { return JSON.parse(getModelJson()); }
   };
@@ -226,6 +230,7 @@
     $('clock').value = p(d.getHours()) + ':' + p(d.getMinutes());
     window.sim.set_time($('clock').value);
   });
+  $('c24').addEventListener('change', function () { window.sim.set_clock24($('c24').checked); });
   $('clockclr').addEventListener('click', function () { $('clock').value = ''; window.sim.set_time(''); });
   $('incoming').addEventListener('click', function () { window.sim.incoming($('inum').value, $('iname').value); });
   $('rhangup').addEventListener('click', function () { window.sim.remote_hangup(parseInt($('rcode').value, 10) || 0); });
@@ -240,7 +245,7 @@
     $('reg').value = REG[m.reg];
     $('bat').value = m.battery_pct; $('chg').checked = m.charging;
     $('batv').textContent = m.battery_pct < 0 ? 'none' : m.battery_pct + '%';
-    $('clock').value = m.time_hhmm;
+    $('clock').value = m.time_raw; $('c24').checked = m.clock_24h;
   }
 
   // ---- keypad: mirrors components/keypad: PRESS on down, LONG at 800 ms, REPEAT every 150 ms ----

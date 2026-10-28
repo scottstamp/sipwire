@@ -12,6 +12,7 @@ idf_component_register(
         keypad
         common
         net
+        ota
         phone
         status_led
         storage

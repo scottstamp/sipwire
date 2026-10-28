@@ -11,6 +11,7 @@
 #include "display.h"
 #include "keypad.h"
 #include "net.h"
+#include "ota.h"
 #include "phone.h"
 #include "settings.h"
 #include "status_led.h"
@@ -39,6 +40,7 @@ void app_main(void)
     ESP_ERROR_CHECK(board_init());
     ESP_ERROR_CHECK(settings_init());
     ESP_ERROR_CHECK(net_init());
+    ESP_ERROR_CHECK(ota_init());    /* starts the rollback health watch; see ota.h */
     esp_err_t err = audio_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "audio_init: %s (calls will be silent)", esp_err_to_name(err));
@@ -55,6 +57,7 @@ void app_main(void)
     lv_display_t *disp = NULL;
     ESP_ERROR_CHECK(display_init(&disp));
     ESP_ERROR_CHECK(ui_bridge_init(disp));
+    ota_ui_started();
     ESP_ERROR_CHECK(phone_init());
 
     ESP_ERROR_CHECK(console_start());

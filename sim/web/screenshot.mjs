@@ -153,10 +153,11 @@ const SCENARIOS = {
       sim.set_reg(1);
       sim.set_time('12:34');
     },
-    steps: async (page, click) => {
+    steps: async (page, click, drag) => {
       await click(178, 282);   // Home -> Settings
       await page.waitForTimeout(250);
-      await click(120, 283);   // "About" row
+      await drag(120, 250, 120, 150);   // list scrolls: About is the 6th row
+      await click(120, 290);   // "About" row
     },
   },
   settings_account_port: {
@@ -201,6 +202,141 @@ const SCENARIOS = {
       await click(178, 282);   // Home -> Settings
       await page.waitForTimeout(250);
       await click(120, 166);   // "SIP account" row
+    },
+  },
+  // ---- 12/24 h clock, Time and Update screens ----
+  idle_12h: (sim) => {
+    sim.set_net(2, -55);
+    sim.set_reg(2);
+    sim.set_battery(80, false);
+    sim.set_time('15:07');   // 12 h is the default: "3:07 PM"
+  },
+  idle_12h_wide: (sim) => {   // widest case: "12:59 PM"
+    sim.set_net(2, -55);
+    sim.set_reg(2);
+    sim.set_battery(80, false);
+    sim.set_time('12:59');
+  },
+  idle_24h: (sim) => {
+    sim.set_net(2, -55);
+    sim.set_reg(2);
+    sim.set_battery(80, false);
+    sim.set_clock24(true);
+    sim.set_time('15:07');
+  },
+  settings_list_scrolled: {
+    sim: (sim) => {
+      sim.set_net(2, -55);
+      sim.set_reg(2);
+      sim.set_time('15:07');
+    },
+    steps: async (page, click, drag) => {
+      await click(178, 282);   // Home -> Settings
+      await page.waitForTimeout(250);
+      await drag(120, 250, 120, 150);
+    },
+  },
+  settings_time: {
+    sim: (sim) => {
+      sim.set_net(2, -55);
+      sim.set_reg(2);
+      sim.set_time('15:07');
+    },
+    steps: async (page, click) => {
+      await click(178, 282);   // Home -> Settings
+      await page.waitForTimeout(250);
+      await click(120, 262);   // "Time" row
+    },
+  },
+  settings_time_zones: {   // the zone dropdown open
+    sim: (sim) => {
+      sim.set_net(2, -55);
+      sim.set_reg(2);
+      sim.set_time('15:07');
+    },
+    steps: async (page, click) => {
+      await click(178, 282);   // Home -> Settings
+      await page.waitForTimeout(250);
+      await click(120, 262);   // "Time" row
+      await page.waitForTimeout(100);
+      await click(110, 190);   // time zone dropdown
+      await page.waitForTimeout(200);
+    },
+  },
+  settings_time_custom: {   // pick "Custom": the POSIX TZ field shows up
+    sim: (sim) => {
+      sim.set_net(2, -55);
+      sim.set_reg(2);
+      sim.set_time('15:07');
+    },
+    steps: async (page, click, drag) => {
+      await click(178, 282);   // Home -> Settings
+      await page.waitForTimeout(250);
+      await click(120, 262);   // "Time" row
+      await page.waitForTimeout(100);
+      await click(110, 190);   // time zone dropdown
+      await page.waitForTimeout(200);
+      for (let i = 0; i < 4; i++) await drag(120, 150, 120, 20);   // scroll the option list to its end
+      await click(110, 150);   // "Custom" (last option)
+      await page.waitForTimeout(200);
+    },
+  },
+  settings_update_idle: {
+    sim: (sim) => {
+      sim.set_net(2, -55);
+      sim.set_reg(2);
+      sim.set_time('15:07');
+    },
+    steps: async (page, click, drag) => {
+      await click(178, 282);   // Home -> Settings
+      await page.waitForTimeout(250);
+      await drag(120, 250, 120, 150);   // scroll the list
+      await click(120, 236);   // "Update" row
+    },
+  },
+  settings_update_progress: {
+    sim: (sim) => {
+      sim.set_net(2, -55);
+      sim.set_reg(2);
+      sim.set_time('15:07');
+    },
+    steps: async (page, click, drag) => {
+      await click(178, 282);   // Home -> Settings
+      await page.waitForTimeout(250);
+      await drag(120, 250, 120, 150);
+      await click(120, 236);   // "Update" row
+      await page.waitForTimeout(100);
+      await page.evaluate(() => window.sim.set_ota(1, 42, 'Downloading 42%'));
+    },
+  },
+  settings_update_keyboard: {   // URL field focused: keyboard up, page still usable
+    sim: (sim) => {
+      sim.set_net(2, -55);
+      sim.set_reg(2);
+      sim.set_time('15:07');
+    },
+    steps: async (page, click, drag) => {
+      await click(178, 282);   // Home -> Settings
+      await page.waitForTimeout(250);
+      await drag(120, 250, 120, 150);
+      await click(120, 236);   // "Update" row
+      await page.waitForTimeout(100);
+      await click(110, 170);   // URL field -> keyboard
+    },
+  },
+  settings_update_failed: {
+    sim: (sim) => {
+      sim.set_net(2, -55);
+      sim.set_reg(2);
+      sim.set_time('15:07');
+    },
+    steps: async (page, click, drag) => {
+      await click(178, 282);
+      await page.waitForTimeout(250);
+      await drag(120, 250, 120, 150);
+      await click(120, 236);
+      await page.waitForTimeout(100);
+      await page.evaluate(() => window.sim.set_ota(3, 0, 'Wrong firmware: otherapp'));
     },
   },
   calibrate_target1: {

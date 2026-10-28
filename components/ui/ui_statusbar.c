@@ -24,7 +24,7 @@ typedef struct {
     ui_reg_state_t reg;
     int8_t battery_pct;
     bool charging;
-    char time_hhmm[6];
+    char time_hhmm[UI_TIME_STR_LEN];
 } statusbar_t;
 
 static statusbar_t *s_sb;
@@ -154,6 +154,8 @@ void ui_statusbar_update(const ui_model_t *m)
 
     if (!sb->valid || strncmp(m->time_hhmm, sb->time_hhmm, sizeof(sb->time_hhmm)) != 0) {
         lv_label_set_text(sb->time, m->time_hhmm);
+        /* "3:07 PM" is wider: sit a little right of centre, clear of the SIP label */
+        lv_obj_align(sb->time, LV_ALIGN_TOP_MID, strchr(m->time_hhmm, ' ') ? 8 : 0, 3);
         snprintf(sb->time_hhmm, sizeof(sb->time_hhmm), "%s", m->time_hhmm);
     }
 

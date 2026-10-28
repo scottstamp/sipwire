@@ -80,7 +80,13 @@ inside a phase are parallel unless noted.
   public-domain code, bit-exact with Asterisk), 16 kHz audio path end to end,
   G.711 resampled 16↔8 kHz in `rtp`; SDP offers `9 0 8 101`; `codec_pref`
   setting. Verify on hardware: sidetone/echo levels at 16 kHz, CPU headroom.
-- [cheap] OTA update from SD / HTTP; version in UI.
+- [x] [cheap] OTA update over HTTP(S) (`components/ota`, Settings > Update, console
+  `ota`), rollback safety, version in UI/About/`ota status`; QEMU smoke test
+  covers reject + install + reboot into ota_1 + mark valid. OTA from SD still open.
+  Hardware: update a real unit from the LAN server, pull power mid-download (must
+  keep booting the old slot), flash a crashing image (must roll back).
+- [x] [cheap] 12/24 h clock (`clock_24h`, default 12 h), Settings > Time (NTP server,
+  time zone list + custom POSIX TZ, applied live).
 - [cheap] Power: light sleep when idle, backlight timeout, battery ADC.
 - [core] SIP over TCP/TLS, SRTP (mbedtls) — optional.
 - [cheap] Docs, CLAUDE.md upkeep, CI.
@@ -104,4 +110,6 @@ integration, and the QEMU smoke test (`tools/qemu/README.md`).
 - Set pins/flash size in `sdkconfig.defaults` for the real board; verify panel
   orientation/colors, touch axes, mic shift/slot, amp pops (see component notes).
 - Verify the touch calibration screen on hardware (done in sim + QEMU build only).
-- AEC / speakerphone (Phase 5), OTA (partitions already dual-slot).
+- AEC / speakerphone (Phase 5).
+- Verify OTA on hardware (see Phase 5) and serve `build/sipwire.bin` as `ota.bin`
+  at the default URL (`python -m http.server 8090`).

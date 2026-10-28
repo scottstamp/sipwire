@@ -12,6 +12,7 @@ ESP_EVENT_DECLARE_BASE(SIPWIRE_SIP_EVENT);
 ESP_EVENT_DECLARE_BASE(SIPWIRE_CALL_EVENT);
 ESP_EVENT_DECLARE_BASE(SIPWIRE_KEY_EVENT);
 ESP_EVENT_DECLARE_BASE(SIPWIRE_SETTINGS_EVENT);
+ESP_EVENT_DECLARE_BASE(SIPWIRE_OTA_EVENT);
 
 /* SIPWIRE_NET_EVENT */
 typedef enum {
@@ -85,3 +86,21 @@ typedef struct {
 typedef enum {
     SETTINGS_EVENT_CHANGED,    /* no payload; re-read via settings_get() */
 } settings_event_id_t;
+
+/* SIPWIRE_OTA_EVENT — firmware update (emitted by ota) */
+typedef enum {
+    OTA_EVENT_STARTED,         /* no payload; connecting / checking the image */
+    OTA_EVENT_PROGRESS,        /* ota_event_progress_t, whenever the percentage changes */
+    OTA_EVENT_DONE,            /* no payload; image written and verified, reboot in ~3 s */
+    OTA_EVENT_FAILED,          /* ota_event_failed_t; nothing was activated */
+} ota_event_id_t;
+
+typedef struct {
+    uint8_t percent;           /* 0-100, 0 while the image size is unknown */
+    uint32_t bytes;            /* image bytes written so far */
+} ota_event_progress_t;
+
+typedef struct {
+    int32_t err;               /* esp_err_t */
+    char reason[64];           /* short human readable cause */
+} ota_event_failed_t;

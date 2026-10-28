@@ -13,4 +13,12 @@ menu "Sipwire app"
         help
             SNTP server used to set the clock after the first Wi-Fi connection.
 
+    config SIPWIRE_OTA_URL
+        string "Default firmware update URL"
+        default "http://192.168.2.154:8090/ota.bin"
+        help
+            Where `ota` and Settings > Update fetch the new sipwire.bin from
+            unless another URL is stored (`cfg set ota_url`). Plain http works
+            (CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP is enabled): keep it on a trusted LAN.
+
 endmenu

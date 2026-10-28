@@ -71,18 +71,35 @@ uint32_t ui_bridge_call_seconds(call_state_t st, int64_t start_us, int64_t now_u
     return (uint32_t)((now_us - start_us) / 1000000);
 }
 
-void ui_bridge_format_hhmm(bool valid, int hour, int minute, char out[6])
+void ui_bridge_format_time(bool valid, int hour, int minute, bool clock_24h, char out[UI_TIME_STR_LEN])
 {
     if (!valid || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
         out[0] = '\0';
         return;
     }
-    out[0] = (char)('0' + hour / 10);
-    out[1] = (char)('0' + hour % 10);
-    out[2] = ':';
-    out[3] = (char)('0' + minute / 10);
-    out[4] = (char)('0' + minute % 10);
-    out[5] = '\0';
+    size_t n = 0;
+    int h = hour;
+    if (!clock_24h) {
+        h = hour % 12;
+        if (h == 0) {
+            h = 12;
+        }
+        if (h >= 10) {
+            out[n++] = (char)('0' + h / 10);
+        }
+    } else {
+        out[n++] = (char)('0' + h / 10);
+    }
+    out[n++] = (char)('0' + h % 10);
+    out[n++] = ':';
+    out[n++] = (char)('0' + minute / 10);
+    out[n++] = (char)('0' + minute % 10);
+    if (!clock_24h) {
+        out[n++] = ' ';
+        out[n++] = hour < 12 ? 'A' : 'P';
+        out[n++] = 'M';
+    }
+    out[n] = '\0';
 }
 
 static void copy(char *dst, size_t size, const char *src)
@@ -110,6 +127,39 @@ void ui_bridge_fill_settings(ui_bridge_local_t *loc, const char *wifi_ssid, cons
     copy_or_empty(loc->sip_display_name, sizeof(loc->sip_display_name), sip_display_name);
     ui_bridge_format_account(loc->account, sizeof(loc->account), sip_display_name, sip_user,
                              sip_server);
+}
+
+void ui_bridge_fill_time_ota(ui_bridge_local_t *loc, const char *ntp_server, const char *tz,
+                             bool clock_24h, const char *ota_url)
+{
+    copy_or_empty(loc->ntp_server, sizeof(loc->ntp_server), ntp_server);
+    copy_or_empty(loc->tz, sizeof(loc->tz), tz);
+    loc->clock_24h = clock_24h;
+    copy_or_empty(loc->ota_url, sizeof(loc->ota_url), ota_url);
+}
+
+void ui_bridge_fill_fw(ui_bridge_local_t *loc, const char *version, const char *partition)
+{
+    copy_or_empty(loc->fw_version, sizeof(loc->fw_version), version);
+    copy_or_empty(loc->fw_partition, sizeof(loc->fw_partition), partition);
+}
+
+ui_ota_state_t ui_bridge_map_ota(ota_state_t st)
+{
+    switch (st) {
+    case OTA_STATE_RUNNING: return UI_OTA_RUNNING;
+    case OTA_STATE_DONE:    return UI_OTA_DONE;
+    case OTA_STATE_FAILED:  return UI_OTA_FAILED;
+    case OTA_STATE_IDLE:
+    default:                return UI_OTA_IDLE;
+    }
+}
+
+void ui_bridge_fill_ota(ui_bridge_local_t *loc, const ota_status_t *st)
+{
+    loc->ota_state = ui_bridge_map_ota(st->state);
+    loc->ota_percent = st->percent > 100 ? 100 : st->percent;
+    copy(loc->ota_message, sizeof(loc->ota_message), st->message);
 }
 
 void ui_bridge_build_model(const ui_bridge_local_t *loc, const phone_status_t *ph, int64_t now_us,
@@ -143,5 +193,15 @@ void ui_bridge_build_model(const ui_bridge_local_t *loc, const phone_status_t *p
 
     out->battery_pct = -1;
     out->charging = false;
-    ui_bridge_format_hhmm(loc->time_valid, loc->hour, loc->minute, out->time_hhmm);
+    ui_bridge_format_time(loc->time_valid, loc->hour, loc->minute, loc->clock_24h, out->time_hhmm);
+
+    copy(out->ntp_server, sizeof(out->ntp_server), loc->ntp_server);
+    copy(out->tz, sizeof(out->tz), loc->tz);
+    out->clock_24h = loc->clock_24h;
+    copy(out->fw_version, sizeof(out->fw_version), loc->fw_version);
+    copy(out->fw_partition, sizeof(out->fw_partition), loc->fw_partition);
+    copy(out->ota_url, sizeof(out->ota_url), loc->ota_url);
+    out->ota_state = loc->ota_state;
+    out->ota_percent = loc->ota_percent;
+    copy(out->ota_message, sizeof(out->ota_message), loc->ota_message);
 }

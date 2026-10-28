@@ -226,6 +226,20 @@ void ui_act_save_account(const char *server, uint16_t port, const char *user,
     }
 }
 
+void ui_act_save_time(const char *ntp, const char *tz_posix, bool clock_24h)
+{
+    if (s_actions && s_actions->save_time && ntp && ntp[0] && tz_posix && tz_posix[0]) {
+        s_actions->save_time(s_actions->ctx, ntp, tz_posix, clock_24h);
+    }
+}
+
+void ui_act_ota_start(const char *url)
+{
+    if (s_actions && s_actions->ota_start && url && url[0]) {
+        s_actions->ota_start(s_actions->ctx, url);
+    }
+}
+
 void ui_act_touch_cal_begin(void)
 {
     if (s_actions && s_actions->touch_cal_begin) {
