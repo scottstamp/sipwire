@@ -15,6 +15,8 @@ components/
   storage/           NVS config (settings), SD card: contacts, call log, ringtones
   phone/             call state machine, ties sip+rtp+audio; emits UI events
   ui/                LVGL screens: home, dialer, incoming, in-call, settings, contacts
+                     (pure LVGL, no IDF deps — also built for the web simulator)
+sim/web/             Emscripten build of components/ui + mock model → browser
 ```
 
 ## Rules
@@ -23,6 +25,11 @@ components/
 - `codec`, `rtp`, `sip` must build on IDF `linux` target → host unit tests.
 - All hardware under `board` Kconfig; drivers take pins from `board_cfg_t`.
 - LVGL only touched inside `lvgl_port_lock()`.
+- `ui` sees the phone only through `ui_model_t` (snapshot: reg state, call
+  state, number, timer, wifi, battery, volume) and `ui_actions_t` (dial,
+  answer, hangup, dtmf, settings save...). On device `phone` fills the
+  model and handles actions; in `sim/web` an HTML panel does. UI code must
+  compile for both without `#ifdef`.
 - Tasks (core pin): audio_tx/rx (core1, prio high), rtp_rx (core1), sip (core0),
   keypad (core0, low), lvgl (core0, esp_lvgl_port default).
 
@@ -42,3 +49,10 @@ RTP rx → jitter buf → G.711 dec → mixer (+ tones) → I2S TX → amp
 wifi ssid/pass, sip server/port/transport, user, auth user, password,
 display name, codec prefs, ring volume, call volume, touch calibration.
 Set via UI settings, serial console (`sipwire>` REPL), or `config.json` on SD.
+
+## UI simulator
+`sim/web`: Emscripten + SDL2 backend of LVGL 9 renders `components/ui` to a
+canvas. Side panel injects model changes and keypad presses. Rebuild ≈ 5 s,
+served locally; no toolchain/flash loop for UI work. Fonts/assets shared
+with firmware build (same `lv_conf`-equivalent Kconfig values mirrored in
+`sim/web/lv_conf.h`, keep in sync).

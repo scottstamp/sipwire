@@ -16,6 +16,16 @@ inside a phase are parallel unless noted.
   for IDF linux target + Unity. CI script `tools/ci.sh`.
 - [cheap] Asterisk dev stack: `tools/asterisk/` docker-compose + minimal
   `pjsip.conf` (2 extensions, echo test ext, music-on-hold ext).
+- [core] UI simulator contract: `components/ui` depends only on LVGL +
+  `ui_model.h` (phone state snapshot) + `ui_actions.h` (callbacks). No IDF
+  headers. Core writes these two headers; everything else follows them.
+- [cheap] Web UI simulator (`sim/web/`): LVGL 9 → WebAssembly via Emscripten
+  (official `lv_web_emscripten` pattern, SDL2 backend, 240x320 canvas).
+  Same `components/ui` sources, mock `ui_model` driven from an HTML side
+  panel: fake keypad (3x4 buttons), reg state, incoming call, in-call timer,
+  wifi RSSI, battery. `sim/web/build.sh` (emcmake) + `serve.sh` (python
+  http.server, rebuild-on-save). ~5 s rebuild, no flash. Touch = mouse.
+  Also target for screenshot-based UI review by agents (headless chromium).
 
 ## Phase 1 — Drivers (when hardware arrives)
 - [cheap] Display: ILI9341 via `esp_lcd_ili9341` + `lvgl_port_add_disp`.
@@ -52,7 +62,8 @@ inside a phase are parallel unless noted.
 ## Phase 4 — Phone application
 - [core] `components/phone`: call state machine (idle, dialing, ringing-out,
   ringing-in, active, held, ending), maps SIP/RTP/keypad events ↔ audio/UI.
-- [cheap] UI screens (LVGL 9): home/status bar (wifi, reg state, battery),
+- [cheap] UI screens (LVGL 9), built & reviewed in the web simulator first,
+  then verified on device: home/status bar (wifi, reg state, battery),
   dialer with number entry from keypad+touch, incoming call, in-call
   (timer, mute, speaker, DTMF), settings (wifi, SIP account), contacts,
   call log. Use `lv_screen_load_anim`, one file per screen.
