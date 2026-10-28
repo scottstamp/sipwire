@@ -67,7 +67,7 @@
       <h2>Keypad</h2>
       <div class="split">
         <div class="keypad" id="keypad"></div>
-        <div class="hint">Click = PRESS<br>Hold 600 ms = LONG<br>Keyboard 0-9 * # also work (focus outside text fields).</div>
+        <div class="hint">Press = PRESS<br>Hold 800 ms = LONG (+REPEAT)<br>Keyboard 0-9 * # also work (focus outside text fields).</div>
       </div>
     </div>
 
@@ -211,23 +211,28 @@
     $('clock').value = m.time_hhmm;
   }
 
-  // ---- keypad: click = PRESS (on release), hold 600 ms = LONG ----
+  // ---- keypad: mirrors components/keypad: PRESS on down, LONG at 800 ms, REPEAT every 150 ms ----
   var KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '0', '#'];
-  var LONG_MS = 600;
+  var LONG_MS = 800, REPEAT_MS = 150;
   var held = {};   // key -> {timer, long}
   function keyDown(k, btn) {
     if (!ready || held[k]) return;
     var h = held[k] = { long: false, btn: btn };
     if (btn) btn.classList.add('down');
-    h.timer = setTimeout(function () { h.long = true; window.sim.key(k, 1); }, LONG_MS);
+    window.sim.key(k, 0);
+    h.timer = setTimeout(function () {
+      h.long = true;
+      window.sim.key(k, 1);
+      h.timer = setInterval(function () { window.sim.key(k, 2); }, REPEAT_MS);
+    }, LONG_MS);
   }
   function keyUp(k) {
     var h = held[k];
     if (!h) return;
     clearTimeout(h.timer);
+    clearInterval(h.timer);
     if (h.btn) h.btn.classList.remove('down');
     delete held[k];
-    if (!h.long) window.sim.key(k, 0);
   }
   var pad = $('keypad');
   KEYS.forEach(function (k) {

@@ -5,9 +5,10 @@
  * they are left (never while one of their own event callbacks may still be
  * running), so nothing accumulates across calls.
  *
- * Physical key semantics expected from the keypad driver: a short press is
- * reported as UI_KEY_PRESS (on release), a long press as UI_KEY_LONG *instead
- * of* PRESS, and UI_KEY_REPEAT while a key stays held after LONG. */
+ * Physical key semantics (components/keypad): UI_KEY_PRESS on key-down (so
+ * DTMF is instant), UI_KEY_LONG once after ~800 ms if still held, then
+ * UI_KEY_REPEAT. A LONG is therefore always preceded by a PRESS of the same
+ * key; screens that give LONG its own meaning must undo the PRESS effect. */
 
 #include "ui_priv.h"
 

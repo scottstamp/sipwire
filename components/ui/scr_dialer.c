@@ -146,6 +146,11 @@ static void dialer_key(char key, ui_key_action_t action)
         }
         break;
     case UI_KEY_LONG:
+        /* The PRESS for this key already appended it (possibly on the home
+         * screen, which opened us with it): take it back first. */
+        if (ui_is_dial_key(key) && d->len && d->buf[d->len - 1] == key) {
+            backspace(d);
+        }
         if (key == '0') {
             append(d, '+');
         } else if (key == '#') {
