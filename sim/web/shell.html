@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sipwire simulator</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --line: #30363d; --fg: #e6edf3;
+    color-scheme: dark; --dim: #8b949e; --accent: #2f81f7; --key: #21262d; --keyhi: #30363d;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg);
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { padding: 16px; }
+  h1 { font-size: 14px; margin: 0 0 12px; font-weight: 600; letter-spacing: .02em; }
+  h1 small { color: var(--dim); font-weight: 400; margin-left: 8px; }
+  .layout { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+
+  .device { background: #000; padding: 10px; border-radius: 14px;
+    border: 1px solid var(--line); flex: none; }
+  /* The canvas is 240x320 native; show it 2x, crisp. */
+  canvas#canvas { display: block; width: 480px; height: 640px; outline: none;
+    image-rendering: pixelated; image-rendering: crisp-edges; cursor: pointer; }
+
+  .side { flex: 1 1 380px; min-width: 320px; max-width: 800px; display: grid; gap: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); align-content: start; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .card h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--dim); margin: 0 0 8px; font-weight: 600; }
+  .row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  .row > label { width: 70px; color: var(--dim); flex: none; }
+  .row .val { width: 62px; white-space: nowrap; text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; flex: none; }
+  /* Note: emcc minifies the shell and drops type="text", so don't select on it. */
+  input:not([type=range]):not([type=checkbox]), select { background: #0d1117; color: var(--fg); border: 1px solid var(--line);
+    border-radius: 5px; padding: 4px 6px; font: inherit; min-width: 0; }
+  .row > input:not([type=range]):not([type=checkbox]) { flex: 1; }
+  input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); }
+  button { background: var(--key); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 5px; padding: 5px 10px; font: inherit; cursor: pointer; }
+  button:hover { background: var(--keyhi); }
+  button:active { background: var(--accent); }
+
+  .split { display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: start; }
+  .keypad { display: grid; grid-template-columns: repeat(3, 52px); gap: 6px; }
+  .keypad button { height: 44px; font-size: 18px; padding: 0; user-select: none; touch-action: none; }
+  .keypad button.down { background: var(--accent); }
+  .hint { color: var(--dim); font-size: 11px; margin-top: 8px; }
+
+  pre { margin: 0; font: 11.5px/1.45 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    white-space: pre-wrap; word-break: break-all; }
+  #log { height: 130px; overflow: auto; color: var(--dim); }
+  #log .t { color: #6e7681; }
+  #json { color: #a5d6ff; }
+  .tools { display: flex; justify-content: space-between; align-items: center; }
+  .tools button { padding: 1px 8px; font-size: 11px; }
+  #status { color: var(--dim); font-weight: 400; }
+</style>
+</head>
+<body>
+<h1>sipwire UI simulator <small id="status">loading...</small></h1>
+<div class="layout">
+  <div class="device"><canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas></div>
+
+  <div class="side">
+    <div class="card">
+      <h2>Keypad</h2>
+      <div class="split">
+        <div class="keypad" id="keypad"></div>
+        <div class="hint">Click = PRESS<br>Hold 600 ms = LONG<br>Keyboard 0-9 * # also work (focus outside text fields).</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Network / account / power</h2>
+      <div class="row"><label for="net">Network</label>
+        <select id="net"><option value="0">Off</option><option value="1">Connecting</option><option value="2">Connected</option></select>
+        <input type="range" id="rssi" min="-95" max="-30" value="-55"><span class="val" id="rssiv">-55 dBm</span></div>
+      <div class="row"><label for="reg">Registration</label>
+        <select id="reg"><option value="0">None</option><option value="1">Registering</option><option value="2">Registered</option><option value="3">Failed</option></select></div>
+      <div class="row"><label for="bat">Battery</label>
+        <input type="range" id="bat" min="-1" max="100" value="-1"><span class="val" id="batv">none</span>
+        <label style="width:auto"><input type="checkbox" id="chg"> charging</label></div>
+      <div class="row"><label for="clock">Clock</label>
+        <input type="text" id="clock" placeholder="HH:MM" maxlength="5" style="max-width:80px">
+        <button id="clocknow" type="button">now</button><button id="clockclr" type="button">clear</button></div>
+    </div>
+
+    <div class="card">
+      <h2>Call events</h2>
+      <div class="row"><label for="inum">Number</label><input type="text" id="inum" value="1001"></div>
+      <div class="row"><label for="iname">Name</label><input type="text" id="iname" value="Bob Example"></div>
+      <div class="row"><label></label>
+        <button id="incoming" type="button">Incoming call</button>
+        <button id="rhangup" type="button">Remote hangup</button>
+        <input type="text" id="rcode" value="0" title="SIP status code (0 = normal)" style="max-width:56px; flex:none"></div>
+    </div>
+
+    <div class="card">
+      <div class="tools"><h2>Action log</h2><button id="logclr" type="button">clear</button></div>
+      <pre id="log"></pre>
+    </div>
+
+    <div class="card">
+      <h2>Model</h2>
+      <pre id="json"></pre>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var ready = false;
+
+  // ---- hooks called from C (EM_JS in sim_main.c) ----
+  function logLine(msg) {
+    var el = $('log');
+    var t = new Date().toTimeString().slice(0, 8);
+    var s = document.createElement('div');
+    s.innerHTML = '<span class="t">' + t + '</span> ';
+    s.appendChild(document.createTextNode(msg));
+    el.appendChild(s);
+    while (el.childNodes.length > 300) el.removeChild(el.firstChild);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  var refreshQueued = false;
+  function refreshModel() {
+    refreshQueued = false;
+    if (!ready) return;
+    try { $('json').textContent = JSON.stringify(JSON.parse(getModelJson()), null, 2); }
+    catch (e) { $('json').textContent = String(e); }
+  }
+  function getModelJson() {
+    return Module.ccall('sim_get_model_json', 'string', [], []);
+  }
+
+  window.Module = {
+    canvas: $('canvas'),
+    print: function (t) { console.log(t); logLine(t); },
+    printErr: function (t) { console.warn(t); logLine('[err] ' + t); },
+    simLog: logLine,
+    simModelChanged: function () {
+      if (!refreshQueued) { refreshQueued = true; requestAnimationFrame(refreshModel); }
+    },
+    simReady: function () {
+      ready = true;
+      window.simReady = true;
+      $('status').textContent = '240x320, 2x';
+      syncControlsFromModel();
+      refreshModel();
+    },
+    onAbort: function (w) { $('status').textContent = 'aborted: ' + w; }
+  };
+  window.addEventListener('error', function (e) { $('status').textContent = 'error: ' + e.message; });
+
+  // Programmatic API (screenshots / tests): window.sim.set_net(2, -50) etc.
+  window.sim = {
+    set_net: function (s, r) { Module.ccall('sim_set_net', null, ['number', 'number'], [s, r]); },
+    set_reg: function (s) { Module.ccall('sim_set_reg', null, ['number'], [s]); },
+    set_battery: function (p, c) { Module.ccall('sim_set_battery', null, ['number', 'number'], [p, c ? 1 : 0]); },
+    incoming: function (n, nm) { Module.ccall('sim_incoming', null, ['string', 'string'], [n, nm || '']); },
+    remote_hangup: function (c) { Module.ccall('sim_remote_hangup', null, ['number'], [c || 0]); },
+    set_call: function (st, n, nm, sec) { Module.ccall('sim_set_call', null, ['number', 'string', 'string', 'number'], [st, n || '', nm || '', sec || 0]); },
+    key: function (k, a) { Module.ccall('sim_key', null, ['number', 'number'], [typeof k === 'string' ? k.charCodeAt(0) : k, a || 0]); },
+    set_time: function (s) { Module.ccall('sim_set_time', null, ['string'], [s]); },
+    model: function () { return JSON.parse(getModelJson()); }
+  };
+
+  // ---- controls ----
+  function applyNet() {
+    var r = +$('rssi').value;
+    $('rssiv').textContent = r + ' dBm';
+    window.sim.set_net(+$('net').value, r);
+  }
+  function applyBat() {
+    var p = +$('bat').value;
+    $('batv').textContent = p < 0 ? 'none' : p + '%';
+    window.sim.set_battery(p, $('chg').checked);
+  }
+  $('net').addEventListener('change', applyNet);
+  $('rssi').addEventListener('input', applyNet);
+  $('reg').addEventListener('change', function () { window.sim.set_reg(+$('reg').value); });
+  $('bat').addEventListener('input', applyBat);
+  $('chg').addEventListener('change', applyBat);
+  $('clock').addEventListener('input', function () {
+    var v = $('clock').value;
+    if (v === '' || /^\d{1,2}:\d{2}$/.test(v)) window.sim.set_time(v);
+  });
+  $('clocknow').addEventListener('click', function () {
+    var d = new Date(), p = function (n) { return (n < 10 ? '0' : '') + n; };
+    $('clock').value = p(d.getHours()) + ':' + p(d.getMinutes());
+    window.sim.set_time($('clock').value);
+  });
+  $('clockclr').addEventListener('click', function () { $('clock').value = ''; window.sim.set_time(''); });
+  $('incoming').addEventListener('click', function () { window.sim.incoming($('inum').value, $('iname').value); });
+  $('rhangup').addEventListener('click', function () { window.sim.remote_hangup(parseInt($('rcode').value, 10) || 0); });
+  $('logclr').addEventListener('click', function () { $('log').textContent = ''; });
+
+  var NET = { OFF: 0, CONNECTING: 1, CONNECTED: 2 };
+  var REG = { NONE: 0, REGISTERING: 1, REGISTERED: 2, FAILED: 3 };
+  function syncControlsFromModel() {
+    var m = window.sim.model();
+    $('net').value = NET[m.net]; $('rssi').value = m.rssi || -55;
+    $('rssiv').textContent = $('rssi').value + ' dBm';
+    $('reg').value = REG[m.reg];
+    $('bat').value = m.battery_pct; $('chg').checked = m.charging;
+    $('batv').textContent = m.battery_pct < 0 ? 'none' : m.battery_pct + '%';
+    $('clock').value = m.time_hhmm;
+  }
+
+  // ---- keypad: click = PRESS (on release), hold 600 ms = LONG ----
+  var KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '0', '#'];
+  var LONG_MS = 600;
+  var held = {};   // key -> {timer, long}
+  function keyDown(k, btn) {
+    if (!ready || held[k]) return;
+    var h = held[k] = { long: false, btn: btn };
+    if (btn) btn.classList.add('down');
+    h.timer = setTimeout(function () { h.long = true; window.sim.key(k, 1); }, LONG_MS);
+  }
+  function keyUp(k) {
+    var h = held[k];
+    if (!h) return;
+    clearTimeout(h.timer);
+    if (h.btn) h.btn.classList.remove('down');
+    delete held[k];
+    if (!h.long) window.sim.key(k, 0);
+  }
+  var pad = $('keypad');
+  KEYS.forEach(function (k) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.textContent = k; b.dataset.key = k;
+    b.addEventListener('pointerdown', function (e) { b.setPointerCapture(e.pointerId); keyDown(k, b); });
+    b.addEventListener('pointerup', function () { keyUp(k); });
+    b.addEventListener('pointercancel', function () { keyUp(k); });
+    pad.appendChild(b);
+  });
+  function editable(t) { return t && (t.tagName === 'INPUT' && t.type === 'text' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT'); }
+  function btnFor(k) { return pad.querySelector('[data-key="' + (k === '"' ? '\\"' : k) + '"]'); }
+  document.addEventListener('keydown', function (e) {
+    if (editable(e.target) || e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+    if (KEYS.indexOf(e.key) >= 0) { e.preventDefault(); keyDown(e.key, btnFor(e.key)); }
+  });
+  document.addEventListener('keyup', function (e) {
+    if (KEYS.indexOf(e.key) >= 0) keyUp(e.key);
+  });
+})();
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>
