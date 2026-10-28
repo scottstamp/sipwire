@@ -46,6 +46,10 @@ static const char *TAG = "phone";
 #define JB_MIN_MS           40
 #define JB_MAX_MS           160
 
+/* audio hands us 16 kHz 20 ms frames, which is what rtp takes for any codec */
+_Static_assert(AUDIO_SAMPLE_RATE == RTP_PCM_RATE && AUDIO_FRAME_SAMPLES == RTP_FRAME_SAMPLES,
+               "audio and rtp frame formats differ");
+
 static struct {
     SemaphoreHandle_t mtx;
     TaskHandle_t rx_task;

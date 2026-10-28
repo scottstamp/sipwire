@@ -5,10 +5,18 @@
  *   rtp_on_packet: parse/validate -> SSRC lock/switch -> sequence stats ->
  *                  interarrival jitter -> jitter buffer slot (by RTP ts)
  *   rtp_pull_frame: one 20 ms frame per call; real audio, PLC or silence.
- * The jitter buffer is a ring of JB_SLOTS raw G.711 frames. Slot `head` is
- * the frame at RTP timestamp `play_ts`; a packet's slot is its timestamp
- * distance from `play_ts` in 20 ms frames, so reordering, duplicates and
- * timestamp gaps (silence suppression, DTMF) all fall out of the indexing. */
+ * The jitter buffer is a ring of JB_SLOTS encoded frames (160 bytes for
+ * every codec). Slot `head` is the frame at RTP timestamp `play_ts`; a
+ * packet's slot is its timestamp distance from `play_ts` in 20 ms frames, so
+ * reordering, duplicates and timestamp gaps (silence suppression, DTMF) all
+ * fall out of the indexing. Frames are decoded at playout, in order, which
+ * is what G.722's stateful ADPCM decoder needs.
+ *
+ * Codecs: PCM is 16 kHz both ways. G.722 encodes/decodes 16 kHz directly;
+ * G.711 goes through a half-band 2:1 decimator before encoding and a 1:2
+ * interpolator after decoding (codec/resample2). The RTP clock is 8000 Hz
+ * for all of them (RFC 3551: G.722 included), so timestamps, jitter and
+ * DTMF durations are in 8 kHz units regardless of the codec. */
 
 #include "rtp.h"
 
@@ -16,6 +24,8 @@
 #include <string.h>
 
 #include "g711.h"
+#include "g722.h"
+#include "resample2.h"
 
 #define RTP_HDR_LEN         12
 #define RTP_VERSION         2
@@ -37,7 +47,7 @@
 #define SEQ_MAX_DROPOUT     3000            /* RFC 3550 A.1 */
 
 #define PLC_MAX_LOSS        3               /* then silence */
-#define PLC_XFADE           32              /* samples blended after a loss */
+#define PLC_XFADE           64              /* samples blended after a loss (4 ms) */
 
 #define DTMF_VOLUME         10              /* -10 dBm0 */
 #define DTMF_END_PKTS       3               /* RFC 4733 2.5.1.4 */
@@ -49,7 +59,7 @@ static const int32_t s_plc_gain[PLC_MAX_LOSS] = {22938, 16056, 11239};
 
 typedef struct {
     bool used;
-    uint8_t data[RTP_SAMPLES_8K];       /* raw G.711, 1 byte per sample */
+    uint8_t data[RTP_FRAME_BYTES];      /* one encoded 20 ms frame */
 } jb_slot_t;
 
 typedef enum {
@@ -60,6 +70,15 @@ typedef enum {
 
 struct rtp_session {
     rtp_config_t cfg;
+    bool wideband;                      /* G.722: no resampling */
+
+    /* codec state */
+    g722_enc_t g722_enc;
+    g722_dec_t g722_dec;
+    resample2_down_t down;              /* G.711 TX: 16 -> 8 kHz */
+    resample2_up_t up;                  /* G.711 RX: 8 -> 16 kHz */
+    int16_t nb[RTP_FRAME_TS];           /* 8 kHz scratch */
+    int16_t scratch[RTP_FRAME_SAMPLES]; /* decode target for skipped frames */
 
     /* TX */
     uint16_t tx_seq;
@@ -109,7 +128,7 @@ struct rtp_session {
     uint32_t since_adjust, excess_run;
 
     /* PLC */
-    int16_t last[RTP_SAMPLES_8K];
+    int16_t last[RTP_FRAME_SAMPLES];
     int16_t tail[PLC_XFADE];            /* what concealment would play next */
     uint8_t consec_loss;
     bool started;                       /* some real audio has been played */
@@ -163,7 +182,9 @@ static int frames_from_ms(int ms)
 
 rtp_session_t *rtp_session_create(const rtp_config_t *cfg)
 {
-    if (cfg == NULL || (cfg->payload_type != 0 && cfg->payload_type != 8) ||
+    if (cfg == NULL ||
+        (cfg->payload_type != RTP_PT_PCMU && cfg->payload_type != RTP_PT_PCMA &&
+         cfg->payload_type != RTP_PT_G722) ||
         cfg->dtmf_payload_type > 127 ||
         (cfg->dtmf_payload_type != 0 && cfg->dtmf_payload_type == cfg->payload_type)) {
         return NULL;
@@ -173,6 +194,11 @@ rtp_session_t *rtp_session_create(const rtp_config_t *cfg)
         return NULL;
     }
     s->cfg = *cfg;
+    s->wideband = cfg->payload_type == RTP_PT_G722;
+    g722_enc_init(&s->g722_enc);
+    g722_dec_init(&s->g722_dec);
+    resample2_down_init(&s->down);
+    resample2_up_init(&s->up);
     if (s->cfg.jb_min_ms == 0) {
         s->cfg.jb_min_ms = JB_DEFAULT_MIN_MS;
     }
@@ -216,8 +242,8 @@ static size_t rtp_build_dtmf_packet(rtp_session_t *s, uint8_t *out)
     if (first) {
         s->dtmf_ts = s->tx_ts;
     }
-    uint16_t dur = end ? (uint16_t)(s->dtmf_frames * RTP_SAMPLES_8K)
-                       : (uint16_t)((s->dtmf_idx + 1) * RTP_SAMPLES_8K);
+    uint16_t dur = end ? (uint16_t)(s->dtmf_frames * RTP_FRAME_TS)
+                       : (uint16_t)((s->dtmf_idx + 1) * RTP_FRAME_TS);
 
     /* RFC 4733 2.3: all packets of one event share the start timestamp. */
     rtp_write_header(out, first, s->cfg.dtmf_payload_type, s->tx_seq, s->dtmf_ts, s->cfg.ssrc);
@@ -226,7 +252,7 @@ static size_t rtp_build_dtmf_packet(rtp_session_t *s, uint8_t *out)
     wr16(out + 14, dur);
 
     s->tx_seq++;
-    s->tx_ts += RTP_SAMPLES_8K;             /* media clock keeps running */
+    s->tx_ts += RTP_FRAME_TS;               /* media clock keeps running */
     s->tx_packets++;
     s->dtmf_idx++;
     if (s->dtmf_idx >= s->dtmf_frames + DTMF_END_PKTS) {
@@ -236,29 +262,45 @@ static size_t rtp_build_dtmf_packet(rtp_session_t *s, uint8_t *out)
     return DTMF_PKT_LEN;
 }
 
-size_t rtp_build_audio(rtp_session_t *s, const int16_t pcm[RTP_SAMPLES_8K],
+size_t rtp_build_audio(rtp_session_t *s, const int16_t pcm[RTP_FRAME_SAMPLES],
                        uint8_t *out, size_t out_cap)
 {
     if (s == NULL || out == NULL) {
         return 0;
     }
     if (s->dtmf_active) {
-        return out_cap >= DTMF_PKT_LEN ? rtp_build_dtmf_packet(s, out) : 0;
+        if (out_cap < DTMF_PKT_LEN) {
+            return 0;
+        }
+        /* Keep the decimator's history current so the first audio frame after
+         * the event starts clean. The G.722 encoder must NOT advance: the far
+         * end's decoder sees no audio frames during the event either, so both
+         * ADPCM states stay in step. */
+        if (pcm != NULL && !s->wideband) {
+            resample2_down(&s->down, pcm, RTP_FRAME_TS, s->nb);
+        }
+        return rtp_build_dtmf_packet(s, out);
     }
-    if (pcm == NULL || out_cap < RTP_HDR_LEN + RTP_SAMPLES_8K) {
+    if (pcm == NULL || out_cap < RTP_HDR_LEN + RTP_FRAME_BYTES) {
         return 0;
     }
     rtp_write_header(out, s->tx_marker, s->cfg.payload_type, s->tx_seq, s->tx_ts, s->cfg.ssrc);
-    if (s->cfg.payload_type == 8) {
-        g711_alaw_encode_buf(pcm, out + RTP_HDR_LEN, RTP_SAMPLES_8K);
+    uint8_t *pl = out + RTP_HDR_LEN;
+    if (s->wideband) {
+        g722_encode(&s->g722_enc, pcm, RTP_FRAME_SAMPLES, pl);
     } else {
-        g711_ulaw_encode_buf(pcm, out + RTP_HDR_LEN, RTP_SAMPLES_8K);
+        resample2_down(&s->down, pcm, RTP_FRAME_TS, s->nb);
+        if (s->cfg.payload_type == RTP_PT_PCMA) {
+            g711_alaw_encode_buf(s->nb, pl, RTP_FRAME_TS);
+        } else {
+            g711_ulaw_encode_buf(s->nb, pl, RTP_FRAME_TS);
+        }
     }
     s->tx_marker = false;
     s->tx_seq++;
-    s->tx_ts += RTP_SAMPLES_8K;
+    s->tx_ts += RTP_FRAME_TS;
     s->tx_packets++;
-    return RTP_HDR_LEN + RTP_SAMPLES_8K;
+    return RTP_HDR_LEN + RTP_FRAME_BYTES;
 }
 
 bool rtp_send_dtmf(rtp_session_t *s, char digit, uint16_t duration_ms)
@@ -364,7 +406,8 @@ jump:
 
 static void rtp_update_target(rtp_session_t *s)
 {
-    /* target = 2.5 * jitter + 20 ms. j16 is jitter in ts units x16 (8 ts/ms):
+    /* target = 2.5 * jitter + 20 ms. j16 is jitter in ts units x16 (8 ts/ms,
+     * the RTP clock is 8000 Hz for every codec we accept):
      * 2.5 * j16 / (16 * 8) = 5 * j16 / 256. */
     int32_t ms = (5 * s->j16) / 256 + RTP_FRAME_MS;
     int f = frames_from_ms(ms);
@@ -416,7 +459,7 @@ static void jb_reset(rtp_session_t *s, uint32_t ts)
 static void jb_rewind(rtp_session_t *s, int32_t back)
 {
     s->head = (uint8_t)((s->head - back) & JB_MASK);
-    s->play_ts -= (uint32_t)back * RTP_SAMPLES_8K;
+    s->play_ts -= (uint32_t)back * RTP_FRAME_TS;
     s->span = (uint8_t)(s->span + back);
 }
 
@@ -425,7 +468,7 @@ static void jb_advance(rtp_session_t *s)
 {
     s->slots[s->head].used = false;
     s->head = (uint8_t)((s->head + 1) & JB_MASK);
-    s->play_ts += RTP_SAMPLES_8K;
+    s->play_ts += RTP_FRAME_TS;
     if (s->span > 0) {
         s->span--;
     }
@@ -434,9 +477,9 @@ static void jb_advance(rtp_session_t *s)
 /* Slot distance of `ts` from the playout point, rounded to the nearest frame. */
 static int32_t jb_index(const rtp_session_t *s, uint32_t ts)
 {
-    int64_t v = (int64_t)(int32_t)(ts - s->play_ts) + RTP_SAMPLES_8K / 2;
-    int64_t q = v / RTP_SAMPLES_8K;
-    if (v % RTP_SAMPLES_8K < 0) {
+    int64_t v = (int64_t)(int32_t)(ts - s->play_ts) + RTP_FRAME_TS / 2;
+    int64_t q = v / RTP_FRAME_TS;
+    if (v % RTP_FRAME_TS < 0) {
         q--;
     }
     return (int32_t)q;
@@ -478,7 +521,7 @@ static void jb_put(rtp_session_t *s, uint32_t ts, const uint8_t *data)
         return;
     }
     slot->used = true;
-    memcpy(slot->data, data, RTP_SAMPLES_8K);
+    memcpy(slot->data, data, RTP_FRAME_BYTES);
     if (idx + 1 > s->span) {
         s->span = (uint8_t)(idx + 1);
     }
@@ -503,6 +546,7 @@ static void rx_new_stream(rtp_session_t *s, uint32_t ssrc, uint16_t seq)
     s->j16 = 0;
     s->target_f = s->min_f;
     s->state = RX_IDLE;                     /* jb_put re-anchors on the next frame */
+    g722_dec_init(&s->g722_dec);            /* a new source has a fresh encoder */
 }
 
 void rtp_on_packet(rtp_session_t *s, const uint8_t *pkt, size_t len, uint32_t now_ms)
@@ -545,8 +589,8 @@ void rtp_on_packet(rtp_session_t *s, const uint8_t *pkt, size_t len, uint32_t no
     if (s->cfg.dtmf_payload_type != 0 && pt == s->cfg.dtmf_payload_type) {
         return;                                     /* telephone-event RX: ignored */
     }
-    if (pt != s->cfg.payload_type || plen == 0 || plen % RTP_SAMPLES_8K != 0 ||
-        plen / RTP_SAMPLES_8K > MAX_FRAMES_PER_PKT) {
+    if (pt != s->cfg.payload_type || plen == 0 || plen % RTP_FRAME_BYTES != 0 ||
+        plen / RTP_FRAME_BYTES > MAX_FRAMES_PER_PKT) {
         s->rx_invalid++;
         return;
     }
@@ -582,8 +626,8 @@ void rtp_on_packet(rtp_session_t *s, const uint8_t *pkt, size_t len, uint32_t no
         return;
     }
     rtp_update_jitter(s, ts, marker, now_ms);
-    for (size_t i = 0; i < plen / RTP_SAMPLES_8K; i++) {
-        jb_put(s, ts + (uint32_t)(i * RTP_SAMPLES_8K), pkt + hdr + i * RTP_SAMPLES_8K);
+    for (size_t i = 0; i < plen / RTP_FRAME_BYTES; i++) {
+        jb_put(s, ts + (uint32_t)(i * RTP_FRAME_TS), pkt + hdr + i * RTP_FRAME_BYTES);
     }
 }
 
@@ -598,14 +642,14 @@ static void plc_fill(rtp_session_t *s, int16_t *pcm)
     if (s->started && n < PLC_MAX_LOSS) {
         int32_t g = s_plc_gain[n];
         int32_t gn = (n + 1 < PLC_MAX_LOSS) ? s_plc_gain[n + 1] : 0;
-        for (int i = 0; i < RTP_SAMPLES_8K; i++) {
+        for (int i = 0; i < RTP_FRAME_SAMPLES; i++) {
             pcm[i] = (int16_t)((s->last[i] * g) >> 15);
         }
         for (int i = 0; i < PLC_XFADE; i++) {
             s->tail[i] = (int16_t)((s->last[i] * gn) >> 15);
         }
     } else {
-        memset(pcm, 0, RTP_SAMPLES_8K * sizeof(pcm[0]));
+        memset(pcm, 0, RTP_FRAME_SAMPLES * sizeof(pcm[0]));
         memset(s->tail, 0, sizeof(s->tail));
     }
     if (s->consec_loss < UINT8_MAX) {
@@ -617,13 +661,35 @@ static void plc_fill(rtp_session_t *s, int16_t *pcm)
     }
 }
 
+/* Decode one buffered frame to 16 kHz PCM, advancing the decoder state. */
+static void decode_frame(rtp_session_t *s, const uint8_t *data, int16_t *pcm)
+{
+    if (s->wideband) {
+        g722_decode(&s->g722_dec, data, RTP_FRAME_BYTES, pcm);
+        return;
+    }
+    if (s->cfg.payload_type == RTP_PT_PCMA) {
+        g711_alaw_decode_buf(data, s->nb, RTP_FRAME_TS);
+    } else {
+        g711_ulaw_decode_buf(data, s->nb, RTP_FRAME_TS);
+    }
+    resample2_up(&s->up, s->nb, RTP_FRAME_TS, pcm);
+}
+
+/* Drop the head frame without playing it. A buffered G.722 frame is still
+ * decoded (output discarded) so the ADPCM decoder stays in step with the
+ * sender's encoder; G.711 is stateless apart from 1.5 ms of filter history. */
+static void jb_skip(rtp_session_t *s)
+{
+    if (s->wideband && s->slots[s->head].used) {
+        decode_frame(s, s->slots[s->head].data, s->scratch);
+    }
+    jb_advance(s);
+}
+
 static void play_real(rtp_session_t *s, const jb_slot_t *slot, int16_t *pcm)
 {
-    if (s->cfg.payload_type == 8) {
-        g711_alaw_decode_buf(slot->data, pcm, RTP_SAMPLES_8K);
-    } else {
-        g711_ulaw_decode_buf(slot->data, pcm, RTP_SAMPLES_8K);
-    }
+    decode_frame(s, slot->data, pcm);
     if (s->blend_pending) {
         for (int i = 0; i < PLC_XFADE; i++) {
             pcm[i] = (int16_t)((s->tail[i] * (PLC_XFADE - i) + pcm[i] * i) / PLC_XFADE);
@@ -632,22 +698,22 @@ static void play_real(rtp_session_t *s, const jb_slot_t *slot, int16_t *pcm)
     }
     memcpy(s->last, pcm, sizeof(s->last));
     int32_t sum = 0;
-    for (int i = 0; i < RTP_SAMPLES_8K; i++) {
+    for (int i = 0; i < RTP_FRAME_SAMPLES; i++) {
         sum += pcm[i] < 0 ? -pcm[i] : pcm[i];
     }
-    s->last_quiet = (sum / RTP_SAMPLES_8K) < JB_QUIET_AVG_ABS;
+    s->last_quiet = (sum / RTP_FRAME_SAMPLES) < JB_QUIET_AVG_ABS;
     s->consec_loss = 0;
     s->started = true;
 }
 
-void rtp_pull_frame(rtp_session_t *s, int16_t pcm[RTP_SAMPLES_8K], uint32_t now_ms)
+void rtp_pull_frame(rtp_session_t *s, int16_t pcm[RTP_FRAME_SAMPLES], uint32_t now_ms)
 {
     (void)now_ms;
     if (s == NULL || pcm == NULL) {
         return;
     }
     if (s->state == RX_IDLE) {
-        memset(pcm, 0, RTP_SAMPLES_8K * sizeof(pcm[0]));
+        memset(pcm, 0, RTP_FRAME_SAMPLES * sizeof(pcm[0]));
         return;
     }
     s->last_depth_f = s->span;
@@ -683,7 +749,7 @@ void rtp_pull_frame(rtp_session_t *s, int16_t pcm[RTP_SAMPLES_8K], uint32_t now_
 
     /* Hard cap at jb_max. */
     while (s->span > s->max_f) {
-        jb_advance(s);
+        jb_skip(s);
     }
     s->since_adjust++;
 
@@ -701,7 +767,7 @@ void rtp_pull_frame(rtp_session_t *s, int16_t pcm[RTP_SAMPLES_8K], uint32_t now_
         s->excess_run++;
         if (s->excess_run >= JB_SHRINK_HOLD &&
             (s->last_quiet || s->excess_run >= JB_SHRINK_HOLD_LOUD)) {
-            jb_advance(s);
+            jb_skip(s);
             s->excess_run = 0;
             s->since_adjust = 0;
         }

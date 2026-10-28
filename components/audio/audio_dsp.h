@@ -7,22 +7,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* ---- half-band FIR resampler (47 taps, ~-39 dB at 4.5 kHz @ 16 kHz) ---- */
-
-#define DSP_HB_DECIM_HIST   46      /* taps - 1 */
-#define DSP_HB_INTERP_HIST  23      /* (taps - 1) / 2 */
-
-typedef struct { int16_t hist[DSP_HB_DECIM_HIST]; } dsp_decim2_t;
-typedef struct { int16_t hist[DSP_HB_INTERP_HIST]; } dsp_interp2_t;
-
-void dsp_decim2_init(dsp_decim2_t *d);
-void dsp_interp2_init(dsp_interp2_t *u);
-
-/** Low-pass and drop every other sample. Consumes 2*n_out input samples. */
-void dsp_decim2(dsp_decim2_t *d, const int16_t *in, size_t n_out, int16_t *out);
-/** Zero-stuff and low-pass (unity gain). Produces 2*n_in output samples. */
-void dsp_interp2(dsp_interp2_t *u, const int16_t *in, size_t n_in, int16_t *out);
-
 /* ---- DC blocker: y[n] = x[n] - x[n-1] + R*y[n-1] ---- */
 
 typedef struct {

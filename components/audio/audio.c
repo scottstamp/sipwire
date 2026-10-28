@@ -18,13 +18,12 @@
 
 static const char *TAG = "audio";
 
-/* The codec side is 8 kHz; the I2S side runs at 16 kHz (MEMS mics need
- * BCLK >= ~1 MHz) and is resampled x2 / :2 with a half-band FIR. */
-#define AUDIO_I2S_RATE          16000
-#define AUDIO_RATIO             (AUDIO_I2S_RATE / AUDIO_SAMPLE_RATE)
-_Static_assert(AUDIO_RATIO == 2, "resampler is fixed at 2:1");
+/* I2S runs at the API rate, 16 kHz (MEMS mics need BCLK >= ~1 MHz anyway);
+ * 8 kHz codecs are resampled in rtp, not here. */
+#define AUDIO_I2S_RATE          AUDIO_SAMPLE_RATE
+_Static_assert(AUDIO_I2S_RATE == 16000, "I2S clocking below assumes 16 kHz");
 
-#define I2S_FRAME_SAMPLES       (AUDIO_FRAME_SAMPLES * AUDIO_RATIO)     /* 20 ms */
+#define I2S_FRAME_SAMPLES       AUDIO_FRAME_SAMPLES                     /* 20 ms */
 #define I2S_CHUNK_SAMPLES       (I2S_FRAME_SAMPLES / 2)                 /* 10 ms per read/write */
 #define I2S_DMA_DESC_NUM        4
 #define I2S_IO_TIMEOUT_MS       100
@@ -32,7 +31,7 @@ _Static_assert(AUDIO_RATIO == 2, "resampler is fixed at 2:1");
 
 #define AUDIO_TASK_PRIO         (configMAX_PRIORITIES - 3)
 #define AUDIO_TASK_CORE         1
-#define TX_STACK_BYTES          5120
+#define TX_STACK_BYTES          6144    /* 2.5 KB of 16 kHz frame buffers + rtp_pull_frame */
 #define RX_STACK_BYTES          6144
 
 #define DC_BLOCK_HZ             20
@@ -237,12 +236,9 @@ static void tx_task(void *arg)
     (void)arg;
     int16_t src[AUDIO_FRAME_SAMPLES];
     int32_t mix[AUDIO_FRAME_SAMPLES];
-    int16_t pcm8[AUDIO_FRAME_SAMPLES];
     int16_t pcm16[I2S_FRAME_SAMPLES];
-    dsp_interp2_t up;
     dsp_tone_t tone;
 
-    dsp_interp2_init(&up);
     dsp_tone_init(&tone, AUDIO_SAMPLE_RATE);
 
     /* Prime the DMA with silence, then wake the amp: no turn-on pop. */
@@ -281,8 +277,7 @@ static void tx_task(void *arg)
         vol_g = vol_to;
         fade = fade_to;
 
-        dsp_softclip_buf(mix, pcm8, AUDIO_FRAME_SAMPLES);
-        dsp_interp2(&up, pcm8, AUDIO_FRAME_SAMPLES, pcm16);
+        dsp_softclip_buf(mix, pcm16, AUDIO_FRAME_SAMPLES);
         tx_write(pcm16, I2S_FRAME_SAMPLES);
     }
 
@@ -300,9 +295,7 @@ static void rx_task(void *arg)
     (void)arg;
     int32_t raw[I2S_FRAME_SAMPLES];
     int16_t pcm16[I2S_FRAME_SAMPLES];
-    int16_t pcm8[AUDIO_FRAME_SAMPLES];
     dsp_dcblock_t dc;
-    dsp_decim2_t down;
     int shift = s.cfg->mic.shift;
     int warmup = RX_WARMUP_FRAMES;
 
@@ -312,7 +305,6 @@ static void rx_task(void *arg)
         shift = 31;
     }
     dsp_dcblock_init(&dc, AUDIO_I2S_RATE, DC_BLOCK_HZ);
-    dsp_decim2_init(&down);
 
     while (!atomic_load(&s.stop)) {
         size_t have = 0;
@@ -349,18 +341,17 @@ static void rx_task(void *arg)
             raw[i] >>= shift;
         }
         dsp_dcblock_process(&dc, raw, pcm16, I2S_FRAME_SAMPLES);
-        dsp_decim2(&down, pcm16, AUDIO_FRAME_SAMPLES, pcm8);
 
         if (warmup > 0) {
             warmup--;
-            memset(pcm8, 0, sizeof(pcm8));
+            memset(pcm16, 0, sizeof(pcm16));
         } else if (atomic_load(&s.mic_mute)) {
-            memset(pcm8, 0, sizeof(pcm8));
+            memset(pcm16, 0, sizeof(pcm16));
         }
 
         xSemaphoreTake(s.cb_mtx, portMAX_DELAY);
         if (s.sink) {
-            s.sink(pcm8, s.ctx);
+            s.sink(pcm16, s.ctx);
         }
         xSemaphoreGive(s.cb_mtx);
     }
