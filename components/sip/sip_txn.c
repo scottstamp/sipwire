@@ -42,20 +42,52 @@ void sip_txn_terminate(sip_txn_t *t)
     t->kind = SIP_TXN_FREE;
 }
 
+/* A transaction that has delivered its final outcome and only lingers to
+ * absorb retransmissions (timers D, I, J, K, or a client INVITE in Accepted,
+ * RFC 6026). Dropping one early just means a late retransmission goes
+ * unanswered by the transaction layer. Server INVITEs waiting for an ACK are
+ * excluded: they still retransmit their final response. */
+static bool lingering(const sip_txn_t *t)
+{
+    switch (t->kind) {
+    case SIP_TXN_CLIENT_INVITE:
+        return t->state == SIP_TS_COMPLETED || t->state == SIP_TS_ACCEPTED;
+    case SIP_TXN_CLIENT_NONINVITE:
+    case SIP_TXN_SERVER_NONINVITE:
+        return t->state == SIP_TS_COMPLETED;
+    case SIP_TXN_SERVER_INVITE:
+        return t->state == SIP_TS_CONFIRMED;
+    default:
+        return false;
+    }
+}
+
 static sip_txn_t *alloc_txn(sip_txn_layer_t *l)
 {
-    for (int i = 0; i < SIP_MAX_TXN; i++) {
+    sip_txn_t *t = NULL;
+    sip_txn_t *victim = NULL;
+    for (int i = 0; i < SIP_MAX_TXN && !t; i++) {
         if (l->pool[i].id == 0) {
-            sip_txn_t *t = &l->pool[i];
-            memset(t, 0, offsetof(sip_txn_t, buf));
-            t->id = l->next_id++;
-            if (l->next_id == 0) {
-                l->next_id = 1;
-            }
-            return t;
+            t = &l->pool[i];
+        } else if (lingering(&l->pool[i]) && (!victim || l->pool[i].t_end < victim->t_end)) {
+            victim = &l->pool[i];
         }
     }
-    return NULL;
+    if (!t && victim) {
+        /* Pool full (e.g. a burst of short calls): reuse the lingering
+         * transaction that would have ended soonest. */
+        sip_txn_terminate(victim);
+        t = victim;
+    }
+    if (!t) {
+        return NULL;
+    }
+    memset(t, 0, offsetof(sip_txn_t, buf));
+    t->id = l->next_id++;
+    if (l->next_id == 0) {
+        l->next_id = 1;
+    }
+    return t;
 }
 
 static void txn_send(sip_txn_layer_t *l, sip_txn_t *t)

@@ -534,6 +534,28 @@ static void test_outgoing_busy(void)
     TEST_ASSERT_EQUAL(0, sip_ua_debug_txn_count(f->ua));
 }
 
+/* A burst of short calls leaves many INVITE transactions lingering in
+ * Completed (timer D, 32 s); new requests must still get a transaction. */
+static void test_txn_pool_burst(void)
+{
+    fx_init(f, NULL);
+    for (int i = 0; i < 20; i++) {
+        sip_call_handle_t h;
+        fx_clear_sent(f);
+        TEST_ASSERT_EQUAL(SIP_OK, sip_call_dial(f->ua, "601", &h));
+        int inv = fx_find(f, "INVITE", 0);
+        TEST_ASSERT_TRUE(inv >= 0);
+        fx_reply(f, inv, 486, "b", NULL, NULL);
+        TEST_ASSERT_EQUAL(SIP_UA_CALL_ENDED, last_call_ev()->state);
+        TEST_ASSERT_EQUAL(1, fx_count(f, "ACK"));
+        fx_advance(f, 100);
+    }
+    sip_call_handle_t h;
+    fx_clear_sent(f);
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_dial(f->ua, "600", &h));
+    TEST_ASSERT_EQUAL(1, fx_count(f, "INVITE"));
+}
+
 static void test_outgoing_timer_b(void)
 {
     fx_init(f, NULL);
@@ -1035,6 +1057,7 @@ int main(void)
     RUN_TEST(test_outgoing_call_success);
     RUN_TEST(test_outgoing_with_proxy_auth);
     RUN_TEST(test_outgoing_busy);
+    RUN_TEST(test_txn_pool_burst);
     RUN_TEST(test_outgoing_timer_b);
     RUN_TEST(test_cancel_early);
     RUN_TEST(test_cancel_before_provisional);

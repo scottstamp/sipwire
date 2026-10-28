@@ -22,7 +22,7 @@
 #define SIP_T2_MS          4000u
 #define SIP_T4_MS          5000u
 #define SIP_TIMER_D_MS     32000u
-#define SIP_MAX_TXN        10
+#define SIP_MAX_TXN        16
 #define SIP_BRANCH_MAX     72
 #define SIP_SENTBY_MAX     80
 
