@@ -62,7 +62,7 @@ inside a phase are parallel unless noted.
 - [cheap] RTCP minimal (SR/RR) — optional.
 
 ## Phase 4 — Phone application
-- [core] `components/phone`: call state machine (idle, dialing, ringing-out,
+- [x] [core] `components/phone`: call state machine (idle, dialing, ringing-out,
   ringing-in, active, held, ending), maps SIP/RTP/keypad events ↔ audio/UI.
 - [cheap] UI screens (LVGL 9), built & reviewed in the web simulator first,
   then verified on device: home/status bar (wifi, reg state, battery),

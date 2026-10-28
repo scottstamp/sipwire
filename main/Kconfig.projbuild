@@ -1,0 +1,16 @@
+menu "Sipwire app"
+
+    config SIPWIRE_TZ
+        string "Time zone (POSIX TZ string)"
+        default "UTC0"
+        help
+            Local time zone for the status-bar clock, as a POSIX TZ string,
+            e.g. "CET-1CEST,M3.5.0,M10.5.0/3" or "EST5EDT,M3.2.0,M11.1.0".
+
+    config SIPWIRE_NTP_SERVER
+        string "NTP server"
+        default "pool.ntp.org"
+        help
+            SNTP server used to set the clock after the first Wi-Fi connection.
+
+endmenu
