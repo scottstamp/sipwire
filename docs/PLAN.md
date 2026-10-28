@@ -94,7 +94,7 @@ Each [cheap] task gets: files to touch, public API header (written by core),
 Kconfig names, test to pass, "do not change" list. Core agent reviews diff.
 
 ## CI
-`.github/workflows/ci.yml`: host unit tests, firmware build, SIP-vs-Asterisk
+`.github/workflows/ci.yml` (manual trigger only): host unit tests, firmware build, SIP-vs-Asterisk
 integration, and the QEMU smoke test (`tools/qemu/README.md`).
 
 ## Next (after hardware spec)

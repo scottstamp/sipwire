@@ -1,9 +1,8 @@
 name: CI
 
+# Manual only (Actions tab or `gh workflow run ci.yml`): the full run is
+# heavy on runner minutes. Re-add push/pull_request triggers to automate.
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 jobs:
