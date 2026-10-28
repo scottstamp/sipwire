@@ -3,7 +3,7 @@
  * given as arguments and exits non-zero on the first failing step.
  *
  *   sipcli [--server ip:port] [--user u] [--pass p] [--local-ip ip]
- *          [--port n] [--rtp n] [-v] STEP...
+ *          [--port n] [--rtp n] [--codecs 9,0,8] [-v] STEP...
  *
  * Steps:
  *   register | unregister          wait for REGISTERED / NONE (10 s)
@@ -12,18 +12,32 @@
  *   incoming[:<sec>]               wait for an incoming call
  *   answer | hangup | hold | unhold
  *   sleep:<sec>                    keep the UA running
- *   expect-media                   media reported: port 12000-12100, PT 0/8
+ *   expect-media[:<pt>]            media reported: port 12000-12100, PT 9/0/8
+ *                                  (or exactly <pt>)
+ *   tone:<hz>:<sec>                send a <hz> sine as RTP (negotiated codec,
+ *                                  16 kHz source) for <sec> s while playing
+ *                                  out what comes back; with 600 (Echo) the
+ *                                  tone must return at the same frequency and
+ *                                  level (G.722 carries 5 kHz, G.711 cannot)
+ *   send-tone:<hz>:<sec>           the same without checking what comes back
  *   expect-end:<reason>            local|remote|rejected|cancelled|timeout|error
  *   expect-log:<text>              a log line contained <text>
  *   shell:<cmd>                    run cmd via /bin/sh, must exit 0
  *   echo:<text>                    print a scenario header
  */
 
+#include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 
+#include "rtp.h"
 #include "sip_ua.h"
 
 #define MAX_LOG 512
@@ -158,6 +172,116 @@ static int parse_secs(const char *s, int def)
     return s && *s ? atoi(s) : def;
 }
 
+/* ---- RTP tone check -------------------------------------------------- */
+
+static double goertzel(const int16_t *x, size_t n, double f)
+{
+    double w = 2.0 * M_PI * f / RTP_PCM_RATE, c = 2.0 * cos(w), s1 = 0, s2 = 0;
+    for (size_t i = 0; i < n; i++) {
+        double s0 = x[i] + c * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    return (s1 * s1 + s2 * s2 - c * s1 * s2) / ((double)n * (double)n);
+}
+
+/* Send a tone through the negotiated codec and play out what comes back.
+ * check: the last second played must be the tone (>= 90 % of the energy at
+ * hz) within 3 dB of the level sent. */
+static bool tone_run(double hz, int secs, bool check)
+{
+    const double amp = 8000;
+    if (!have_media || media.remote_port == 0 || secs < 2) {
+        printf("FAIL tone: no media\n");
+        return false;
+    }
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in local = { .sin_family = AF_INET, .sin_port = htons(media.local_port) };
+    if (fd < 0 || bind(fd, (struct sockaddr *)&local, sizeof(local)) != 0) {
+        printf("FAIL tone: bind %u: %s\n", (unsigned)media.local_port, strerror(errno));
+        if (fd >= 0) {
+            close(fd);
+        }
+        return false;
+    }
+    struct timeval tv = { 0, 1000 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    rtp_config_t rc = {
+        .payload_type = media.payload_type,
+        .dtmf_payload_type = media.dtmf_pt > 0 ? (uint8_t)media.dtmf_pt : 0,
+        .ssrc = rand_cb(NULL),
+        .initial_seq = (uint16_t)rand_cb(NULL),
+        .initial_ts = rand_cb(NULL),
+    };
+    rtp_session_t *rs = rtp_session_create(&rc);
+    struct sockaddr_in to = { .sin_family = AF_INET, .sin_port = htons(media.remote_port),
+                              .sin_addr.s_addr = htonl(media.remote_ip) };
+    size_t frames = (size_t)secs * 1000 / RTP_FRAME_MS;
+    int16_t *rec = calloc(frames * RTP_FRAME_SAMPLES, sizeof(int16_t));
+    if (rs == NULL || rec == NULL) {
+        printf("FAIL tone: alloc\n");
+        close(fd);
+        rtp_session_destroy(rs);
+        free(rec);
+        return false;
+    }
+
+    uint64_t t0 = now_ms();
+    uint32_t rx = 0;
+    for (size_t k = 0; k < frames; k++) {
+        int16_t pcm[RTP_FRAME_SAMPLES];
+        for (int i = 0; i < RTP_FRAME_SAMPLES; i++) {
+            double n = (double)(k * RTP_FRAME_SAMPLES + (size_t)i);
+            pcm[i] = (int16_t)lrint(amp * sin(2.0 * M_PI * hz * n / RTP_PCM_RATE));
+        }
+        uint8_t pkt[RTP_MAX_PACKET];
+        size_t len = rtp_build_audio(rs, pcm, pkt, sizeof(pkt));
+        sendto(fd, pkt, len, 0, (struct sockaddr *)&to, sizeof(to));
+        /* until the next 20 ms tick: receive RTP, keep SIP alive */
+        uint64_t due = t0 + (k + 1) * RTP_FRAME_MS;
+        while (now_ms() < due) {
+            uint8_t buf[1500];
+            ssize_t n = recv(fd, buf, sizeof(buf), 0);
+            if (n > 0) {
+                rtp_on_packet(rs, buf, (size_t)n, (uint32_t)now_ms());
+                rx++;
+            }
+            sip_udp_poll(&udp, ua, 0);
+            sip_ua_tick(ua, now_ms());
+        }
+        rtp_pull_frame(rs, rec + k * RTP_FRAME_SAMPLES, (uint32_t)now_ms());
+    }
+
+    /* analyse the last second */
+    size_t n = RTP_PCM_RATE;
+    const int16_t *x = rec + frames * RTP_FRAME_SAMPLES - n;
+    double ms = 0;
+    for (size_t i = 0; i < n; i++) {
+        ms += (double)x[i] * x[i];
+    }
+    ms /= (double)n;
+    double p = goertzel(x, n, hz);
+    double level_db = 20.0 * log10((2.0 * sqrt(p) + 1e-9) / amp);
+    double purity = ms > 0 ? 2.0 * p / ms : 0;
+    rtp_stats_t st;
+    rtp_get_stats(rs, &st);
+    if (check) {
+        printf("TONE %.0f Hz pt %u: rx %u pkts (lost %u, plc %u), level %+.1f dB, %.1f %% of energy at %.0f Hz\n",
+               hz, (unsigned)media.payload_type, (unsigned)rx, (unsigned)st.rx_lost, (unsigned)st.plc_frames,
+               level_db, 100.0 * purity, hz);
+    } else {
+        printf("TONE %.0f Hz pt %u: sent %u frames\n", hz, (unsigned)media.payload_type, (unsigned)frames);
+    }
+    rtp_session_destroy(rs);
+    free(rec);
+    close(fd);
+    bool ok = !check || (rx > frames / 2 && purity >= 0.9 && fabs(level_db) <= 3.0);
+    if (!ok) {
+        printf("FAIL tone: echoed %.0f Hz tone missing or distorted\n", hz);
+    }
+    return ok;
+}
+
 static bool step(const char *st)
 {
     char cmd[512];
@@ -220,9 +344,14 @@ static bool step(const char *st)
         run_for((uint64_t)parse_secs(arg, 1) * 1000u);
         return true;
     }
+    if ((!strcmp(cmd, "tone") || !strcmp(cmd, "send-tone")) && arg) {
+        char *secs = strchr(arg, ':');
+        return secs && tone_run(atof(arg), atoi(secs + 1), !strcmp(cmd, "tone"));
+    }
     if (!strcmp(cmd, "expect-media")) {
-        bool ok = have_media && media.remote_port >= 12000 && media.remote_port <= 12100 &&
-                  (media.payload_type == 0 || media.payload_type == 8);
+        bool pt_ok = arg ? media.payload_type == atoi(arg)
+                         : (media.payload_type == 9 || media.payload_type == 0 || media.payload_type == 8);
+        bool ok = have_media && media.remote_port >= 12000 && media.remote_port <= 12100 && pt_ok;
         if (!ok) {
             printf("FAIL media: have=%d port=%u pt=%u\n", have_media, (unsigned)media.remote_port,
                    (unsigned)media.payload_type);
@@ -260,6 +389,8 @@ int main(int argc, char **argv)
     const char *pass = "secret1001";
     const char *local_ip = NULL;
     int port = 0, rtp = 40000;
+    uint8_t codecs[SIP_UA_MAX_CODECS] = {0};
+    int n_codecs = 0;
     int i = 1;
     for (; i < argc && argv[i][0] == '-'; i++) {
         if (!strcmp(argv[i], "-v")) {
@@ -276,6 +407,14 @@ int main(int argc, char **argv)
             port = atoi(argv[++i]);
         } else if (i + 1 < argc && !strcmp(argv[i], "--rtp")) {
             rtp = atoi(argv[++i]);
+        } else if (i + 1 < argc && !strcmp(argv[i], "--codecs")) {
+            char *c = argv[++i];
+            while (*c && n_codecs < SIP_UA_MAX_CODECS) {
+                codecs[n_codecs++] = (uint8_t)strtoul(c, &c, 10);
+                if (*c == ',') {
+                    c++;
+                }
+            }
         } else {
             fprintf(stderr, "bad option %s\n", argv[i]);
             return 2;
@@ -323,6 +462,8 @@ int main(int argc, char **argv)
         .log_level = SIP_LOG_VERBOSE,
         .cb = { reg_cb, incoming_cb, call_cb, media_cb, NULL },
     };
+    memcpy(cfg.codecs, codecs, sizeof(cfg.codecs));
+    cfg.n_codecs = (uint8_t)n_codecs;
     if (sip_ua_create(&cfg, &ua) != SIP_OK) {
         fprintf(stderr, "bad config\n");
         return 2;

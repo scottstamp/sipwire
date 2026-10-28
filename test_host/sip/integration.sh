@@ -13,13 +13,14 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 BUILD="${BUILD_DIR:-$ROOT/build_host}"
 SIPCLI="$BUILD/sip/sipcli"
+G722TOOL="$BUILD/codec/g722tool"
 ASTERISK="${ASTERISK:-/usr/sbin/asterisk}"
 PORT=5080
 
-if [ ! -x "$SIPCLI" ]; then
+if [ ! -x "$SIPCLI" ] || [ ! -x "$G722TOOL" ]; then
     : "${IDF_PATH:?IDF_PATH must be set to build the host tests}"
     cmake -S "$ROOT/test_host" -B "$BUILD" -G Ninja >/dev/null
-    cmake --build "$BUILD" --target sipcli >/dev/null
+    cmake --build "$BUILD" --target sipcli g722tool >/dev/null
 fi
 [ -x "$ASTERISK" ] || { echo "asterisk not found at $ASTERISK" >&2; exit 2; }
 
@@ -38,6 +39,8 @@ mkdir -p "$STATE"/{etc,cache,varlib,db,keys,agi,spool,run,log}
 sed -e "s|@STATE@|$STATE|g" -e "s|@MODDIR@|$MODDIR|g" -e "s|@DATADIR@|$DATADIR|g" \
     "$HERE/asterisk/asterisk.conf.in" > "$STATE/etc/asterisk.conf"
 cp "$HERE"/asterisk/{modules,pjsip,extensions,rtp,logger}.conf "$STATE/etc/"
+REC="$STATE/rec"
+printf '[globals]\nSIPWIRE_REC=%s\n' "$REC" >> "$STATE/etc/extensions.conf"
 CONF="$STATE/etc/asterisk.conf"
 
 ast() { "$ASTERISK" -C "$CONF" -rx "$1"; }
@@ -83,6 +86,27 @@ fi
 echo "Asterisk $("$ASTERISK" -V | cut -d' ' -f2) running as pid $AST_PID on 127.0.0.1:$PORT"
 
 ASTX="$ASTERISK -C $CONF -rx"
+
+# G.722 bitstream cross-check: our codec vs Asterisk's codec_g722, both
+# directions, through Asterisk's own "file convert" (sln16 <-> g722).
+echo "=== 0 G.722: components/codec vs Asterisk codec_g722 (file convert)"
+X="$STATE/xcheck"
+mkdir -p "$X"
+"$G722TOOL" ka "$X/ka.sln16" 2
+"$G722TOOL" enc "$X/ka.sln16" "$X/ours.g722"
+ast "file convert $X/ka.sln16 $X/ast.g722" >/dev/null
+ast "file convert $X/ours.g722 $X/ast.sln16" >/dev/null
+"$G722TOOL" dec "$X/ours.g722" "$X/ours.sln16"
+for f in ast.g722 ast.sln16; do
+    [ -s "$X/$f" ] || { echo "FAIL: Asterisk did not write $f" >&2; exit 1; }
+done
+if ! cmp "$X/ours.g722" "$X/ast.g722"; then
+    echo "FAIL: G.722 encoder output differs from Asterisk" >&2; exit 1
+fi
+if ! cmp "$X/ours.sln16" "$X/ast.sln16"; then
+    echo "FAIL: G.722 decoder output differs from Asterisk" >&2; exit 1
+fi
+echo "G.722 encode and decode bit-exact with Asterisk ($(stat -c %s "$X/ours.g722") bytes)"
 V=()
 [ "${VERBOSE:-0}" = 1 ] && V=(-v)
 
@@ -92,9 +116,14 @@ set +e
     register \
     "shell:$ASTX 'pjsip show contacts' | tee /dev/stderr | grep -q '1001/sip:1001@127.0.0.1'" \
     \
-    "echo:2 call 600 (Echo), media, 2 s, hold/resume, BYE" \
-    dial:600 wait:active expect-media sleep:2 hold unhold hangup sleep:1 \
+    "echo:2 call 600 (Echo), G.722, 5 kHz tone echoed, hold/resume, BYE" \
+    dial:600 wait:active expect-media:9 "expect-log:pt 9 dtmf 101" tone:5000:3 \
+    hold unhold hangup sleep:1 \
     "expect-log:BYE answered 200" \
+    \
+    "echo:2b call 602: Asterisk records our G.722 5 kHz tone through its own decoder" \
+    dial:602 wait:active expect-media:9 send-tone:5000:4 wait:ended:5 \
+    "shell:python3 -I '$HERE/tone_check.py' '$REC.sln16' 16000 5000" \
     \
     "echo:3 call 601, Asterisk hangs up" \
     dial:601 wait:active expect-media wait:ended:10 expect-end:remote \
@@ -106,9 +135,22 @@ set +e
     "echo:5 unregister" \
     unregister \
     "shell:! $ASTX 'pjsip show contacts' | grep -q '1001/sip:1001@'" \
-    2>&1 | tee "$STATE/sipcli.log" | grep -E "^(===|STEP|EVENT|RESULT|FAIL|LOG \[[EW]\])|Contact:"
+    2>&1 | tee "$STATE/sipcli.log" | grep -E "^(===|STEP|EVENT|RESULT|FAIL|TONE|LOG \[[EW]\])|Contact:"
 rc=${PIPESTATUS[0]}
 set -e
+
+if [ "$rc" -eq 0 ]; then
+    # Narrowband contrast: a PCMU-only UA gets PCMU; the 16 kHz <-> 8 kHz
+    # path carries 1 kHz fine (and could not carry the 5 kHz above).
+    set +e
+    "$SIPCLI" "${V[@]}" --server "127.0.0.1:$PORT" --local-ip 127.0.0.1 --user 1002 --pass secret1002 \
+        --rtp 40002 --codecs 0 \
+        "echo:6 PCMU-only UA: call 600, 1 kHz tone through the resampled G.711 path" \
+        register dial:600 wait:active expect-media:0 tone:1000:3 hangup sleep:1 unregister \
+        2>&1 | tee -a "$STATE/sipcli.log" | grep -E "^(===|STEP|EVENT|RESULT|FAIL|TONE|LOG \[[EW]\])"
+    rc=${PIPESTATUS[0]}
+    set -e
+fi
 
 if [ "$rc" -ne 0 ]; then
     echo "--- sipcli failed (rc=$rc); Asterisk log tail:"

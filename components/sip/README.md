@@ -184,7 +184,13 @@ export IDF_PATH=...            # only needed if sipcli is not built yet
 test_host/sip/integration.sh   # KEEP_STATE=1 / VERBOSE=1 for debugging
 ```
 
-It registers 1001, checks `pjsip show contacts`, calls 600 (Echo: media,
-hold/resume, BYE → 200), calls 601 (remote BYE), answers an inbound
-`channel originate PJSIP/1001 application Wait 3`, and unregisters.
+First it checks the G.722 codec against Asterisk's `codec_g722` (`file
+convert` both ways must be bit-exact with `g722tool`). Then it registers 1001,
+checks `pjsip show contacts`, calls 600 (Echo: PT 9 negotiated, a 5 kHz tone
+sent as G.722 RTP must come back at the same level, hold/resume, BYE → 200),
+calls 602 (Asterisk records the 5 kHz tone through its own G.722 decoder;
+`tone_check.py` verifies the recording), calls 601 (remote BYE), answers an
+inbound `channel originate PJSIP/1001 application Wait 3`, and unregisters.
+A second, PCMU-only UA (1002) then echoes a 1 kHz tone through the
+resampled G.711 path.
 `build_host/sip/sipcli` can also be used by hand against any server.

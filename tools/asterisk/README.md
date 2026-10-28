@@ -1,7 +1,8 @@
 # sipwire dev PBX (Asterisk 20)
 
 Asterisk 20 with PJSIP for testing the sipwire handset firmware. UDP SIP on
-5060, digest auth, G.711 (PCMU/PCMA), RFC 4733 DTMF, RTP on 10000-10100.
+5060, digest auth, G.722 (wideband, preferred) and G.711 (PCMU/PCMA),
+RFC 4733 DTMF, RTP on 10000-10100.
 Dev only: passwords are `sipwire<ext>` and nothing here is hardened.
 
 ## Run locally (no root, no system install)
