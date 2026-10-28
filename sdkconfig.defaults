@@ -15,6 +15,11 @@ CONFIG_LV_FONT_MONTSERRAT_40=y
 CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
 CONFIG_LV_USE_PERF_MONITOR=n
 
+# XPT2046 touch (components/display): PENIRQ only works in "interrupt" (power-down) mode;
+# raw ADC values are converted/calibrated in display.c, not by the driver.
+CONFIG_XPT2046_INTERRUPT_MODE=y
+CONFIG_XPT2046_CONVERT_ADC_TO_COORDS=n
+
 # Console: `tasks` command (vTaskList)
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS=y

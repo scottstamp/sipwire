@@ -10,9 +10,12 @@ Docs: [hardware](docs/HARDWARE.md) · [architecture](docs/ARCHITECTURE.md) · [p
 ```
 main/
   main.c          app entry
-  display.c/.h    LVGL port init + display registration (stub panel for now)
   ui/ui.c/.h      LVGL screens
   idf_component.yml  managed deps: lvgl/lvgl 9.6, esp_lvgl_port 2.x
+components/display/  ILI9341 + XPT2046 + PWM backlight via esp_lcd / esp_lvgl_port
+  idf_component.yml  managed deps: lvgl/lvgl ~9.6, espressif/esp_lvgl_port ^2.9,
+                     espressif/esp_lcd_ili9341 ^2.1, atanisoft/esp_lcd_touch_xpt2046 ^1.0.6
+                     (which pulls espressif/esp_lcd_touch)
 sdkconfig.defaults   FreeRTOS + LVGL Kconfig defaults
 ```
 
@@ -26,6 +29,6 @@ idf.py build flash monitor
 
 ## Next steps
 
-- Wire a real panel in `display.c`: create it with `esp_lcd_new_panel_*` and
-  register it with `lvgl_port_add_disp()` in place of the stub display.
-- Add touch input with `lvgl_port_add_touch()`.
+- Verify display orientation, colour order and touch axes on the real board
+  (see `components/display/include/display.h`).
+- Touch calibration screen (`display_touch_calibrate_start()` is a stub).
