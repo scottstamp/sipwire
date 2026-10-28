@@ -10,7 +10,7 @@
 #   ASTERISK_STATE   state dir (default /tmp/sipwire-asterisk)
 #   ASTERISK_MODDIR  Asterisk module dir (default: probed, see below)
 #   ASTERISK_DATADIR packaged data dir with sounds/ (default /usr/share/asterisk)
-#   ASTERISK_MOHDIR  packaged MOH dir (default /var/lib/asterisk/moh)
+#   ASTERISK_MOHDIR  packaged MOH dir (default /usr/share/asterisk/moh)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
