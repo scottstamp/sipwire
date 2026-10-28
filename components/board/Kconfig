@@ -48,9 +48,11 @@ menu "Sipwire board"
             default n
         config SIPWIRE_LCD_MIRROR_X
             bool "Mirror X"
-            default n
+            default y
         config SIPWIRE_LCD_MIRROR_Y
             bool "Mirror Y"
+            help
+                Portrait upside down: toggle both Mirror X and Mirror Y (180°).
             default n
         config SIPWIRE_LCD_SWAP_XY
             bool "Swap XY (landscape)"
