@@ -1,0 +1,23 @@
+; Private Asterisk instance for test_host/sip/integration.sh.
+; @STATE@, @MODDIR@ and @DATADIR@ (read-only: XML docs, which Asterisk
+; needs to start) are substituted by the script; nothing here writes to
+; the system configuration or the project's tools/asterisk setup.
+; NB: no "(!)" after [directories] — that would make it a template and
+; Asterisk would silently fall back to the system directories.
+[directories]
+astcachedir => @STATE@/cache
+astetcdir => @STATE@/etc
+astmoddir => @MODDIR@
+astvarlibdir => @STATE@/varlib
+astdbdir => @STATE@/db
+astkeydir => @STATE@/keys
+astdatadir => @DATADIR@
+astagidir => @STATE@/agi
+astspooldir => @STATE@/spool
+astrundir => @STATE@/run
+astlogdir => @STATE@/log
+astsbindir => /usr/sbin
+
+[options]
+verbose = 3
+documentation_language = en_US

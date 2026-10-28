@@ -19,3 +19,7 @@ foreach(t test_sip_msg test_sip_auth test_sip_sdp test_sip_ua test_sip_fuzz)
     target_link_libraries(${t} sip_core unity)
     add_test(NAME ${t} COMMAND ${t})
 endforeach()
+
+# integration client (integration.sh), not a ctest
+add_executable(sipcli sipcli.c ${SIP_DIR}/sip_udp.c)
+target_link_libraries(sipcli sip_core)
