@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # QEMU smoke test: boots the real firmware (CONFIG_SIPWIRE_QEMU) and drives it
 # over its serial console against a private Asterisk on the host (5080/udp):
-# register, echo call with hold/DTMF/RTP both ways, remote hangup, inbound
+# register, G.722 echo call with hold/DTMF/RTP both ways, remote hangup, inbound
 # answer/reject, 404, re-register on account change, unregister.
 #
 #   tools/qemu/build.sh && tools/qemu/smoke.sh [scenario] [log]
