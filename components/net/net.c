@@ -27,6 +27,8 @@ static bool s_started;
 static char s_ssid[sizeof(((settings_t *)0)->wifi_ssid)];
 static char s_pass[sizeof(((settings_t *)0)->wifi_pass)];
 static uint32_t s_backoff_ms = BACKOFF_MIN_MS;
+static bool s_associated;                 /* between STA_CONNECTED and STA_DISCONNECTED */
+static bool s_expect_leave;               /* we called esp_wifi_disconnect() to switch creds */
 
 static atomic_bool s_connected;
 
@@ -106,14 +108,19 @@ static esp_err_t apply_creds(const char *ssid, const char *pass)
     }
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &cfg), TAG, "set_config");
 
-    /* Drop the old association (no-op error if there is none); its DISCONNECTED event carries
-     * WIFI_REASON_ASSOC_LEAVE, which on_wifi_event() deliberately doesn't retry on. */
-    esp_wifi_disconnect();
+    if (s_associated) {
+        /* Reconnect from the DISCONNECTED handler once the old association is gone. The
+         * disconnect reason can't tell us apart from the AP leaving, so use a flag. */
+        s_expect_leave = true;
+        esp_wifi_disconnect();
+    } else if (ssid_len > 0) {
+        esp_wifi_disconnect();  /* abort an in-flight attempt; no-op error if idle */
+        connect_now();
+    }
     if (ssid_len == 0) {
         ESP_LOGI(TAG, "no SSID configured, idle");
     } else {
         ESP_LOGI(TAG, "connecting to '%s'", s_ssid);
-        connect_now();
     }
     return ESP_OK;
 }
@@ -129,6 +136,9 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         /* Re-run so the config reaches the driver and the first connect happens. */
         apply_creds(s_ssid, s_pass);
         break;
+    case WIFI_EVENT_STA_CONNECTED:
+        s_associated = true;
+        break;
     case WIFI_EVENT_STA_DISCONNECTED: {
         const wifi_event_sta_disconnected_t *d = data;
         net_event_disc_t ev = { .reason = d->reason };
@@ -137,8 +147,13 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         esp_timer_stop(s_rssi_timer);
         ESP_LOGW(TAG, "disconnected, reason %d", d->reason);
         net_post(NET_EVENT_DISCONNECTED, &ev, sizeof(ev));
-        /* ASSOC_LEAVE = we called esp_wifi_disconnect() ourselves (new credentials). */
-        if (s_ssid[0] != '\0' && d->reason != WIFI_REASON_ASSOC_LEAVE) {
+        s_associated = false;
+        if (s_expect_leave) {
+            s_expect_leave = false;
+            if (s_ssid[0] != '\0') {
+                connect_now();
+            }
+        } else if (s_ssid[0] != '\0') {
             ESP_LOGI(TAG, "retry in %u ms", (unsigned)s_backoff_ms);
             schedule_retry(s_backoff_ms);
             s_backoff_ms = s_backoff_ms * 2 > BACKOFF_MAX_MS ? BACKOFF_MAX_MS : s_backoff_ms * 2;
