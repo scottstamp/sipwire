@@ -11,6 +11,7 @@ static const char *static_enc(uint8_t pt)
     switch (pt) {
     case 0: return "PCMU";
     case 8: return "PCMA";
+    case 9: return "G722";
     default: return NULL;
     }
 }
@@ -311,15 +312,23 @@ static bool fmt_enc(const sip_sdp_t *r, uint8_t pt, const char **enc, uint32_t *
     return *enc != NULL;
 }
 
+/* RTP clock rate a static format must be declared with. RFC 3551 4.5.2:
+ * G.722 is "G722/8000" although it samples at 16 kHz; some endpoints
+ * wrongly announce 16000, which is accepted (we always answer 8000). */
+static bool rate_ok(uint8_t pt, uint32_t rate)
+{
+    return rate == 8000 || (pt == 9 && rate == 16000);
+}
+
 static bool remote_supports(const sip_sdp_t *r, uint8_t pt)
 {
     const char *want = static_enc(pt);
     for (int i = 0; i < r->n_fmts; i++) {
         const char *enc;
         uint32_t rate;
-        /* only the static PT numbers (0/8) are accepted for G.711 */
+        /* only the static PT numbers (0/8/9) are accepted for G.711/G.722 */
         if (r->fmts[i] == pt && fmt_enc(r, pt, &enc, &rate) && want &&
-            sip_str_ieq_c(sip_str_c(enc), want) && rate == 8000) {
+            sip_str_ieq_c(sip_str_c(enc), want) && rate_ok(pt, rate)) {
             return true;
         }
     }

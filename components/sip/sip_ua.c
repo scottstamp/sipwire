@@ -1867,20 +1867,26 @@ sip_err_t sip_ua_create(const sip_ua_config_t *cfg, sip_ua_t **out)
     ua->rtp_alloc = cfg->rtp_port_alloc;
     ua->rtp_ctx = cfg->rtp_port_ctx;
     if (cfg->n_codecs == 0) {
-        ua->codecs[0] = 0;
-        ua->codecs[1] = 8;
-        ua->n_codecs = 2;
+        ua->codecs[0] = 9;
+        ua->codecs[1] = 0;
+        ua->codecs[2] = 8;
+        ua->n_codecs = 3;
     } else {
         if (cfg->n_codecs > SIP_UA_MAX_CODECS) {
             free_ua(ua);
             return SIP_ERR_ARG;
         }
         for (int i = 0; i < cfg->n_codecs; i++) {
-            if (cfg->codecs[i] != 0 && cfg->codecs[i] != 8) {
+            uint8_t pt = cfg->codecs[i];
+            bool dup = false;
+            for (int j = 0; j < i; j++) {
+                dup = dup || ua->codecs[j] == pt;
+            }
+            if ((pt != 0 && pt != 8 && pt != 9) || dup) {
                 free_ua(ua);
                 return SIP_ERR_ARG;
             }
-            ua->codecs[i] = cfg->codecs[i];
+            ua->codecs[i] = pt;
         }
         ua->n_codecs = cfg->n_codecs;
     }

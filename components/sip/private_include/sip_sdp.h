@@ -1,7 +1,8 @@
 #pragma once
 
 /* Minimal SDP (RFC 4566) offer/answer (RFC 3264) for one audio stream:
- * PCMU (0), PCMA (8), telephone-event (RFC 4733), ptime, direction. */
+ * G722 (9), PCMU (0), PCMA (8), telephone-event (RFC 4733), ptime,
+ * direction. All three codecs use static PTs and an 8000 Hz RTP clock. */
 
 #include <stdbool.h>
 #include <stddef.h>
