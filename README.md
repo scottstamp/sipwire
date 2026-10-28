@@ -1,6 +1,9 @@
 # sipwire
 
-ESP-IDF v6.1 project with an LVGL 9 UI (via `espressif/esp_lvgl_port`).
+Wi-Fi SIP handset firmware for ESP32-S3 (Asterisk-compatible). ESP-IDF v6.1,
+LVGL 9 via `espressif/esp_lvgl_port`.
+
+Docs: [hardware](docs/HARDWARE.md) · [architecture](docs/ARCHITECTURE.md) · [plan](docs/PLAN.md)
 
 ## Layout
 
