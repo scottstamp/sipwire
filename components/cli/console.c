@@ -57,6 +57,7 @@ static const field_t s_fields[] = {
     STR_FIELD(sip_password, F_SECRET),
     STR_FIELD(sip_display_name, F_STR),
     FIELD(sip_reg_expires, F_U32, 0, UINT32_MAX),
+    STR_FIELD(codec_pref, F_STR),
     FIELD(ring_volume, F_U8, 0, 100),
     FIELD(call_volume, F_U8, 0, 100),
     FIELD(mic_gain, F_U8, 0, 100),

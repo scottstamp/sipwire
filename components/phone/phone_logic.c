@@ -2,6 +2,7 @@
 
 #include "phone_logic.h"
 
+#include <ctype.h>
 #include <string.h>
 
 phone_tone_t phone_tone_for(sip_ua_call_state_t state, bool outgoing, bool early_media, int end_code)
@@ -170,4 +171,66 @@ phone_vol_kind_t phone_volume_kind(sip_ua_call_state_t state, bool speaker)
     default:
         return speaker ? PHONE_VOL_SPEAKER : PHONE_VOL_CALL;
     }
+}
+
+/* ---- codecs ---- */
+
+const char *phone_codec_name(uint8_t pt)
+{
+    switch (pt) {
+    case 9: return "G722";
+    case 0: return "PCMU";
+    case 8: return "PCMA";
+    default: return "?";
+    }
+}
+
+static int codec_pt(const char *name, size_t len)
+{
+    static const struct {
+        const char *name;
+        uint8_t pt;
+    } k_names[] = {
+        {"g722", 9}, {"pcmu", 0}, {"ulaw", 0}, {"pcma", 8}, {"alaw", 8},
+    };
+    for (size_t i = 0; i < sizeof(k_names) / sizeof(k_names[0]); i++) {
+        if (strlen(k_names[i].name) != len) {
+            continue;
+        }
+        size_t j = 0;
+        while (j < len && tolower((unsigned char)name[j]) == k_names[i].name[j]) {
+            j++;
+        }
+        if (j == len) {
+            return k_names[i].pt;
+        }
+    }
+    return -1;
+}
+
+int phone_codec_pref_parse(const char *s, uint8_t *pts, int max)
+{
+    int n = 0;
+    if (s == NULL) {
+        return 0;
+    }
+    while (*s) {
+        if (*s == ',' || *s == ' ') {
+            s++;
+            continue;
+        }
+        size_t len = strcspn(s, ", ");
+        int pt = codec_pt(s, len);
+        if (pt < 0 || n >= max) {
+            return 0;
+        }
+        for (int i = 0; i < n; i++) {
+            if (pts[i] == pt) {
+                return 0;
+            }
+        }
+        pts[n++] = (uint8_t)pt;
+        s += len;
+    }
+    return n;
 }

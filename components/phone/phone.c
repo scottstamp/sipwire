@@ -438,7 +438,8 @@ static bool account_changed(const settings_t *a, const settings_t *b)
     return strcmp(a->sip_server, b->sip_server) != 0 || a->sip_port != b->sip_port ||
            a->sip_transport != b->sip_transport || strcmp(a->sip_user, b->sip_user) != 0 ||
            strcmp(a->sip_auth_user, b->sip_auth_user) != 0 || strcmp(a->sip_password, b->sip_password) != 0 ||
-           strcmp(a->sip_display_name, b->sip_display_name) != 0 || a->sip_reg_expires != b->sip_reg_expires;
+           strcmp(a->sip_display_name, b->sip_display_name) != 0 || a->sip_reg_expires != b->sip_reg_expires ||
+           strcmp(a->codec_pref, b->codec_pref) != 0;
 }
 
 static void ua_destroy(void)
@@ -510,7 +511,7 @@ static void ua_create(uint64_t now)
         lip = net_ip;
     }
 
-    const sip_ua_config_t cfg = {
+    sip_ua_config_t cfg = {
         .server_host = s.acc.sip_server,
         .server_port = s.acc.sip_port,
         .server_addr = srv,
@@ -535,6 +536,13 @@ static void ua_create(uint64_t now)
             .media = on_media,
         },
     };
+    cfg.n_codecs = (uint8_t)phone_codec_pref_parse(s.acc.codec_pref, cfg.codecs, SIP_UA_MAX_CODECS);
+    if (cfg.n_codecs == 0) {
+        if (s.acc.codec_pref[0] != '\0') {
+            ESP_LOGW(TAG, "codec_pref \"%s\" invalid, using %s", s.acc.codec_pref, PHONE_CODEC_PREF_DEFAULT);
+        }
+        cfg.n_codecs = (uint8_t)phone_codec_pref_parse(PHONE_CODEC_PREF_DEFAULT, cfg.codecs, SIP_UA_MAX_CODECS);
+    }
     sip_err_t err = sip_ua_create(&cfg, &s.ua);
     if (err != SIP_OK) {
         ESP_LOGE(TAG, "sip_ua_create: %d", (int)err);

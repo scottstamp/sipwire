@@ -378,8 +378,8 @@ void phone_media_update(const sip_media_info_t *mi)
     if (failed) {
         ESP_LOGE(TAG, "rtp: session alloc failed");
     } else if (created) {
-        ESP_LOGI(TAG, "rtp: local %u -> %s:%u pt %u dtmf %d", mi->local_port, mi->remote_ip_str,
-                 mi->remote_port, mi->payload_type, (int)dtmf_pt);
+        ESP_LOGI(TAG, "rtp: local %u -> %s:%u pt %u (%s) dtmf %d", mi->local_port, mi->remote_ip_str,
+                 mi->remote_port, mi->payload_type, phone_codec_name(mi->payload_type), (int)dtmf_pt);
     }
 }
 

@@ -13,6 +13,7 @@ static const char *TAG = "storage";
 
 #define NVS_NAMESPACE "sipwire"
 #define POST_TIMEOUT pdMS_TO_TICKS(100)
+#define CODEC_PREF_DEFAULT "g722,pcmu,pcma"
 
 /* One NVS key per settings_t field (max 15 chars). A missing key means "use the
  * default", so fields added later never invalidate data written by old firmware. */
@@ -26,6 +27,7 @@ static const char *TAG = "storage";
 #define K_SIP_PASS    "sip_password"
 #define K_SIP_NAME    "sip_disp_name"
 #define K_SIP_EXPIRES "sip_reg_exp"
+#define K_CODEC_PREF  "codec_pref"
 #define K_RING_VOL    "ring_vol"
 #define K_CALL_VOL    "call_vol"
 #define K_MIC_GAIN    "mic_gain"
@@ -46,6 +48,7 @@ static void settings_defaults(settings_t *s)
     s->sip_port = 5060;
     s->sip_transport = SIP_TRANSPORT_UDP;
     s->sip_reg_expires = 300;
+    strcpy(s->codec_pref, CODEC_PREF_DEFAULT);
     s->ring_volume = 70;
     s->call_volume = 60;
     s->mic_gain = 50;
@@ -84,6 +87,10 @@ static void load_all(nvs_handle_t h, settings_t *s)
     load_str(h, K_SIP_AUTH, s->sip_auth_user, sizeof(s->sip_auth_user));
     load_str(h, K_SIP_PASS, s->sip_password, sizeof(s->sip_password));
     load_str(h, K_SIP_NAME, s->sip_display_name, sizeof(s->sip_display_name));
+    size_t len = sizeof(s->codec_pref);
+    if (nvs_get_str(h, K_CODEC_PREF, s->codec_pref, &len) != ESP_OK) {
+        strcpy(s->codec_pref, CODEC_PREF_DEFAULT);  /* key added after release: keep the default */
+    }
 
     if (nvs_get_u16(h, K_SIP_PORT, &u16) == ESP_OK && u16 != 0) {
         s->sip_port = u16;
@@ -123,7 +130,8 @@ static esp_err_t validate(const settings_t *s)
                         str_ok(s->sip_user, sizeof(s->sip_user)) &&
                         str_ok(s->sip_auth_user, sizeof(s->sip_auth_user)) &&
                         str_ok(s->sip_password, sizeof(s->sip_password)) &&
-                        str_ok(s->sip_display_name, sizeof(s->sip_display_name)),
+                        str_ok(s->sip_display_name, sizeof(s->sip_display_name)) &&
+                        str_ok(s->codec_pref, sizeof(s->codec_pref)),
                         ESP_ERR_INVALID_ARG, TAG, "string not NUL-terminated");
     ESP_RETURN_ON_FALSE(s->sip_port != 0, ESP_ERR_INVALID_ARG, TAG, "sip_port is 0");
     ESP_RETURN_ON_FALSE((unsigned)s->sip_transport <= SIP_TRANSPORT_TCP, ESP_ERR_INVALID_ARG, TAG,
@@ -158,6 +166,7 @@ static esp_err_t store_changed(nvs_handle_t h, const settings_t *in)
     STORE_STR(K_SIP_AUTH, sip_auth_user);
     STORE_STR(K_SIP_PASS, sip_password);
     STORE_STR(K_SIP_NAME, sip_display_name);
+    STORE_STR(K_CODEC_PREF, codec_pref);
 
     STORE_NUM(nvs_set_u16, K_SIP_PORT, sip_port);
     if (in->sip_transport != s_cur.sip_transport) {
