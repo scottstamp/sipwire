@@ -42,24 +42,24 @@ inside a phase are parallel unless noted.
 - [core] Review: task priorities, DMA buffer sizing, PSRAM placement.
 
 ## Phase 2 — SIP core (host-testable, no hardware needed)
-- [core] SIP message parser/serializer (headers, compact forms, Via branch,
+- [x] [core] SIP message parser/serializer (headers, compact forms, Via branch,
   Contact, CSeq, Route) — strict, fuzz-friendly.
-- [core] Digest auth (MD5, qop=auth), nonce reuse, 401/407 handling.
-- [core] Transaction layer (RFC 3261 timers A/B/E/F/K, retransmits) + dialog
+- [x] [core] Digest auth (MD5, qop=auth), nonce reuse, 401/407 handling.
+- [x] [core] Transaction layer (RFC 3261 timers A/B/E/F/K, retransmits) + dialog
   state (early/confirmed), UDP transport, NAT keepalive, rport.
-- [core] UA: REGISTER + refresh, outgoing INVITE (100/180/183/200/ACK),
+- [x] [core] UA: REGISTER + refresh, outgoing INVITE (100/180/183/200/ACK),
   incoming INVITE (180 → 200 → ACK), BYE both ways, CANCEL, 486/603 reject,
   OPTIONS reply, re-INVITE (hold) answer.
-- [cheap] SDP build/parse: PCMU/PCMA/telephone-event, ptime, c= line.
-- [cheap] Unit tests for parser, auth, SDP, timers (Unity on host).
-- [cheap] Integration test: `tools/siptest/` python (pjsua2 or sipp)
-  scripts against docker Asterisk.
+- [x] [cheap] SDP build/parse: PCMU/PCMA/telephone-event, ptime, c= line.
+- [x] [cheap] Unit tests for parser, auth, SDP, timers (Unity on host).
+- [x] [cheap] Integration test: `test_host/sip/integration.sh` (sipcli + local
+  Asterisk 20: register, echo call, hold, remote BYE, inbound, unregister).
 
 ## Phase 3 — Media
 - [x] [cheap] G.711 µ-law/A-law codec + tests.
 - [x] [core] RTP tx/rx, SSRC, seq/timestamp, RFC 2833 DTMF send; adaptive
   jitter buffer (40–120 ms) with PLC (simple repeat/fade).
-- [core] Audio pipeline glue: 20 ms framing, mixer, clock drift handling.
+- [x] [core] Audio pipeline glue: 20 ms framing, mixer, clock drift handling.
 - [cheap] RTCP minimal (SR/RR) — optional.
 
 ## Phase 4 — Phone application
@@ -83,7 +83,7 @@ inside a phase are parallel unless noted.
 - [cheap] Docs, CLAUDE.md upkeep, CI.
 
 ## Milestones
-1. **M1** Phase 0 + 2 + G.711: register with Asterisk, call echo test ext
+1. **M1** (done in QEMU with stubbed I2S/openeth; pending real hardware) Phase 0 + 2 + G.711: register with Asterisk, call echo test ext
    from console, audio over I2S headphone-grade loopback (no UI needed).
 2. **M2** Phase 1 + 4 basic: dial on keypad, see call on screen, answer
    incoming with touch/key.
@@ -92,3 +92,11 @@ inside a phase are parallel unless noted.
 ## Subagent brief template
 Each [cheap] task gets: files to touch, public API header (written by core),
 Kconfig names, test to pass, "do not change" list. Core agent reviews diff.
+
+## Next (after hardware spec)
+- Set pins/flash size in `sdkconfig.defaults` for the real board; verify panel
+  orientation/colors, touch axes, mic shift/slot, amp pops (see component notes).
+- Touch calibration screen + raw-touch API in `display`.
+- Commit the QEMU harness (openeth + fake I2S behind a Kconfig) as a CI smoke test.
+- Settings forms: expose current SSID/server/user in `ui_model_t` so forms prefill.
+- AEC / speakerphone (Phase 5), OTA (partitions already dual-slot).
