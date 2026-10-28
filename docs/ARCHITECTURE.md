@@ -3,6 +3,7 @@
 ```
 main/                app: phone state machine, UI glue
 components/
+  common/            sipwire_events.h: esp_event bases, IDs, payloads
   board/             Kconfig pins, board_init(), bus bring-up (SPI, I2S, SDMMC)
   display/           ILI9341 + XPT2046 via esp_lcd + esp_lvgl_port
   keypad/            matrix scanner → key events (press/release/long/repeat)
@@ -18,6 +19,11 @@ components/
                      (pure LVGL, no IDF deps — also built for the web simulator)
 sim/web/             Emscripten build of components/ui + mock model → browser
 ```
+
+## Host tests
+`test_host/<name>/CMakeLists.txt` adds an executable + `add_test()`; the top
+`test_host/CMakeLists.txt` picks up every subdir. Plain CMake + Unity from
+`$IDF_PATH`, ASan/UBSan, `-Werror`. Run `tools/ci.sh host-test`.
 
 ## Rules
 - Modules talk via `esp_event` loop (`SIPWIRE_EVENTS` base) + small C APIs.

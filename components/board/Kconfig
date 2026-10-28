@@ -1,0 +1,184 @@
+menu "Sipwire board"
+
+    comment "Use -1 for any optional pin that is not connected."
+
+    menu "Display (ILI9341, SPI)"
+        config SIPWIRE_LCD_SPI_HOST
+            int "SPI host (2=SPI2, 3=SPI3)"
+            range 2 3
+            default 2
+        config SIPWIRE_LCD_SCLK
+            int "SCLK"
+            default 12
+        config SIPWIRE_LCD_MOSI
+            int "MOSI"
+            default 11
+        config SIPWIRE_LCD_MISO
+            int "MISO (needed for touch)"
+            default 13
+        config SIPWIRE_LCD_CS
+            int "LCD CS"
+            default 10
+        config SIPWIRE_LCD_DC
+            int "LCD DC"
+            default 9
+        config SIPWIRE_LCD_RST
+            int "LCD RST"
+            default 14
+        config SIPWIRE_LCD_BL
+            int "Backlight"
+            default 21
+        config SIPWIRE_LCD_BL_ACTIVE_HIGH
+            bool "Backlight active high"
+            default y
+        config SIPWIRE_LCD_PCLK_HZ
+            int "LCD SPI clock (Hz)"
+            default 40000000
+        config SIPWIRE_LCD_H_RES
+            int "Native horizontal resolution"
+            default 240
+        config SIPWIRE_LCD_V_RES
+            int "Native vertical resolution"
+            default 320
+        config SIPWIRE_LCD_BGR
+            bool "Panel uses BGR order"
+            default y
+        config SIPWIRE_LCD_INVERT
+            bool "Invert colors"
+            default n
+        config SIPWIRE_LCD_MIRROR_X
+            bool "Mirror X"
+            default n
+        config SIPWIRE_LCD_MIRROR_Y
+            bool "Mirror Y"
+            default n
+        config SIPWIRE_LCD_SWAP_XY
+            bool "Swap XY (landscape)"
+            default n
+    endmenu
+
+    menu "Touch (XPT2046, shares LCD SPI bus)"
+        config SIPWIRE_TOUCH_ENABLE
+            bool "Touch present"
+            default y
+        config SIPWIRE_TOUCH_CS
+            int "Touch CS"
+            depends on SIPWIRE_TOUCH_ENABLE
+            default 15
+        config SIPWIRE_TOUCH_IRQ
+            int "Touch IRQ (PENIRQ)"
+            depends on SIPWIRE_TOUCH_ENABLE
+            default 16
+        config SIPWIRE_TOUCH_SPI_HZ
+            int "Touch SPI clock (Hz)"
+            depends on SIPWIRE_TOUCH_ENABLE
+            default 2000000
+    endmenu
+
+    menu "Speaker (I2S DAC + amp)"
+        config SIPWIRE_SPK_BCLK
+            int "BCLK"
+            default 4
+        config SIPWIRE_SPK_WS
+            int "WS / LRCLK"
+            default 5
+        config SIPWIRE_SPK_DOUT
+            int "DOUT"
+            default 6
+        config SIPWIRE_SPK_EN
+            int "Amp enable / shutdown pin"
+            default 7
+        config SIPWIRE_SPK_EN_ACTIVE_HIGH
+            bool "Amp enable active high"
+            default y
+    endmenu
+
+    menu "Microphone (I2S MEMS)"
+        config SIPWIRE_I2S_FULL_DUPLEX
+            bool "Mic shares speaker BCLK/WS (one I2S controller)"
+            default n
+        config SIPWIRE_MIC_BCLK
+            int "BCLK"
+            depends on !SIPWIRE_I2S_FULL_DUPLEX
+            default 17
+        config SIPWIRE_MIC_WS
+            int "WS"
+            depends on !SIPWIRE_I2S_FULL_DUPLEX
+            default 18
+        config SIPWIRE_MIC_DIN
+            int "DIN (mic SD)"
+            default 8
+        config SIPWIRE_MIC_SLOT_RIGHT
+            bool "Mic outputs on right slot (L/R pin high)"
+            default n
+        config SIPWIRE_MIC_SHIFT
+            int "Right shift from 32-bit sample to 16-bit"
+            range 8 20
+            default 14
+    endmenu
+
+    menu "Keypad (3x4 matrix)"
+        config SIPWIRE_KP_ROW0
+            int "Row 0 (1 2 3)"
+            default 1
+        config SIPWIRE_KP_ROW1
+            int "Row 1 (4 5 6)"
+            default 2
+        config SIPWIRE_KP_ROW2
+            int "Row 2 (7 8 9)"
+            default 38
+        config SIPWIRE_KP_ROW3
+            int "Row 3 (* 0 #)"
+            default 39
+        config SIPWIRE_KP_COL0
+            int "Col 0"
+            default 40
+        config SIPWIRE_KP_COL1
+            int "Col 1"
+            default 41
+        config SIPWIRE_KP_COL2
+            int "Col 2"
+            default 42
+        config SIPWIRE_KP_MAP
+            string "Key map, row-major (12 chars)"
+            default "123456789*0#"
+    endmenu
+
+    menu "SD card (optional)"
+        config SIPWIRE_SD_ENABLE
+            bool "SD card slot present"
+            default y
+        choice SIPWIRE_SD_MODE
+            prompt "SD interface"
+            depends on SIPWIRE_SD_ENABLE
+            default SIPWIRE_SD_MODE_SPI
+            config SIPWIRE_SD_MODE_SDMMC
+                bool "SDMMC 1-bit"
+            config SIPWIRE_SD_MODE_SPI
+                bool "SPI (shares LCD bus)"
+        endchoice
+        config SIPWIRE_SD_CLK
+            int "SDMMC CLK"
+            depends on SIPWIRE_SD_MODE_SDMMC
+            default 47
+        config SIPWIRE_SD_CMD
+            int "SDMMC CMD"
+            depends on SIPWIRE_SD_MODE_SDMMC
+            default 3
+        config SIPWIRE_SD_D0
+            int "SDMMC D0"
+            depends on SIPWIRE_SD_MODE_SDMMC
+            default 48
+            help
+                Defaults are placeholders. Avoid strapping pins 0, 3, 45, 46.
+        config SIPWIRE_SD_CS
+            int "SPI CS"
+            depends on SIPWIRE_SD_MODE_SPI
+            default 47
+        config SIPWIRE_SD_CD
+            int "Card detect (-1 = none)"
+            depends on SIPWIRE_SD_ENABLE
+            default -1
+    endmenu
+
+endmenu

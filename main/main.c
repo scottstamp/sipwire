@@ -14,6 +14,7 @@ void app_main(void)
     ESP_ERROR_CHECK(display_init(&disp));
 
     lvgl_port_lock(0);
-    ui_init(disp);
+    static const ui_actions_t actions = { 0 };
+    ui_init(disp, &actions);
     lvgl_port_unlock();
 }

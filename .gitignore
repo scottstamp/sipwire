@@ -6,3 +6,5 @@ sdkconfig.old
 .vscode/
 .cache/
 *.swp
+build_host/
+sim/web/build/
