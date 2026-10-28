@@ -2,15 +2,18 @@
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_log.h"
-#include "esp_lvgl_port.h"
+#include "lvgl.h"
 #include "nvs_flash.h"
 
+#include "audio.h"
 #include "board.h"
 #include "console.h"
 #include "display.h"
+#include "keypad.h"
 #include "net.h"
+#include "phone.h"
 #include "settings.h"
-#include "ui.h"
+#include "ui_bridge.h"
 
 static const char *TAG = "sipwire";
 
@@ -35,14 +38,19 @@ void app_main(void)
     ESP_ERROR_CHECK(board_init());
     ESP_ERROR_CHECK(settings_init());
     ESP_ERROR_CHECK(net_init());
+    esp_err_t err = audio_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "audio_init: %s (calls will be silent)", esp_err_to_name(err));
+    }
+    err = keypad_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "keypad_init: %s (touch only)", esp_err_to_name(err));
+    }
 
     lv_display_t *disp = NULL;
     ESP_ERROR_CHECK(display_init(&disp));
-
-    lvgl_port_lock(0);
-    static const ui_actions_t actions = { 0 };
-    ui_init(disp, &actions);
-    lvgl_port_unlock();
+    ESP_ERROR_CHECK(ui_bridge_init(disp));
+    ESP_ERROR_CHECK(phone_init());
 
     ESP_ERROR_CHECK(console_start());
 }

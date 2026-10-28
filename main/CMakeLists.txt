@@ -1,17 +1,23 @@
 idf_component_register(
     SRCS
         "main.c"
+        "ui_bridge.c"
+        "ui_bridge_model.c"
     INCLUDE_DIRS "."
     PRIV_REQUIRES
+        audio
         board
         cli
         display
+        keypad
         common
         net
+        phone
         storage
         ui
         esp_app_format
         esp_event
+        esp_netif
         esp_timer
         log
         nvs_flash

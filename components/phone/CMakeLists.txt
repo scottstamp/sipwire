@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS "phone.c"
+         "phone_media.c"
+         "phone_console.c"
+         "phone_logic.c"    # pure C, host-tested in test_host/phone
+    INCLUDE_DIRS "include"
+    PRIV_INCLUDE_DIRS "private_include"
+    REQUIRES common rtp esp_common
+    PRIV_REQUIRES sip audio storage net cli esp_event esp_timer esp_hw_support freertos lwip log
+)
