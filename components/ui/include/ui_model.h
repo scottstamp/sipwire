@@ -49,4 +49,14 @@ typedef struct {
     int8_t battery_pct;        /* -1 = no battery */
     bool charging;
     char time_hhmm[6];         /* "" until SNTP sync */
+
+    /* Stored settings that prefill the Settings forms. No secrets: the
+     * password fields only learn whether one is set. */
+    char wifi_ssid[33];
+    bool wifi_pass_set;
+    char sip_server[64];
+    uint16_t sip_port;         /* 0 = unset */
+    char sip_user[64];
+    char sip_display_name[64];
+    bool sip_pass_set;
 } ui_model_t;

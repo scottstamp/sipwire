@@ -89,4 +89,4 @@ static void incoming_key(char key, ui_key_action_t action)
     }
 }
 
-const ui_screen_ops_t ui_ops_incoming = {incoming_create, incoming_update, incoming_key};
+const ui_screen_ops_t ui_ops_incoming = {incoming_create, incoming_update, incoming_key, NULL, NULL};

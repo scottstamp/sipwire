@@ -296,4 +296,4 @@ static void call_key(char key, ui_key_action_t action)
     }
 }
 
-const ui_screen_ops_t ui_ops_call = {call_create, call_update, call_key};
+const ui_screen_ops_t ui_ops_call = {call_create, call_update, call_key, NULL, NULL};

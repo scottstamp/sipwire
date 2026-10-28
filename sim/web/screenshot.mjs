@@ -156,7 +156,7 @@ const SCENARIOS = {
     steps: async (page, click) => {
       await click(178, 282);   // Home -> Settings
       await page.waitForTimeout(250);
-      await click(120, 230);   // "About" row
+      await click(120, 283);   // "About" row
     },
   },
   settings_account_port: {
@@ -175,6 +175,66 @@ const SCENARIOS = {
       // drag the form up so the Port field is visible, then tap it (number pad)
       await drag(120, 150, 120, 100);   // ~50 px up
       await click(110, 140);            // Port field (number pad)
+    },
+  },
+  // Forms open prefilled from the model (the sim mock has stored settings; passwords
+  // only as "unchanged" placeholders).
+  settings_wifi_prefilled: {
+    sim: (sim) => {
+      sim.set_net(2, -55);
+      sim.set_reg(2);
+      sim.set_time('12:34');
+    },
+    steps: async (page, click) => {
+      await click(178, 282);   // Home -> Settings
+      await page.waitForTimeout(250);
+      await click(120, 106);   // "Wi-Fi" row
+    },
+  },
+  settings_account_prefilled: {
+    sim: (sim) => {
+      sim.set_net(2, -55);
+      sim.set_reg(2);
+      sim.set_time('12:34');
+    },
+    steps: async (page, click) => {
+      await click(178, 282);   // Home -> Settings
+      await page.waitForTimeout(250);
+      await click(120, 166);   // "SIP account" row
+    },
+  },
+  calibrate_target1: {
+    sim: (sim) => {
+      sim.set_net(2, -55);
+      sim.set_reg(2);
+      sim.set_time('12:34');
+    },
+    steps: async (page, click) => {
+      await click(178, 282);   // Home -> Settings
+      await page.waitForTimeout(250);
+      await click(120, 226);   // "Touch calibration" row
+      await page.waitForTimeout(400);
+    },
+  },
+  // All four crosses touched (the page turns canvas mouse input into fake raw samples
+  // of a panel rotated by 180 degrees), then one test touch: the red dot shows where
+  // the new calibration puts it.
+  calibrate_done: {
+    sim: (sim) => {
+      sim.set_net(2, -55);
+      sim.set_reg(2);
+      sim.set_time('12:34');
+    },
+    steps: async (page, click, drag, hold) => {
+      await click(178, 282);   // Home -> Settings
+      await page.waitForTimeout(250);
+      await click(120, 226);   // "Touch calibration" row
+      await page.waitForTimeout(500);
+      for (const [x, y] of [[20, 20], [219, 20], [219, 299], [20, 299]]) {
+        await hold(x, y, 200);
+        await page.waitForTimeout(450);   // the screen ignores samples briefly after a point
+      }
+      await hold(150, 120, 200);   // test touch; the dot stays where it was lifted
     },
   },
 };
@@ -223,9 +283,9 @@ const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=sw
 let failed = false;
 
 // A scenario is either a function of window.sim (runs in the page) or
-// { sim: fn(sim), steps: async (page, click, drag) => {...} } where `steps` runs
-// in Node afterwards and may inject touch input with click(x, y) and
-// drag(x1, y1, x2, y2) in canvas pixels.
+// { sim: fn(sim), steps: async (page, click, drag, hold) => {...} } where `steps` runs
+// in Node afterwards and may inject touch input with click(x, y), drag(x1, y1, x2, y2)
+// and hold(x, y, ms) in canvas pixels.
 async function runScenario(name, file) {
   const page = await browser.newPage({ viewport: { width: 1000, height: 760 } });
   try {
@@ -260,8 +320,15 @@ async function runScenario(name, file) {
         await page.mouse.up();
         await page.waitForTimeout(100);
       };
+      const hold = async (x, y, ms) => {   // press, keep it down (samples keep coming), lift
+        await page.mouse.move(box.x + x, box.y + y);
+        await page.mouse.down();
+        await page.waitForTimeout(ms);
+        await page.mouse.up();
+        await page.waitForTimeout(60);
+      };
       await page.waitForTimeout(100);
-      await scenario.steps(page, click, drag);
+      await scenario.steps(page, click, drag, hold);
     }
     await page.waitForTimeout(300);
 

@@ -89,4 +89,4 @@ static void ended_update(const ui_model_t *m)
     }
 }
 
-const ui_screen_ops_t ui_ops_ended = {ended_create, ended_update, NULL};
+const ui_screen_ops_t ui_ops_ended = {ended_create, ended_update, NULL, NULL, NULL};

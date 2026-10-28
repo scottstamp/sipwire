@@ -16,9 +16,24 @@ typedef struct {
     int8_t rssi;
     char ip[16];
     char account[64];
+    /* non-secret settings for the Settings forms; passwords only as flags */
+    char wifi_ssid[33];
+    bool wifi_pass_set;
+    char sip_server[64];
+    uint16_t sip_port;
+    char sip_user[64];
+    char sip_display_name[64];
+    bool sip_pass_set;
     bool time_valid;                /* clock set by SNTP */
     int hour, minute;               /* local time, valid if time_valid */
 } ui_bridge_local_t;
+
+/** Fill the settings-derived fields of `loc` (account string, form prefill).
+ *  The passwords are only looked at for "is one set"; they are never copied.
+ *  NULL strings count as empty. */
+void ui_bridge_fill_settings(ui_bridge_local_t *loc, const char *wifi_ssid, const char *wifi_pass,
+                             const char *sip_server, uint16_t sip_port, const char *sip_user,
+                             const char *sip_pass, const char *sip_display_name);
 
 ui_reg_state_t ui_bridge_map_reg(sip_reg_state_t st);
 ui_call_state_t ui_bridge_map_call(call_state_t st);

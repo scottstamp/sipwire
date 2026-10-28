@@ -7,6 +7,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Touch calibration, same semantics as settings.h `touch_cal` and display.h:
+ * raw 12-bit touch values (after the controller's swap_xy, before any mirror or
+ * calibration) measured at screen x = 0 / x = width-1 and y = 0 / y = height-1.
+ * min > max is allowed (inverted axis). */
+typedef struct {
+    int16_t x_min, x_max, y_min, y_max;
+} ui_touch_cal_t;
+
 typedef struct {
     void *ctx;
     void (*dial)(void *ctx, const char *number);
@@ -17,8 +25,18 @@ typedef struct {
     void (*set_speaker)(void *ctx, bool on);
     void (*set_volume)(void *ctx, uint8_t volume);
     void (*hold)(void *ctx, bool hold);
+    /* An empty password keeps the stored one (the forms never show it). */
     void (*save_wifi)(void *ctx, const char *ssid, const char *pass);
+    /* Likewise: an empty password keeps the stored one. */
     void (*save_account)(void *ctx, const char *server, uint16_t port,
                          const char *user, const char *password,
                          const char *display_name);
+    /* The calibration screen opened: from now until touch_cal_end the device
+     * must stop delivering touches to LVGL and instead feed raw samples to
+     * ui_touch_raw(). */
+    void (*touch_cal_begin)(void *ctx);
+    /* The calibration screen closed (called once per begin, also when the
+     * screen is left because of an incoming call). `cal` is the result to
+     * store, or NULL when cancelled. Persist off the LVGL task. */
+    void (*touch_cal_end)(void *ctx, const ui_touch_cal_t *cal);
 } ui_actions_t;

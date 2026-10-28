@@ -142,6 +142,7 @@
     print: function (t) { console.log(t); logLine(t); },
     printErr: function (t) { console.warn(t); logLine('[err] ' + t); },
     simLog: logLine,
+    simTouchCal: function (on) { calActive = on; if (!on) calRelease(); },
     simModelChanged: function () {
       if (!refreshQueued) { refreshQueued = true; requestAnimationFrame(refreshModel); }
     },
@@ -166,8 +167,39 @@
     set_call: function (st, n, nm, sec) { Module.ccall('sim_set_call', null, ['number', 'string', 'string', 'number'], [st, n || '', nm || '', sec || 0]); },
     key: function (k, a) { Module.ccall('sim_key', null, ['number', 'number'], [typeof k === 'string' ? k.charCodeAt(0) : k, a || 0]); },
     set_time: function (s) { Module.ccall('sim_set_time', null, ['string'], [s]); },
+    touch_raw: function (ax, ay, p) { Module.ccall('sim_touch_raw', null, ['number', 'number', 'number'], [ax, ay, p ? 1 : 0]); },
     model: function () { return JSON.parse(getModelJson()); }
   };
+
+  // ---- touch calibration: fake raw touch panel ----
+  // While the calibration screen is open the C side switches LVGL's mouse off
+  // (simTouchCal) and these canvas mouse events become raw samples instead, as the
+  // device's display hook would deliver them. The fake panel is rotated 180 degrees
+  // and offset, so the calibration math has real work to do:
+  //   raw_x = 3900 - 15 * x,  raw_y = 3900 - 11 * y   (x, y in canvas pixels, 240x320)
+  // A held button repeats the last sample every 30 ms, like the polled touch driver.
+  var calActive = false, calDown = false, calLast = [0, 0], calTimer = null;
+  function fakeRaw(e) {
+    var r = $('canvas').getBoundingClientRect();
+    var x = (e.clientX - r.left) * 240 / r.width, y = (e.clientY - r.top) * 320 / r.height;
+    return [Math.round(3900 - 15 * x), Math.round(3900 - 11 * y)];
+  }
+  function calRelease() {
+    if (!calDown) return;
+    calDown = false;
+    clearInterval(calTimer);
+    window.sim.touch_raw(0, 0, 0);
+  }
+  $('canvas').addEventListener('mousedown', function (e) {
+    if (!calActive || !ready) return;
+    calDown = true;
+    calLast = fakeRaw(e);
+    window.sim.touch_raw(calLast[0], calLast[1], 1);
+    clearInterval(calTimer);
+    calTimer = setInterval(function () { window.sim.touch_raw(calLast[0], calLast[1], 1); }, 30);
+  });
+  window.addEventListener('mousemove', function (e) { if (calDown) calLast = fakeRaw(e); });
+  window.addEventListener('mouseup', calRelease);
 
   // ---- controls ----
   function applyNet() {

@@ -92,6 +92,26 @@ static void copy(char *dst, size_t size, const char *src)
     append(dst, size, &len, src);
 }
 
+static void copy_or_empty(char *dst, size_t size, const char *src)
+{
+    copy(dst, size, src ? src : "");
+}
+
+void ui_bridge_fill_settings(ui_bridge_local_t *loc, const char *wifi_ssid, const char *wifi_pass,
+                             const char *sip_server, uint16_t sip_port, const char *sip_user,
+                             const char *sip_pass, const char *sip_display_name)
+{
+    copy_or_empty(loc->wifi_ssid, sizeof(loc->wifi_ssid), wifi_ssid);
+    loc->wifi_pass_set = wifi_pass && wifi_pass[0];
+    copy_or_empty(loc->sip_server, sizeof(loc->sip_server), sip_server);
+    loc->sip_port = sip_port;
+    copy_or_empty(loc->sip_user, sizeof(loc->sip_user), sip_user);
+    loc->sip_pass_set = sip_pass && sip_pass[0];
+    copy_or_empty(loc->sip_display_name, sizeof(loc->sip_display_name), sip_display_name);
+    ui_bridge_format_account(loc->account, sizeof(loc->account), sip_display_name, sip_user,
+                             sip_server);
+}
+
 void ui_bridge_build_model(const ui_bridge_local_t *loc, const phone_status_t *ph, int64_t now_us,
                            ui_model_t *out)
 {
@@ -102,6 +122,13 @@ void ui_bridge_build_model(const ui_bridge_local_t *loc, const phone_status_t *p
 
     out->reg = ui_bridge_map_reg(ph->reg);
     copy(out->account, sizeof(out->account), loc->account);
+    copy(out->wifi_ssid, sizeof(out->wifi_ssid), loc->wifi_ssid);
+    out->wifi_pass_set = loc->wifi_pass_set;
+    copy(out->sip_server, sizeof(out->sip_server), loc->sip_server);
+    out->sip_port = loc->sip_port;
+    copy(out->sip_user, sizeof(out->sip_user), loc->sip_user);
+    copy(out->sip_display_name, sizeof(out->sip_display_name), loc->sip_display_name);
+    out->sip_pass_set = loc->sip_pass_set;
 
     out->call = ui_bridge_map_call(ph->call);
     if (out->call != UI_CALL_IDLE) {
