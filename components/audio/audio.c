@@ -1,0 +1,576 @@
+#include "audio.h"
+
+#include <stdatomic.h>
+#include <string.h>
+
+#include "board.h"
+#include "driver/gpio.h"
+#include "driver/i2s_std.h"
+#include "esp_check.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+
+#include "audio_dsp.h"
+
+static const char *TAG = "audio";
+
+/* The codec side is 8 kHz; the I2S side runs at 16 kHz (MEMS mics need
+ * BCLK >= ~1 MHz) and is resampled x2 / :2 with a half-band FIR. */
+#define AUDIO_I2S_RATE          16000
+#define AUDIO_RATIO             (AUDIO_I2S_RATE / AUDIO_SAMPLE_RATE)
+_Static_assert(AUDIO_RATIO == 2, "resampler is fixed at 2:1");
+
+#define I2S_FRAME_SAMPLES       (AUDIO_FRAME_SAMPLES * AUDIO_RATIO)     /* 20 ms */
+#define I2S_CHUNK_SAMPLES       (I2S_FRAME_SAMPLES / 2)                 /* 10 ms per read/write */
+#define I2S_DMA_DESC_NUM        4
+#define I2S_IO_TIMEOUT_MS       100
+#define RX_WARMUP_FRAMES        5       /* MEMS mics output garbage for ~100 ms after clock start */
+
+#define AUDIO_TASK_PRIO         (configMAX_PRIORITIES - 3)
+#define AUDIO_TASK_CORE         1
+#define TX_STACK_BYTES          5120
+#define RX_STACK_BYTES          6144
+
+#define DC_BLOCK_HZ             20
+#define DEFAULT_VOLUME          70
+
+#define EVT_TX_DONE             BIT0
+#define EVT_RX_DONE             BIT1
+
+typedef enum {
+    REQ_NONE,
+    REQ_TONE,
+    REQ_DTMF,
+} tone_req_kind_t;
+
+static struct {
+    bool inited;
+    const board_cfg_t *cfg;
+    i2s_chan_handle_t tx, rx;
+    SemaphoreHandle_t api_mtx;      /* serialises start/stop */
+    SemaphoreHandle_t cb_mtx;       /* held while a callback runs; guards src/sink/ctx */
+    EventGroupHandle_t done;
+    atomic_bool running;
+    atomic_bool stop;
+    audio_source_cb_t src;
+    audio_sink_cb_t sink;
+    void *ctx;
+    _Atomic uint8_t volume;
+    atomic_bool mic_mute;
+    portMUX_TYPE req_mux;
+    tone_req_kind_t req_kind;
+    audio_tone_t req_tone;
+    char req_digit;
+} s = {
+    .req_mux = portMUX_INITIALIZER_UNLOCKED,
+    .volume = DEFAULT_VOLUME,
+};
+
+/* ------------------------------------------------------------------ */
+/* amp enable                                                         */
+/* ------------------------------------------------------------------ */
+
+static void amp_set(bool on)
+{
+    gpio_num_t en = s.cfg->spk.en;
+    if (en == GPIO_NUM_NC) {
+        return;
+    }
+    gpio_set_level(en, on == s.cfg->spk.en_active_high ? 1 : 0);
+}
+
+static esp_err_t amp_init(void)
+{
+    gpio_num_t en = s.cfg->spk.en;
+    if (en == GPIO_NUM_NC) {
+        return ESP_OK;
+    }
+    ESP_RETURN_ON_ERROR(gpio_reset_pin(en), TAG, "amp en reset");
+    amp_set(false);
+    return gpio_set_direction(en, GPIO_MODE_OUTPUT);
+}
+
+/* ------------------------------------------------------------------ */
+/* I2S setup                                                          */
+/* ------------------------------------------------------------------ */
+
+static void release_channels(void)
+{
+    if (s.tx) {
+        i2s_del_channel(s.tx);
+        s.tx = NULL;
+    }
+    if (s.rx) {
+        i2s_del_channel(s.rx);
+        s.rx = NULL;
+    }
+}
+
+static esp_err_t i2s_setup(void)
+{
+    const board_cfg_t *c = s.cfg;
+    const bool duplex = c->mic.full_duplex;
+    const bool have_rx = duplex || c->mic.din != GPIO_NUM_NC;
+    esp_err_t ret = ESP_OK;
+
+    i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    cc.dma_desc_num = I2S_DMA_DESC_NUM;
+    cc.dma_frame_num = I2S_CHUNK_SAMPLES;
+    cc.auto_clear_after_cb = true;              /* underrun plays silence, not a looping buffer */
+
+    i2s_std_config_t tx_cfg = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AUDIO_I2S_RATE),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .mclk = I2S_GPIO_UNUSED,
+            .bclk = c->spk.bclk,
+            .ws = c->spk.ws,
+            .dout = c->spk.dout,
+            .din = I2S_GPIO_UNUSED,
+        },
+    };
+    i2s_std_config_t rx_cfg = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AUDIO_I2S_RATE),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .mclk = I2S_GPIO_UNUSED,
+            .bclk = duplex ? c->spk.bclk : c->mic.bclk,
+            .ws = duplex ? c->spk.ws : c->mic.ws,
+            .dout = I2S_GPIO_UNUSED,
+            .din = c->mic.din,
+        },
+    };
+    rx_cfg.slot_cfg.slot_mask = c->mic.slot_right ? I2S_STD_SLOT_RIGHT : I2S_STD_SLOT_LEFT;
+
+    if (duplex) {
+        /* Shared BCLK/WS: both directions must produce the same frame (64 BCLK),
+         * so the 16-bit TX data sits in a 32-bit slot. 384 x MCLK keeps the
+         * internal slave side (RX, initialised second) at an integer ratio >= 6. */
+        tx_cfg.slot_cfg.slot_bit_width = I2S_SLOT_BIT_WIDTH_32BIT;
+        tx_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_384;
+        rx_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_384;
+        ESP_GOTO_ON_ERROR(i2s_new_channel(&cc, &s.tx, &s.rx), err, TAG, "new duplex channel");
+        ESP_GOTO_ON_ERROR(i2s_channel_init_std_mode(s.tx, &tx_cfg), err, TAG, "init tx");
+        ESP_GOTO_ON_ERROR(i2s_channel_init_std_mode(s.rx, &rx_cfg), err, TAG, "init rx");
+    } else {
+        ESP_GOTO_ON_ERROR(i2s_new_channel(&cc, &s.tx, NULL), err, TAG, "new tx channel");
+        ESP_GOTO_ON_ERROR(i2s_channel_init_std_mode(s.tx, &tx_cfg), err, TAG, "init tx");
+        if (have_rx) {
+            i2s_chan_config_t rc = cc;
+            rc.id = I2S_NUM_1;
+            ESP_GOTO_ON_ERROR(i2s_new_channel(&rc, NULL, &s.rx), err, TAG, "new rx channel");
+            ESP_GOTO_ON_ERROR(i2s_channel_init_std_mode(s.rx, &rx_cfg), err, TAG, "init rx");
+        }
+    }
+    return ESP_OK;
+err:
+    release_channels();
+    return ret;
+}
+
+/* ------------------------------------------------------------------ */
+/* tasks                                                              */
+/* ------------------------------------------------------------------ */
+
+static void tone_poll(dsp_tone_t *t)
+{
+    tone_req_kind_t kind;
+    audio_tone_t tone;
+    char digit;
+
+    portENTER_CRITICAL(&s.req_mux);
+    kind = s.req_kind;
+    tone = s.req_tone;
+    digit = s.req_digit;
+    s.req_kind = REQ_NONE;
+    portEXIT_CRITICAL(&s.req_mux);
+
+    if (kind == REQ_DTMF) {
+        dsp_tone_start_dtmf(t, digit);
+    } else if (kind == REQ_TONE) {
+        switch (tone) {
+        case AUDIO_TONE_DIAL:     dsp_tone_start(t, DSP_TONE_DIAL); break;
+        case AUDIO_TONE_RINGBACK: dsp_tone_start(t, DSP_TONE_RINGBACK); break;
+        case AUDIO_TONE_BUSY:     dsp_tone_start(t, DSP_TONE_BUSY); break;
+        case AUDIO_TONE_RING:     dsp_tone_start(t, DSP_TONE_RING); break;
+        case AUDIO_TONE_KEYCLICK: dsp_tone_start(t, DSP_TONE_KEYCLICK); break;
+        case AUDIO_TONE_NONE:
+        default:                  dsp_tone_stop(t); break;
+        }
+    }
+}
+
+/* Write n 16-bit samples in 10 ms chunks. */
+static void tx_write(const int16_t *buf, size_t n)
+{
+    while (n > 0) {
+        size_t chunk = n > I2S_CHUNK_SAMPLES ? I2S_CHUNK_SAMPLES : n;
+        size_t written = 0;
+        esp_err_t err = i2s_channel_write(s.tx, buf, chunk * sizeof(int16_t), &written, I2S_IO_TIMEOUT_MS);
+        if (err == ESP_ERR_TIMEOUT) {
+            if (atomic_load(&s.stop)) {
+                return;
+            }
+        } else if (err != ESP_OK) {
+            ESP_LOGW(TAG, "i2s write: %s", esp_err_to_name(err));
+            vTaskDelay(pdMS_TO_TICKS(10));
+            return;
+        }
+        written /= sizeof(int16_t);
+        buf += written;
+        n -= written;
+    }
+}
+
+static void tx_task(void *arg)
+{
+    (void)arg;
+    int16_t src[AUDIO_FRAME_SAMPLES];
+    int32_t mix[AUDIO_FRAME_SAMPLES];
+    int16_t pcm8[AUDIO_FRAME_SAMPLES];
+    int16_t pcm16[I2S_FRAME_SAMPLES];
+    dsp_interp2_t up;
+    dsp_tone_t tone;
+
+    dsp_interp2_init(&up);
+    dsp_tone_init(&tone, AUDIO_SAMPLE_RATE);
+
+    /* Prime the DMA with silence, then wake the amp: no turn-on pop. */
+    memset(pcm16, 0, sizeof(pcm16));
+    tx_write(pcm16, I2S_FRAME_SAMPLES);
+    amp_set(true);
+
+    int32_t vol_g = dsp_gain_q15(atomic_load(&s.volume));
+    int32_t fade = 0;
+
+    for (;;) {
+        bool stopping = atomic_load(&s.stop);
+        if (stopping && fade == 0) {
+            break;
+        }
+        int32_t fade_to = stopping ? 0 : DSP_GAIN_UNITY;     /* 20 ms fade in / out */
+
+        tone_poll(&tone);
+
+        memset(src, 0, sizeof(src));
+        xSemaphoreTake(s.cb_mtx, portMAX_DELAY);
+        if (s.src) {
+            s.src(src, s.ctx);
+        }
+        xSemaphoreGive(s.cb_mtx);
+
+        for (int i = 0; i < AUDIO_FRAME_SAMPLES; i++) {
+            mix[i] = src[i];
+        }
+        dsp_tone_add(&tone, mix, AUDIO_FRAME_SAMPLES);
+
+        int32_t vol_to = dsp_gain_q15(atomic_load(&s.volume));
+        dsp_gain_ramp(mix, AUDIO_FRAME_SAMPLES,
+                      (int32_t)(((int64_t)vol_g * fade) >> 15),
+                      (int32_t)(((int64_t)vol_to * fade_to) >> 15));
+        vol_g = vol_to;
+        fade = fade_to;
+
+        dsp_softclip_buf(mix, pcm8, AUDIO_FRAME_SAMPLES);
+        dsp_interp2(&up, pcm8, AUDIO_FRAME_SAMPLES, pcm16);
+        tx_write(pcm16, I2S_FRAME_SAMPLES);
+    }
+
+    /* Faded out; flush one silent frame, then cut the amp. */
+    memset(pcm16, 0, sizeof(pcm16));
+    tx_write(pcm16, I2S_FRAME_SAMPLES);
+    amp_set(false);
+
+    xEventGroupSetBits(s.done, EVT_TX_DONE);
+    vTaskDelete(NULL);
+}
+
+static void rx_task(void *arg)
+{
+    (void)arg;
+    int32_t raw[I2S_FRAME_SAMPLES];
+    int16_t pcm16[I2S_FRAME_SAMPLES];
+    int16_t pcm8[AUDIO_FRAME_SAMPLES];
+    dsp_dcblock_t dc;
+    dsp_decim2_t down;
+    int shift = s.cfg->mic.shift;
+    int warmup = RX_WARMUP_FRAMES;
+
+    if (shift < 0) {
+        shift = 0;
+    } else if (shift > 31) {
+        shift = 31;
+    }
+    dsp_dcblock_init(&dc, AUDIO_I2S_RATE, DC_BLOCK_HZ);
+    dsp_decim2_init(&down);
+
+    while (!atomic_load(&s.stop)) {
+        size_t have = 0;
+        while (have < I2S_FRAME_SAMPLES && !atomic_load(&s.stop)) {
+            size_t want = I2S_FRAME_SAMPLES - have;
+            if (want > I2S_CHUNK_SAMPLES) {
+                want = I2S_CHUNK_SAMPLES;
+            }
+            size_t got = 0;
+            esp_err_t err = i2s_channel_read(s.rx, &raw[have], want * sizeof(int32_t), &got, I2S_IO_TIMEOUT_MS);
+            if (err == ESP_ERR_TIMEOUT) {
+                continue;
+            }
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "i2s read: %s", esp_err_to_name(err));
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+            have += got / sizeof(int32_t);
+        }
+        if (have < I2S_FRAME_SAMPLES) {
+            break;
+        }
+
+        for (int i = 0; i < I2S_FRAME_SAMPLES; i++) {
+            raw[i] >>= shift;
+        }
+        dsp_dcblock_process(&dc, raw, pcm16, I2S_FRAME_SAMPLES);
+        dsp_decim2(&down, pcm16, AUDIO_FRAME_SAMPLES, pcm8);
+
+        if (warmup > 0) {
+            warmup--;
+            memset(pcm8, 0, sizeof(pcm8));
+        } else if (atomic_load(&s.mic_mute)) {
+            memset(pcm8, 0, sizeof(pcm8));
+        }
+
+        xSemaphoreTake(s.cb_mtx, portMAX_DELAY);
+        if (s.sink) {
+            s.sink(pcm8, s.ctx);
+        }
+        xSemaphoreGive(s.cb_mtx);
+    }
+
+    xEventGroupSetBits(s.done, EVT_RX_DONE);
+    vTaskDelete(NULL);
+}
+
+/* ------------------------------------------------------------------ */
+/* start / stop                                                       */
+/* ------------------------------------------------------------------ */
+
+/* Caller holds api_mtx. */
+static esp_err_t stream_start_locked(void)
+{
+    if (atomic_load(&s.running)) {
+        return ESP_OK;
+    }
+    esp_err_t ret = ESP_OK;
+    EventBits_t wait_bits = EVT_TX_DONE;
+    bool tx_en = false, rx_en = false, tx_task_up = false;
+
+    atomic_store(&s.stop, false);
+    xEventGroupClearBits(s.done, EVT_TX_DONE | EVT_RX_DONE);
+
+    /* a tone request left over from a previous session must not fire now */
+    portENTER_CRITICAL(&s.req_mux);
+    s.req_kind = REQ_NONE;
+    portEXIT_CRITICAL(&s.req_mux);
+
+    ESP_GOTO_ON_ERROR(i2s_channel_enable(s.tx), fail, TAG, "enable tx");
+    tx_en = true;
+    if (s.rx) {
+        ESP_GOTO_ON_ERROR(i2s_channel_enable(s.rx), fail, TAG, "enable rx");
+        rx_en = true;
+    }
+
+    if (xTaskCreatePinnedToCore(tx_task, "audio_tx", TX_STACK_BYTES, NULL, AUDIO_TASK_PRIO,
+                                NULL, AUDIO_TASK_CORE) != pdPASS) {
+        ret = ESP_ERR_NO_MEM;
+        ESP_LOGE(TAG, "tx task create failed");
+        goto fail;
+    }
+    tx_task_up = true;
+    if (s.rx) {
+        if (xTaskCreatePinnedToCore(rx_task, "audio_rx", RX_STACK_BYTES, NULL, AUDIO_TASK_PRIO,
+                                    NULL, AUDIO_TASK_CORE) != pdPASS) {
+            ret = ESP_ERR_NO_MEM;
+            ESP_LOGE(TAG, "rx task create failed");
+            goto fail;
+        }
+    }
+
+    atomic_store(&s.running, true);
+    ESP_LOGI(TAG, "streaming started (%s)", s.cfg->mic.full_duplex ? "full duplex" : "2 controllers");
+    return ESP_OK;
+
+fail:
+    if (tx_task_up) {
+        atomic_store(&s.stop, true);
+        xEventGroupWaitBits(s.done, wait_bits, pdTRUE, pdTRUE, portMAX_DELAY);
+    }
+    if (rx_en) {
+        i2s_channel_disable(s.rx);
+    }
+    if (tx_en) {
+        i2s_channel_disable(s.tx);
+    }
+    amp_set(false);
+    return ret;
+}
+
+/* Caller holds api_mtx. */
+static void stream_stop_locked(void)
+{
+    if (!atomic_load(&s.running)) {
+        return;
+    }
+    EventBits_t bits = EVT_TX_DONE | (s.rx ? EVT_RX_DONE : 0);
+
+    atomic_store(&s.stop, true);        /* TX fades out over 20 ms, then both exit */
+    xEventGroupWaitBits(s.done, bits, pdTRUE, pdTRUE, portMAX_DELAY);
+
+    if (s.rx) {
+        i2s_channel_disable(s.rx);
+    }
+    i2s_channel_disable(s.tx);
+    amp_set(false);
+    atomic_store(&s.running, false);
+    ESP_LOGI(TAG, "streaming stopped");
+}
+
+/* ------------------------------------------------------------------ */
+/* public API                                                         */
+/* ------------------------------------------------------------------ */
+
+esp_err_t audio_init(void)
+{
+    if (s.inited) {
+        return ESP_OK;
+    }
+    esp_err_t ret = ESP_OK;
+
+    s.cfg = board_cfg();
+    ESP_RETURN_ON_FALSE(s.cfg, ESP_ERR_INVALID_STATE, TAG, "no board config");
+
+    s.api_mtx = xSemaphoreCreateMutex();
+    s.cb_mtx = xSemaphoreCreateMutex();
+    s.done = xEventGroupCreate();
+    ESP_GOTO_ON_FALSE(s.api_mtx && s.cb_mtx && s.done, ESP_ERR_NO_MEM, err, TAG, "no memory");
+
+    ESP_GOTO_ON_ERROR(amp_init(), err, TAG, "amp init");
+    ESP_GOTO_ON_ERROR(i2s_setup(), err, TAG, "i2s setup");
+
+    s.inited = true;
+    ESP_LOGI(TAG, "ready: i2s %d Hz, spk bclk=%d ws=%d dout=%d, mic din=%d (%s slot), shift %d",
+             AUDIO_I2S_RATE, s.cfg->spk.bclk, s.cfg->spk.ws, s.cfg->spk.dout, s.cfg->mic.din,
+             s.cfg->mic.slot_right ? "right" : "left", s.cfg->mic.shift);
+    return ESP_OK;
+err:
+    if (s.api_mtx) {
+        vSemaphoreDelete(s.api_mtx);
+        s.api_mtx = NULL;
+    }
+    if (s.cb_mtx) {
+        vSemaphoreDelete(s.cb_mtx);
+        s.cb_mtx = NULL;
+    }
+    if (s.done) {
+        vEventGroupDelete(s.done);
+        s.done = NULL;
+    }
+    return ret;
+}
+
+esp_err_t audio_start(audio_source_cb_t src, audio_sink_cb_t sink, void *ctx)
+{
+    ESP_RETURN_ON_FALSE(s.inited, ESP_ERR_INVALID_STATE, TAG, "not initialised");
+
+    xSemaphoreTake(s.api_mtx, portMAX_DELAY);
+
+    /* swap callbacks; waits for a running callback to finish */
+    xSemaphoreTake(s.cb_mtx, portMAX_DELAY);
+    s.src = src;
+    s.sink = sink;
+    s.ctx = ctx;
+    xSemaphoreGive(s.cb_mtx);
+
+    esp_err_t ret = stream_start_locked();
+    if (ret != ESP_OK) {
+        xSemaphoreTake(s.cb_mtx, portMAX_DELAY);
+        s.src = NULL;
+        s.sink = NULL;
+        s.ctx = NULL;
+        xSemaphoreGive(s.cb_mtx);
+    }
+    xSemaphoreGive(s.api_mtx);
+    return ret;
+}
+
+esp_err_t audio_stop(void)
+{
+    ESP_RETURN_ON_FALSE(s.inited, ESP_ERR_INVALID_STATE, TAG, "not initialised");
+
+    xSemaphoreTake(s.api_mtx, portMAX_DELAY);
+    stream_stop_locked();
+    xSemaphoreTake(s.cb_mtx, portMAX_DELAY);
+    s.src = NULL;
+    s.sink = NULL;
+    s.ctx = NULL;
+    xSemaphoreGive(s.cb_mtx);
+    xSemaphoreGive(s.api_mtx);
+    return ESP_OK;
+}
+
+static void post_tone_req(tone_req_kind_t kind, audio_tone_t tone, char digit)
+{
+    portENTER_CRITICAL(&s.req_mux);
+    s.req_kind = kind;
+    s.req_tone = tone;
+    s.req_digit = digit;
+    portEXIT_CRITICAL(&s.req_mux);
+}
+
+/* Fast path while streaming (callable from a callback: never takes api_mtx);
+ * otherwise auto-start so the tone is audible. */
+static void tone_request(tone_req_kind_t kind, audio_tone_t tone, char digit)
+{
+    if (!s.inited) {
+        ESP_LOGW(TAG, "tone requested before audio_init");
+        return;
+    }
+    if (atomic_load(&s.running)) {
+        post_tone_req(kind, tone, digit);
+        return;
+    }
+    if (kind == REQ_TONE && tone == AUDIO_TONE_NONE) {
+        return;                         /* nothing playing */
+    }
+    xSemaphoreTake(s.api_mtx, portMAX_DELAY);
+    if (stream_start_locked() == ESP_OK) {
+        post_tone_req(kind, tone, digit);   /* after start: start clears stale requests */
+    }
+    xSemaphoreGive(s.api_mtx);
+}
+
+void audio_play_tone(audio_tone_t tone)
+{
+    tone_request(REQ_TONE, tone, 0);
+}
+
+void audio_play_dtmf(char digit)
+{
+    if (!dsp_dtmf_freqs(digit, NULL, NULL)) {
+        return;
+    }
+    tone_request(REQ_DTMF, AUDIO_TONE_NONE, digit);
+}
+
+void audio_set_volume(uint8_t volume)
+{
+    atomic_store(&s.volume, volume > 100 ? 100 : volume);
+}
+
+void audio_set_mic_mute(bool mute)
+{
+    atomic_store(&s.mic_mute, mute);
+}

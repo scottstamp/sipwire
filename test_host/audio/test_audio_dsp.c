@@ -1,0 +1,553 @@
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "unity.h"
+#include "audio_dsp.h"
+
+#define FS8  8000
+#define FS16 16000
+
+void setUp(void) {}
+void tearDown(void) {}
+
+/* ---- helpers ---- */
+
+static double rms16(const int16_t *x, size_t n)
+{
+    double acc = 0;
+    for (size_t i = 0; i < n; i++) {
+        acc += (double)x[i] * x[i];
+    }
+    return sqrt(acc / (double)n);
+}
+
+static void gen_sine(int16_t *x, size_t n, double f, double fs, double amp)
+{
+    for (size_t i = 0; i < n; i++) {
+        x[i] = (int16_t)lrint(amp * sin(2.0 * M_PI * f * (double)i / fs));
+    }
+}
+
+/* Goertzel power (normalised so a full-scale-amplitude A sine gives ~A^2/4). */
+static double goertzel(const int16_t *x, size_t n, double f, double fs)
+{
+    double w = 2.0 * M_PI * f / fs, c = 2.0 * cos(w), s1 = 0, s2 = 0;
+    for (size_t i = 0; i < n; i++) {
+        double s0 = x[i] + c * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    double p = s1 * s1 + s2 * s2 - c * s1 * s2;
+    return p / ((double)n * (double)n);
+}
+
+static void tone_render(dsp_tone_t *t, int16_t *out, size_t n)
+{
+    int32_t acc[160];
+    size_t i = 0;
+    while (i < n) {
+        size_t k = n - i > 160 ? 160 : n - i;
+        memset(acc, 0, sizeof(acc));
+        dsp_tone_add(t, acc, k);
+        for (size_t j = 0; j < k; j++) {
+            TEST_ASSERT_TRUE(acc[j] >= INT16_MIN && acc[j] <= INT16_MAX);
+            out[i + j] = (int16_t)acc[j];
+        }
+        i += k;
+    }
+}
+
+/* ---- tone generator ---- */
+
+static void test_tone_single_frequency(void)
+{
+    enum { N = FS8 };       /* 1 s */
+    static int16_t buf[N];
+    dsp_tone_t t;
+    dsp_tone_def_t def = { .f1 = 1000 };
+
+    dsp_tone_init(&t, FS8);
+    dsp_tone_start_def(&t, &def);
+    tone_render(&t, buf, N);
+
+    int crossings = 0;
+    for (int i = 1; i < N; i++) {
+        if ((buf[i - 1] < 0) != (buf[i] < 0)) {
+            crossings++;
+        }
+    }
+    /* 1 kHz over 1 s -> 2000 zero crossings (a few off for the attack ramp) */
+    TEST_ASSERT_INT_WITHIN(3, 2000, crossings);
+    TEST_ASSERT_TRUE(rms16(buf, N) > 3000);
+}
+
+static void test_tone_dial_components(void)
+{
+    enum { N = FS8 };
+    static int16_t buf[N];
+    dsp_tone_t t;
+
+    dsp_tone_init(&t, FS8);
+    dsp_tone_start(&t, DSP_TONE_DIAL);
+    tone_render(&t, buf, N);
+
+    double p350 = goertzel(buf, N, 350, FS8), p440 = goertzel(buf, N, 440, FS8);
+    double pbad = goertzel(buf, N, 600, FS8);
+    TEST_ASSERT_TRUE(p350 > 1e5 && p440 > 1e5);
+    TEST_ASSERT_TRUE(10 * log10(p350 / pbad) > 40);
+    TEST_ASSERT_TRUE(dsp_tone_active(&t));      /* continuous */
+}
+
+/* Returns the on/off run lengths (ms) found by 10 ms block envelope. */
+static int find_runs(dsp_tone_kind_t kind, int total_ms, int *runs, int max_runs)
+{
+    size_t n = (size_t)total_ms * FS8 / 1000;
+    int16_t *buf = malloc(n * sizeof(int16_t));
+    dsp_tone_t t;
+    int nruns = 0, cur_len = 0;
+    bool cur = false, first = true;
+
+    TEST_ASSERT_NOT_NULL(buf);
+    dsp_tone_init(&t, FS8);
+    dsp_tone_start(&t, kind);
+    tone_render(&t, buf, n);
+
+    for (size_t b = 0; b + 80 <= n; b += 80) {          /* 10 ms blocks */
+        int peak = 0;
+        for (size_t i = b; i < b + 80; i++) {
+            int a = abs(buf[i]);
+            if (a > peak) {
+                peak = a;
+            }
+        }
+        bool on = peak > 2000;
+        if (first) {
+            cur = on;
+            first = false;
+        }
+        if (on == cur) {
+            cur_len += 10;
+        } else {
+            if (nruns < max_runs) {
+                runs[nruns] = cur ? cur_len : -cur_len;
+            }
+            nruns++;
+            cur = on;
+            cur_len = 10;
+        }
+    }
+    free(buf);
+    return nruns;
+}
+
+static void test_tone_cadence_ringback(void)
+{
+    int runs[8];
+    int n = find_runs(DSP_TONE_RINGBACK, 14000, runs, 8);   /* on 2 / off 4 / on 2 / off 4 / on 2 */
+    TEST_ASSERT_TRUE(n >= 4);
+    TEST_ASSERT_INT_WITHIN(20, 2000, runs[0]);
+    TEST_ASSERT_INT_WITHIN(20, -4000, runs[1]);
+    TEST_ASSERT_INT_WITHIN(20, 2000, runs[2]);
+    TEST_ASSERT_INT_WITHIN(20, -4000, runs[3]);
+}
+
+static void test_tone_cadence_busy(void)
+{
+    int runs[8];
+    int n = find_runs(DSP_TONE_BUSY, 4000, runs, 8);
+    TEST_ASSERT_TRUE(n >= 4);
+    for (int i = 0; i < 4; i++) {
+        TEST_ASSERT_INT_WITHIN(20, (i & 1) ? -500 : 500, runs[i]);
+    }
+}
+
+static void test_tone_cadence_ring(void)
+{
+    int runs[8];
+    int n = find_runs(DSP_TONE_RING, 8000, runs, 8);        /* 1 s on / 2 s off */
+    TEST_ASSERT_TRUE(n >= 3);
+    TEST_ASSERT_INT_WITHIN(20, 1000, runs[0]);
+    TEST_ASSERT_INT_WITHIN(20, -2000, runs[1]);
+    TEST_ASSERT_INT_WITHIN(20, 1000, runs[2]);
+}
+
+static void test_tone_ring_warbles(void)
+{
+    enum { N = FS8 / 2 };
+    static int16_t buf[N];
+    dsp_tone_t t;
+
+    dsp_tone_init(&t, FS8);
+    dsp_tone_start(&t, DSP_TONE_RING);
+    tone_render(&t, buf, N);
+    /* energy at both warble frequencies */
+    TEST_ASSERT_TRUE(goertzel(buf, N, 1000, FS8) > 1e4);
+    TEST_ASSERT_TRUE(goertzel(buf, N, 1200, FS8) > 1e4);
+}
+
+static void test_tone_keyclick_oneshot(void)
+{
+    static int16_t buf[FS8];
+    dsp_tone_t t;
+    dsp_tone_init(&t, FS8);
+    dsp_tone_start(&t, DSP_TONE_KEYCLICK);
+    tone_render(&t, buf, FS8 / 10);                         /* 100 ms */
+
+    size_t last = 0;
+    for (size_t i = 0; i < FS8 / 10; i++) {
+        if (abs(buf[i]) > 100) {
+            last = i;
+        }
+    }
+    /* ~30 ms + 5 ms release */
+    TEST_ASSERT_TRUE(last > 20 * FS8 / 1000);
+    TEST_ASSERT_TRUE(last < 45 * FS8 / 1000);
+    TEST_ASSERT_FALSE(dsp_tone_active(&t));
+}
+
+static void test_tone_stop_releases(void)
+{
+    static int16_t buf[FS8 / 10];
+    dsp_tone_t t;
+    dsp_tone_init(&t, FS8);
+    dsp_tone_start(&t, DSP_TONE_DIAL);
+    tone_render(&t, buf, 800);
+    dsp_tone_stop(&t);
+    tone_render(&t, buf, 800);
+    TEST_ASSERT_FALSE(dsp_tone_active(&t));
+    TEST_ASSERT_EQUAL_INT16(0, buf[799]);
+    /* released smoothly: no jump beyond the max slope of the 350+440 Hz pair (~6100) */
+    for (int i = 1; i < 800; i++) {
+        TEST_ASSERT_TRUE(abs(buf[i] - buf[i - 1]) < 7000);
+    }
+}
+
+static void test_dtmf_pairs(void)
+{
+    static const char keys[] = "123A456B789C*0#D";
+    static const unsigned row[4] = { 697, 770, 852, 941 };
+    static const unsigned col[4] = { 1209, 1336, 1477, 1633 };
+    enum { N = FS8 / 10 };
+    static int16_t buf[N];
+
+    for (int k = 0; k < 16; k++) {
+        dsp_tone_t t;
+        dsp_tone_init(&t, FS8);
+        TEST_ASSERT_TRUE(dsp_tone_start_dtmf(&t, keys[k]));
+        tone_render(&t, buf, N);
+
+        unsigned want_lo = row[k / 4], want_hi = col[k % 4];
+        unsigned lo, hi;
+        TEST_ASSERT_TRUE(dsp_dtmf_freqs(keys[k], &lo, &hi));
+        TEST_ASSERT_EQUAL_UINT(want_lo, lo);
+        TEST_ASSERT_EQUAL_UINT(want_hi, hi);
+
+        double p_lo = goertzel(buf, N, want_lo, FS8), p_hi = goertzel(buf, N, want_hi, FS8);
+        double worst = 0;
+        for (int i = 0; i < 4; i++) {
+            if (row[i] != want_lo) {
+                double p = goertzel(buf, N, row[i], FS8);
+                worst = p > worst ? p : worst;
+            }
+            if (col[i] != want_hi) {
+                double p = goertzel(buf, N, col[i], FS8);
+                worst = p > worst ? p : worst;
+            }
+        }
+        TEST_ASSERT_TRUE_MESSAGE(10 * log10(p_lo / worst) > 20, "row tone not dominant");
+        TEST_ASSERT_TRUE_MESSAGE(10 * log10(p_hi / worst) > 20, "col tone not dominant");
+        /* twist: tones are generated at equal level */
+        TEST_ASSERT_TRUE(fabs(10 * log10(p_lo / p_hi)) < 1.0);
+    }
+    dsp_tone_t t;
+    dsp_tone_init(&t, FS8);
+    TEST_ASSERT_FALSE(dsp_tone_start_dtmf(&t, 'x'));
+    TEST_ASSERT_FALSE(dsp_tone_active(&t));
+}
+
+static void test_dtmf_duration(void)
+{
+    static int16_t buf[FS8];
+    dsp_tone_t t;
+    dsp_tone_init(&t, FS8);
+    dsp_tone_start_dtmf(&t, '5');
+    tone_render(&t, buf, FS8 / 2);
+    size_t last = 0;
+    for (size_t i = 0; i < FS8 / 2; i++) {
+        if (abs(buf[i]) > 100) {
+            last = i;
+        }
+    }
+    TEST_ASSERT_INT_WITHIN(8 * FS8 / 1000, 105 * FS8 / 1000, (int)last);   /* 100 ms + release */
+    TEST_ASSERT_FALSE(dsp_tone_active(&t));
+}
+
+/* ---- resampler ---- */
+
+static void test_resampler_passband(void)
+{
+    enum { N = FS8 };
+    static int16_t x[N], up[2 * N], y[N];
+    dsp_interp2_t u;
+    dsp_decim2_t d;
+
+    gen_sine(x, N, 1000, FS8, 10000);
+    dsp_interp2_init(&u);
+    dsp_decim2_init(&d);
+    /* process in 160-sample frames like the firmware */
+    for (int i = 0; i < N; i += 160) {
+        dsp_interp2(&u, x + i, 160, up + 2 * i);
+        dsp_decim2(&d, up + 2 * i, 160, y + i);
+    }
+    double gain_db = 20 * log10(rms16(y + 400, N - 400) / rms16(x + 400, N - 400));
+    TEST_ASSERT_TRUE_MESSAGE(fabs(gain_db) < 1.0, "1 kHz not preserved within 1 dB");
+}
+
+static void test_resampler_up_is_clean(void)
+{
+    enum { N = FS8 };
+    static int16_t x[N], up[2 * N];
+    dsp_interp2_t u;
+
+    gen_sine(x, N, 1000, FS8, 10000);
+    dsp_interp2_init(&u);
+    dsp_interp2(&u, x, N, up);
+    /* image at 16k-1k = 15k (and 7k) must be strongly suppressed */
+    double fund = goertzel(up + 800, N, 1000, FS16);
+    double img = goertzel(up + 800, N, 7000, FS16);
+    TEST_ASSERT_TRUE(10 * log10(fund / img) > 40);
+    /* amplitude preserved */
+    TEST_ASSERT_TRUE(fabs(20 * log10(rms16(up + 800, N) / rms16(x + 400, N - 400) )) < 1.0);
+}
+
+static void test_resampler_stopband(void)
+{
+    enum { N = FS16 };
+    static int16_t x[N], y[N / 2];
+    dsp_decim2_t d;
+
+    gen_sine(x, N, 6000, FS16, 10000);
+    dsp_decim2_init(&d);
+    dsp_decim2(&d, x, N / 2, y);
+    double att_db = 20 * log10(rms16(y + 100, N / 2 - 100) / rms16(x + 200, N - 200));
+    TEST_ASSERT_TRUE_MESSAGE(att_db < -30, "6 kHz alias not attenuated > 30 dB");
+}
+
+static void test_resampler_chunking_invariant(void)
+{
+    enum { N = 1000 };
+    static int16_t x[2 * N], a[N], b[N];
+    dsp_decim2_t d1, d2;
+
+    for (int i = 0; i < 2 * N; i++) {
+        x[i] = (int16_t)((i * 7919) % 20000 - 10000);
+    }
+    dsp_decim2_init(&d1);
+    dsp_decim2_init(&d2);
+    dsp_decim2(&d1, x, N, a);
+    for (int i = 0; i < N; i += 160) {
+        int k = N - i > 160 ? 160 : N - i;
+        dsp_decim2(&d2, x + 2 * i, (size_t)k, b + i);
+    }
+    TEST_ASSERT_EQUAL_INT16_ARRAY(a, b, N);
+}
+
+static void test_resampler_full_scale_no_wrap(void)
+{
+    enum { N = 800 };
+    static int16_t x[N], up[2 * N];
+    dsp_interp2_t u;
+    dsp_interp2_init(&u);
+    for (int i = 0; i < N; i++) {
+        x[i] = (i & 1) ? INT16_MIN : INT16_MAX;     /* worst case: Nyquist square */
+    }
+    dsp_interp2(&u, x, N, up);
+    dsp_decim2_t d;
+    static int16_t y[N];
+    dsp_decim2_init(&d);
+    dsp_decim2(&d, up, N, y);
+    (void)y;                                        /* ASan/UBSan: no overflow */
+}
+
+/* ---- DC blocker ---- */
+
+static void test_dcblock_removes_offset(void)
+{
+    enum { N = FS16 * 2 };
+    static int32_t x[N];
+    static int16_t y[N];
+    dsp_dcblock_t s;
+
+    for (int i = 0; i < N; i++) {
+        x[i] = 5000;
+    }
+    dsp_dcblock_init(&s, FS16, 20);
+    dsp_dcblock_process(&s, x, y, N);
+    for (int i = FS16; i < N; i++) {
+        TEST_ASSERT_INT_WITHIN(2, 0, y[i]);
+    }
+}
+
+static void test_dcblock_passes_voice(void)
+{
+    enum { N = FS16 };
+    static int16_t t[N], y[N];
+    static int32_t x[N];
+    dsp_dcblock_t s;
+
+    gen_sine(t, N, 1000, FS16, 8000);
+    for (int i = 0; i < N; i++) {
+        x[i] = t[i] + 3000;                     /* tone riding on a DC offset */
+    }
+    dsp_dcblock_init(&s, FS16, 20);
+    dsp_dcblock_process(&s, x, y, N);
+    double gain_db = 20 * log10(rms16(y + 8000, N - 8000) / rms16(t + 8000, N - 8000));
+    TEST_ASSERT_TRUE(fabs(gain_db) < 0.5);
+}
+
+static void test_dcblock_attenuates_below_cutoff(void)
+{
+    enum { N = FS16 * 2 };
+    static int16_t t[N], y[N];
+    static int32_t x[N];
+    dsp_dcblock_t s;
+
+    gen_sine(t, N, 5, FS16, 8000);
+    for (int i = 0; i < N; i++) {
+        x[i] = t[i];
+    }
+    dsp_dcblock_init(&s, FS16, 20);
+    dsp_dcblock_process(&s, x, y, N);
+    double gain_db = 20 * log10(rms16(y + FS16, N - FS16) / rms16(t + FS16, N - FS16));
+    TEST_ASSERT_TRUE(gain_db < -9);
+}
+
+static void test_dcblock_saturates(void)
+{
+    dsp_dcblock_t s;
+    dsp_dcblock_init(&s, FS16, 20);
+    TEST_ASSERT_EQUAL_INT16(INT16_MAX, dsp_dcblock_step(&s, 1 << 20));
+    dsp_dcblock_init(&s, FS16, 20);
+    TEST_ASSERT_EQUAL_INT16(INT16_MIN, dsp_dcblock_step(&s, -(1 << 20)));
+}
+
+/* ---- gain + soft clip ---- */
+
+static void test_gain_curve(void)
+{
+    TEST_ASSERT_EQUAL_INT32(0, dsp_gain_q15(0));
+    TEST_ASSERT_EQUAL_INT32(DSP_GAIN_UNITY, dsp_gain_q15(100));
+    TEST_ASSERT_EQUAL_INT32(DSP_GAIN_UNITY, dsp_gain_q15(250));     /* clamped */
+    TEST_ASSERT_INT_WITHIN(2, DSP_GAIN_UNITY / 4, dsp_gain_q15(50));
+    int32_t prev = -1;
+    for (int v = 0; v <= 100; v++) {
+        int32_t g = dsp_gain_q15((uint8_t)v);
+        TEST_ASSERT_TRUE(g > prev || v == 0);
+        prev = g;
+    }
+}
+
+static void test_gain_zero_silence_and_unity(void)
+{
+    int32_t a[160], b[160];
+    for (int i = 0; i < 160; i++) {
+        a[i] = b[i] = (i * 397) % 60000 - 30000;
+    }
+    dsp_gain_ramp(a, 160, 0, 0);
+    for (int i = 0; i < 160; i++) {
+        TEST_ASSERT_EQUAL_INT32(0, a[i]);
+    }
+    int32_t g = dsp_gain_q15(100);
+    dsp_gain_ramp(b, 160, g, g);
+    for (int i = 0; i < 160; i++) {
+        TEST_ASSERT_EQUAL_INT32((i * 397) % 60000 - 30000, b[i]);
+    }
+}
+
+static void test_gain_ramp_monotonic(void)
+{
+    int32_t a[160];
+    for (int i = 0; i < 160; i++) {
+        a[i] = 10000;
+    }
+    dsp_gain_ramp(a, 160, 0, DSP_GAIN_UNITY);
+    for (int i = 1; i < 160; i++) {
+        TEST_ASSERT_TRUE(a[i] >= a[i - 1]);
+    }
+    TEST_ASSERT_EQUAL_INT32(10000, a[159]);
+    TEST_ASSERT_TRUE(a[0] < 200);
+}
+
+static void test_softclip_never_wraps(void)
+{
+    static const int32_t probes[] = {
+        0, 1, -1, 24576, 24577, -24577, 32767, 32768, -32768, 40000, -40000,
+        65535, -65536, 1 << 20, -(1 << 20), INT32_MAX, INT32_MIN,
+    };
+    for (size_t i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
+        int32_t x = probes[i];
+        int16_t y = dsp_softclip(x);
+        TEST_ASSERT_TRUE(y >= -32766 && y <= 32766);
+        if (x > 0) {
+            TEST_ASSERT_TRUE(y > 0);
+        }
+        if (x < 0) {
+            TEST_ASSERT_TRUE(y < 0);
+        }
+        if (x != INT32_MIN) {
+            TEST_ASSERT_EQUAL_INT16(-y, dsp_softclip(-x));      /* odd symmetry */
+        }
+    }
+    /* sweep: monotonic, linear below the knee */
+    int16_t prev = dsp_softclip(-100000);
+    for (int32_t x = -100000; x <= 100000; x += 7) {
+        int16_t y = dsp_softclip(x);
+        TEST_ASSERT_TRUE(y >= prev);
+        prev = y;
+        if (abs(x) <= 24576) {
+            TEST_ASSERT_EQUAL_INT16(x, y);
+        }
+    }
+}
+
+static void test_softclip_buf(void)
+{
+    int32_t in[4] = { 100, -100, 50000, -50000 };
+    int16_t out[4];
+    dsp_softclip_buf(in, out, 4);
+    TEST_ASSERT_EQUAL_INT16(100, out[0]);
+    TEST_ASSERT_EQUAL_INT16(-100, out[1]);
+    TEST_ASSERT_TRUE(out[2] > 24576 && out[2] < 32767);
+    TEST_ASSERT_EQUAL_INT16(-out[2], out[3]);
+}
+
+int main(void)
+{
+    UNITY_BEGIN();
+    RUN_TEST(test_tone_single_frequency);
+    RUN_TEST(test_tone_dial_components);
+    RUN_TEST(test_tone_cadence_ringback);
+    RUN_TEST(test_tone_cadence_busy);
+    RUN_TEST(test_tone_cadence_ring);
+    RUN_TEST(test_tone_ring_warbles);
+    RUN_TEST(test_tone_keyclick_oneshot);
+    RUN_TEST(test_tone_stop_releases);
+    RUN_TEST(test_dtmf_pairs);
+    RUN_TEST(test_dtmf_duration);
+    RUN_TEST(test_resampler_passband);
+    RUN_TEST(test_resampler_up_is_clean);
+    RUN_TEST(test_resampler_stopband);
+    RUN_TEST(test_resampler_chunking_invariant);
+    RUN_TEST(test_resampler_full_scale_no_wrap);
+    RUN_TEST(test_dcblock_removes_offset);
+    RUN_TEST(test_dcblock_passes_voice);
+    RUN_TEST(test_dcblock_attenuates_below_cutoff);
+    RUN_TEST(test_dcblock_saturates);
+    RUN_TEST(test_gain_curve);
+    RUN_TEST(test_gain_zero_silence_and_unity);
+    RUN_TEST(test_gain_ramp_monotonic);
+    RUN_TEST(test_softclip_never_wraps);
+    RUN_TEST(test_softclip_buf);
+    return UNITY_END();
+}
