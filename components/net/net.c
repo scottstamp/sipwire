@@ -291,9 +291,9 @@ esp_err_t net_init(void)
                         TAG, "register settings handler");
 
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi start");
-    /* WIFI_PS_MIN_MODEM: radio sleeps between DTIM beacons only. Keeps SIP/RTP latency and jitter
-     * low enough for VoIP while still saving power. MAX_MODEM adds listen-interval latency that
-     * delays incoming INVITEs and hurts jitter; PS_NONE burns power for no real gain. */
+    /* WIFI_PS_MIN_MODEM while idle: radio sleeps between DTIM beacons only, enough for SIP
+     * signalling. Calls switch to PS_NONE (net_set_low_latency): during media the DTIM
+     * bursts stutter the audio. MAX_MODEM adds listen-interval latency to incoming INVITEs. */
     ESP_RETURN_ON_ERROR(esp_wifi_set_ps(WIFI_PS_MIN_MODEM), TAG, "wifi ps");
 
     ESP_LOGI(TAG, "wifi sta started%s", s_ssid[0] ? "" : " (no SSID configured, idle)");
@@ -319,4 +319,18 @@ bool net_is_connected(void)
 const char *net_ip_str(void)
 {
     return atomic_load(&s_ip_ptr);
+}
+
+void net_set_low_latency(bool enable)
+{
+#if CONFIG_SIPWIRE_QEMU
+    (void)enable;
+#else
+    esp_err_t err = esp_wifi_set_ps(enable ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "wifi ps: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "power save %s", enable ? "off (call)" : "on");
+    }
+#endif
 }
