@@ -293,7 +293,7 @@ static lv_obj_t *settings_create(const char *arg)
     s->page[PG_LIST] = ui_box_create(scr, 0, BODY_Y, UI_W, BODY_H);
     list_row(s->page[PG_LIST], 0, PG_WIFI, LV_SYMBOL_WIFI, "Wi-Fi");
     list_row(s->page[PG_LIST], 1, PG_ACCOUNT, LV_SYMBOL_CALL, "SIP account");
-    list_row(s->page[PG_LIST], 2, PG_COUNT, LV_SYMBOL_EDIT, "Touch calibration");
+    list_row(s->page[PG_LIST], 2, PG_COUNT, LV_SYMBOL_EDIT, "Calibrate");
     list_row(s->page[PG_LIST], 3, PG_ABOUT, LV_SYMBOL_LIST, "About");
 
     s->page[PG_WIFI] = form_create(s, scr);
