@@ -8,6 +8,11 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "sdkconfig.h"
+#if CONFIG_SIPWIRE_QEMU
+#include "esp_eth.h"
+#include "esp_eth_mac_openeth.h"
+#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "settings.h"
@@ -208,11 +213,54 @@ static void on_settings_event(void *arg, esp_event_base_t base, int32_t id, void
     xSemaphoreGive(s_lock);
 }
 
+#if CONFIG_SIPWIRE_QEMU
+/* QEMU smoke-test build: OpenCores Ethernet (slirp) stands in for Wi-Fi. */
+static void on_eth_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    (void)id;
+    const ip_event_got_ip_t *got = data;
+    net_event_ip_t ev = { .ip = got->ip_info.ip.addr };
+    esp_ip4addr_ntoa(&got->ip_info.ip, ev.ip_str, sizeof(ev.ip_str));
+    char *slot = s_ip_slots[s_ip_next++ % IP_SLOTS];
+    memcpy(slot, ev.ip_str, sizeof(ev.ip_str));
+    atomic_store(&s_ip_ptr, slot);
+    atomic_store(&s_connected, true);
+    ESP_LOGI(TAG, "eth got ip %s", ev.ip_str);
+    net_post(NET_EVENT_GOT_IP, &ev, sizeof(ev));
+}
+
+static esp_err_t net_init_qemu(void)
+{
+    esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
+    esp_netif_t *netif = esp_netif_new(&netif_cfg);
+    ESP_RETURN_ON_FALSE(netif != NULL, ESP_FAIL, TAG, "eth netif");
+    eth_mac_config_t mac_cfg = ETH_MAC_DEFAULT_CONFIG();
+    eth_phy_config_t phy_cfg = ETH_PHY_DEFAULT_CONFIG();
+    phy_cfg.autonego_timeout_ms = 100;
+    esp_eth_mac_t *mac = esp_eth_mac_new_openeth(&mac_cfg);
+    esp_eth_phy_t *phy = esp_eth_phy_new_generic(&phy_cfg);
+    esp_eth_config_t eth_cfg = ETH_DEFAULT_CONFIG(mac, phy);
+    esp_eth_handle_t eth = NULL;
+    ESP_RETURN_ON_ERROR(esp_eth_driver_install(&eth_cfg, &eth), TAG, "eth install");
+    ESP_RETURN_ON_ERROR(esp_netif_attach(netif, esp_eth_new_netif_glue(eth)), TAG, "eth attach");
+    ESP_RETURN_ON_ERROR(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, on_eth_ip, NULL), TAG,
+                        "register eth ip handler");
+    net_post(NET_EVENT_CONNECTING, NULL, 0);
+    return esp_eth_start(eth);
+}
+#endif
+
 esp_err_t net_init(void)
 {
     ESP_RETURN_ON_FALSE(s_lock == NULL, ESP_ERR_INVALID_STATE, TAG, "already initialized");
     s_lock = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(s_lock != NULL, ESP_ERR_NO_MEM, TAG, "no mem for mutex");
+#if CONFIG_SIPWIRE_QEMU
+    ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif init");
+    return net_init_qemu();
+#endif
 
     const esp_timer_create_args_t retry_args = { .callback = retry_cb, .name = "net_retry" };
     const esp_timer_create_args_t rssi_args = { .callback = rssi_cb, .name = "net_rssi" };

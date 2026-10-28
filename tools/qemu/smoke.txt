@@ -1,0 +1,82 @@
+# boot + account via console (each cfg set triggers a settings re-check)
+expect sipwire> 40
+expect eth got ip 20
+expect no SIP account configured 10
+# Wait for each reply (and the log burst it triggers) before typing again:
+# characters typed while the firmware logs can be lost.
+sleep 1
+send cfg set sip_port 5080
+expect sip_port\s+= 5080
+sleep 1
+send cfg set sip_password secret1001
+expect sip_password\s+= \*\*\*\*
+sleep 1
+send cfg set sip_user 1001
+expect sip_user\s+= 1001
+sleep 1
+send cfg set sip_server 10.0.2.2
+expect sip_server\s+= 10.0.2.2
+expect registration: registered 20
+send sip
+expect registration: registered
+shell $ASTX 'pjsip show contacts' | tee /dev/stderr | grep -q '1001/sip:1001@'
+
+# 1: echo test, hold/resume, dtmf, local hangup
+send call 600
+expect call: active 600 15
+sleep 2
+send hold
+expect call: held 10
+send resume
+expect call: active 10
+sleep 2
+send rtp
+expect ^rx [1-9]\d* lost 5
+send dtmf 12#
+sleep 1
+send rtp
+expect ^tx [1-9]\d* \(errors 0\) 5
+send hangup
+expect call: ended 600 \(code 0\) 10
+expect call: idle 5
+
+# 2: remote hangup
+send call 601
+expect call: active 601 15
+expect call: ended 601 \(code 0\) 10
+expect call: idle 5
+
+# 3: inbound call, answer, remote ends
+shell ($ASTX 'channel originate PJSIP/1001 application Wait 3' >/dev/null 2>&1 &)
+expect call: ringing-in 10
+send answer
+expect call: active 5
+expect call: ended .*\(code 0\) 10
+expect call: idle 5
+
+# 4: inbound call rejected 486 by hangup (no busy tone for us)
+shell ($ASTX 'channel originate PJSIP/1001 application Wait 3' >/dev/null 2>&1 &)
+expect call: ringing-in 10
+send reject 486
+expect call: ended .*\(code 0\) 5
+
+# 5: unknown number → rejected
+send call 777
+expect call: ended 777 \(code [45]\d\d\) 15
+
+# 6: account change → unregister, re-register with new display name
+send cfg set sip_display_name QemuPhone
+expect SIP account changed 5
+expect registration: none 5
+expect registration: registered 15
+shell $ASTX 'pjsip show contacts' | grep -q '1001/sip:1001@'
+
+# 7: account removed → unregistered, idle
+send cfg set sip_server
+expect registration: none 10
+sleep 1
+shell ! $ASTX 'pjsip show contacts' | grep -q '1001/sip:1001@'
+send sip
+expect registration: not registered
+send tasks
+sleep 2

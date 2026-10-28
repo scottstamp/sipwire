@@ -401,10 +401,48 @@ esp_err_t display_touch_calibrate_start(void)
 
 /* ------------------------------------------------------------------------ LCD */
 
+#if CONFIG_SIPWIRE_QEMU
+/* QEMU smoke-test build: no SPI panel, LVGL renders into a discarding display. */
+static void qemu_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
+{
+    (void)area;
+    (void)px_map;
+    lv_display_flush_ready(disp);
+}
+
+static esp_err_t display_init_qemu(lv_display_t **out_disp)
+{
+    const board_cfg_t *b = board_cfg();
+    lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    port_cfg.task_affinity = 0;
+    port_cfg.task_stack = 8192;
+    ESP_RETURN_ON_ERROR(lvgl_port_init(&port_cfg), TAG, "lvgl_port_init");
+
+    const size_t buf_size = (size_t)b->lcd.h_res * 40 * sizeof(lv_color16_t);
+    void *buf = lv_malloc(buf_size);
+    ESP_RETURN_ON_FALSE(buf != NULL, ESP_ERR_NO_MEM, TAG, "draw buffer");
+    lvgl_port_lock(0);
+    s.disp = lv_display_create(b->lcd.h_res, b->lcd.v_res);
+    if (s.disp) {
+        lv_display_set_color_format(s.disp, LV_COLOR_FORMAT_RGB565);
+        lv_display_set_buffers(s.disp, buf, NULL, buf_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
+        lv_display_set_flush_cb(s.disp, qemu_flush_cb);
+    }
+    lvgl_port_unlock();
+    ESP_RETURN_ON_FALSE(s.disp != NULL, ESP_ERR_NO_MEM, TAG, "lv_display_create");
+    ESP_LOGW(TAG, "QEMU build: no panel, frames discarded");
+    *out_disp = s.disp;
+    return ESP_OK;
+}
+#endif
+
 esp_err_t display_init(lv_display_t **out_disp)
 {
     ESP_RETURN_ON_FALSE(out_disp != NULL, ESP_ERR_INVALID_ARG, TAG, "out_disp");
     ESP_RETURN_ON_FALSE(s.disp == NULL, ESP_ERR_INVALID_STATE, TAG, "already initialized");
+#if CONFIG_SIPWIRE_QEMU
+    return display_init_qemu(out_disp);
+#endif
 
     const board_cfg_t *b = board_cfg();
     s.hres = b->lcd.swap_xy ? b->lcd.v_res : b->lcd.h_res;

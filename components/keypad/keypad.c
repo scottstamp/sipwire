@@ -7,6 +7,7 @@
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "sdkconfig.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -141,6 +142,11 @@ static void scan_task(void *arg)
 
 esp_err_t keypad_init(void)
 {
+#if CONFIG_SIPWIRE_QEMU
+    /* QEMU smoke-test build: no matrix; unconnected GPIOs read as "all pressed". */
+    ESP_LOGW(TAG, "QEMU build: keypad disabled");
+    return ESP_OK;
+#endif
     ESP_RETURN_ON_FALSE(s_task == NULL, ESP_ERR_INVALID_STATE, TAG, "already started");
 
     const board_cfg_t *cfg = board_cfg();

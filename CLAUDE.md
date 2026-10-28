@@ -18,4 +18,6 @@ ESP-IDF v6.1 + LVGL 9.6 SIP handset firmware for ESP32-S3. Read
 ```
 idf.py set-target esp32s3 && idf.py build
 ```
-Host tests: `tools/ci.sh host-test` (once Phase 0 lands).
+Host tests: `tools/ci.sh host-test`. SIP vs Asterisk: `test_host/sip/integration.sh`.
+QEMU smoke test: `tools/qemu/build.sh && tools/qemu/smoke.sh` (see `tools/qemu/README.md`).
+UI simulator: `sim/web/README.md`.

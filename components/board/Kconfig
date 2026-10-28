@@ -181,4 +181,12 @@ menu "Sipwire board"
             default -1
     endmenu
 
+    config SIPWIRE_QEMU
+        bool "QEMU smoke-test build"
+        default n
+        help
+            Test-only. Networking uses QEMU's OpenCores Ethernet instead of
+            Wi-Fi, and audio replaces I2S with paced silence. Set by
+            sdkconfig.qemu (see tools/qemu/README.md); never on hardware.
+
 endmenu

@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  host-test:
+    name: Host unit tests
+    runs-on: ubuntu-24.04
+    container: espressif/idf:v6.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests (ASan/UBSan)
+        shell: bash
+        run: tools/ci.sh host-test
+
+  firmware:
+    name: ESP32-S3 firmware
+    runs-on: ubuntu-24.04
+    container: espressif/idf:v6.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py set-target esp32s3
+          idf.py build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sipwire-firmware
+          path: |
+            build/sipwire.bin
+            build/sipwire.elf
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
+            build/flash_args
+
+  smoke:
+    name: Asterisk integration + QEMU smoke test
+    runs-on: ubuntu-24.04
+    container: espressif/idf:v6.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Asterisk and QEMU
+        shell: bash
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            asterisk libgcrypt20 libglib2.0-0 libpixman-1-0 libsdl2-2.0-0 libslirp0
+          python "$IDF_PATH/tools/idf_tools.py" install qemu-xtensa
+      - name: SIP stack against Asterisk (host)
+        shell: bash
+        run: test_host/sip/integration.sh
+      - name: Build QEMU firmware
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          tools/qemu/build.sh
+      - name: QEMU smoke test
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          tools/qemu/smoke.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qemu-smoke-logs
+          path: |
+            build_qemu/smoke.log
+            build_qemu/asterisk.log
+          if-no-files-found: ignore

@@ -1,0 +1,4 @@
+# QEMU smoke-test overlay (tools/qemu/build.sh). Never flash this to hardware.
+CONFIG_SIPWIRE_QEMU=y
+CONFIG_ETH_USE_OPENETH=y
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y

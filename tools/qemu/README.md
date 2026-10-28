@@ -1,0 +1,36 @@
+# QEMU smoke test
+
+Boots the real firmware in Espressif's QEMU (`qemu-system-xtensa -M esp32s3`)
+and drives it over the serial console against a private Asterisk on the host.
+Runs in CI (`.github/workflows/ci.yml`, job `smoke`).
+
+The build uses `sdkconfig.qemu` on top of `sdkconfig.defaults`, which sets
+`CONFIG_SIPWIRE_QEMU`. That swaps only what QEMU can't emulate:
+
+| Part | Hardware build | QEMU build |
+|---|---|---|
+| Network | Wi-Fi STA | OpenCores Ethernet (slirp, guest 10.0.2.15, host 10.0.2.2) |
+| Audio | I2S speaker + mic | paced silence (same 10 ms cadence) |
+| Display | ILI9341 + XPT2046 | LVGL renders into a discarding display |
+| Keypad | matrix scan | disabled (floating GPIOs read as "pressed") |
+
+Everything else (SIP, RTP, phone state machine, UI, console, NVS) is the
+production code.
+
+## Run
+
+```bash
+. $IDF_PATH/export.sh
+python $IDF_PATH/tools/idf_tools.py install qemu-xtensa   # once
+sudo apt-get install asterisk                             # once
+tools/qemu/build.sh     # → build_qemu/qemu_flash.bin
+tools/qemu/smoke.sh     # → RESULT OK; log in build_qemu/smoke.log
+```
+
+`smoke.sh [scenario] [log]` takes another scenario file. Format, one step per
+line: `send <text>`, `expect <regex> [timeout_s]`, `sleep <s>`, `shell <cmd>`
+(`$ASTX '<cli command>'` runs an Asterisk CLI command), `# comment`. The first
+failed step stops the run. Wait for a reply before the next `send`: characters
+typed while the firmware is logging can be lost.
+
+Every run boots a fresh copy of the flash image, so NVS starts empty.

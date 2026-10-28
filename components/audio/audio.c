@@ -8,6 +8,7 @@
 #include "driver/i2s_std.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
@@ -206,6 +207,12 @@ static void tone_poll(dsp_tone_t *t)
 /* Write n 16-bit samples in 10 ms chunks. */
 static void tx_write(const int16_t *buf, size_t n)
 {
+#if CONFIG_SIPWIRE_QEMU
+    /* QEMU has no I2S: discard, paced like the DMA would be. */
+    (void)buf;
+    vTaskDelay(pdMS_TO_TICKS(n * 1000 / AUDIO_I2S_RATE));
+    return;
+#endif
     while (n > 0) {
         size_t chunk = n > I2S_CHUNK_SAMPLES ? I2S_CHUNK_SAMPLES : n;
         size_t written = 0;
@@ -315,7 +322,15 @@ static void rx_task(void *arg)
                 want = I2S_CHUNK_SAMPLES;
             }
             size_t got = 0;
+#if CONFIG_SIPWIRE_QEMU
+            /* QEMU has no I2S: silence, paced like the DMA would be. */
+            vTaskDelay(pdMS_TO_TICKS(want * 1000 / AUDIO_I2S_RATE));
+            memset(&raw[have], 0, want * sizeof(int32_t));
+            got = want * sizeof(int32_t);
+            esp_err_t err = ESP_OK;
+#else
             esp_err_t err = i2s_channel_read(s.rx, &raw[have], want * sizeof(int32_t), &got, I2S_IO_TIMEOUT_MS);
+#endif
             if (err == ESP_ERR_TIMEOUT) {
                 continue;
             }

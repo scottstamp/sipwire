@@ -93,10 +93,13 @@ inside a phase are parallel unless noted.
 Each [cheap] task gets: files to touch, public API header (written by core),
 Kconfig names, test to pass, "do not change" list. Core agent reviews diff.
 
+## CI
+`.github/workflows/ci.yml`: host unit tests, firmware build, SIP-vs-Asterisk
+integration, and the QEMU smoke test (`tools/qemu/README.md`).
+
 ## Next (after hardware spec)
 - Set pins/flash size in `sdkconfig.defaults` for the real board; verify panel
   orientation/colors, touch axes, mic shift/slot, amp pops (see component notes).
 - Touch calibration screen + raw-touch API in `display`.
-- Commit the QEMU harness (openeth + fake I2S behind a Kconfig) as a CI smoke test.
 - Settings forms: expose current SSID/server/user in `ui_model_t` so forms prefill.
 - AEC / speakerphone (Phase 5), OTA (partitions already dual-slot).
