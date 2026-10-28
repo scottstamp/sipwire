@@ -76,6 +76,7 @@ static board_cfg_t s_cfg = {
         .cols = { PIN(CONFIG_SIPWIRE_KP_COL0), PIN(CONFIG_SIPWIRE_KP_COL1),
                   PIN(CONFIG_SIPWIRE_KP_COL2) },
     },
+    .status_led = PIN(CONFIG_SIPWIRE_STATUS_LED),
     .sd = {
 #ifdef CONFIG_SIPWIRE_SD_ENABLE
         .present = true,

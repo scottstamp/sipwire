@@ -13,6 +13,7 @@
 #include "net.h"
 #include "phone.h"
 #include "settings.h"
+#include "status_led.h"
 #include "ui_bridge.h"
 
 static const char *TAG = "sipwire";
@@ -41,6 +42,10 @@ void app_main(void)
     esp_err_t err = audio_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "audio_init: %s (calls will be silent)", esp_err_to_name(err));
+    }
+    err = status_led_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "status_led_init: %s", esp_err_to_name(err));
     }
     err = keypad_init();
     if (err != ESP_OK) {

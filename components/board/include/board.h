@@ -36,6 +36,7 @@ typedef struct {
         gpio_num_t cols[3];
         char map[12];            /* row-major, e.g. "123456789*0#" */
     } keypad;
+    gpio_num_t status_led;       /* WS2812 data, GPIO_NUM_NC if none */
     struct {
         bool present;
         bool spi_mode;           /* true: SPI on LCD bus, false: SDMMC 1-bit */

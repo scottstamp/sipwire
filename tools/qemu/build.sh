@@ -9,5 +9,5 @@ ARGS=(-B "$B" -DSDKCONFIG="$B/sdkconfig" -DSDKCONFIG_DEFAULTS="sdkconfig.default
 [ -f "$B/sdkconfig" ] || idf.py "${ARGS[@]}" set-target esp32s3
 idf.py "${ARGS[@]}" build
 cd "$B"
-python -m esptool --chip esp32s3 merge-bin --fill-flash-size 8MB -o qemu_flash.bin @flash_args
+python -m esptool --chip esp32s3 merge-bin --fill-flash-size 16MB -o qemu_flash.bin @flash_args
 echo "QEMU image: $B/qemu_flash.bin"

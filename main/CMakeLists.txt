@@ -13,6 +13,7 @@ idf_component_register(
         common
         net
         phone
+        status_led
         storage
         ui
         esp_app_format
