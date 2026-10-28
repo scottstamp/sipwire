@@ -1,0 +1,10 @@
+# Dev PBX for sipwire. Host networking keeps RTP (10000-10100/udp) and SIP
+# (5060/udp) simple on a LAN dev box. Linux only: host networking is not
+# supported on Docker Desktop for macOS or Windows.
+services:
+  asterisk:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sipwire-asterisk:dev
+    network_mode: host
