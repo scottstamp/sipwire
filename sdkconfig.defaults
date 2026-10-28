@@ -6,6 +6,9 @@ CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
 # LVGL 9
 CONFIG_LV_COLOR_FORMAT_RGB565=y
+# lv_malloc from the ESP heap: the 64 KB builtin pool ran out drawing
+# transformed widgets (NULL layer buffer → crash).
+CONFIG_LV_USE_CLIB_MALLOC=y
 CONFIG_LV_USE_LOG=y
 CONFIG_LV_LOG_LEVEL_WARN=y
 CONFIG_LV_FONT_MONTSERRAT_14=y
