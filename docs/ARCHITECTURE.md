@@ -12,6 +12,7 @@ components/
   rtp/               RTP tx/rx, RFC 3550, RFC 2833 DTMF, adaptive jitter buffer
   sip/               minimal SIP UA: parser, digest auth, transactions, dialogs,
                      REGISTER / INVITE / ACK / BYE / CANCEL / OPTIONS, SDP
+  cli/               serial REPL (esp_console): cfg/wifi/ip/free/tasks; console_register_command()
   net/               wifi manager, reconnect, SNTP, mDNS (optional)
   storage/           NVS config (settings), SD card: contacts, call log, ringtones
   phone/             call state machine, ties sip+rtp+audio; emits UI events

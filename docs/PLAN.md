@@ -1,25 +1,27 @@
 # Plan
 
+Status: `[x]` = merged (build-clean / host-tested; hardware verification pending).
+
 Cost tags: **[cheap]** = sonnet/haiku-class subagent, well-specified, mechanical.
 **[core]** = opus-class, design-heavy or subtle. Phases run in order; items
 inside a phase are parallel unless noted.
 
 ## Phase 0 — Foundation (before final hardware)
-- [core] `components/board`: Kconfig menu for every pin/option; `board_cfg_t`;
+- [x] [core] `components/board`: Kconfig menu for every pin/option; `board_cfg_t`;
   `board_init()`. Default pins = a plausible dev layout, all overridable.
-- [cheap] `components/net`: wifi station manager, reconnect/backoff, events.
-- [cheap] `components/storage`: NVS settings struct + load/save + defaults.
-- [cheap] Serial console REPL (`esp_console`): `wifi`, `sip set`, `call`,
+- [x] [cheap] `components/net`: wifi station manager, reconnect/backoff, events.
+- [x] [cheap] `components/storage`: NVS settings struct + load/save + defaults.
+- [x] [cheap] Serial console REPL (`esp_console`): `wifi`, `sip set`, `call`,
   `hangup`, `cfg show`. Primary dev/test interface until UI matures.
-- [cheap] `esp_event` base + event list header (`sipwire_events.h`).
-- [cheap] Host test scaffolding: `test_host/` building `codec`/`sip`/`rtp`
+- [x] [cheap] `esp_event` base + event list header (`sipwire_events.h`).
+- [x] [cheap] Host test scaffolding: `test_host/` building `codec`/`sip`/`rtp`
   for IDF linux target + Unity. CI script `tools/ci.sh`.
-- [cheap] Asterisk dev stack: `tools/asterisk/` docker-compose + minimal
+- [x] [cheap] Asterisk dev stack: `tools/asterisk/` docker-compose + minimal
   `pjsip.conf` (2 extensions, echo test ext, music-on-hold ext).
-- [core] UI simulator contract: `components/ui` depends only on LVGL +
+- [x] [core] UI simulator contract: `components/ui` depends only on LVGL +
   `ui_model.h` (phone state snapshot) + `ui_actions.h` (callbacks). No IDF
   headers. Core writes these two headers; everything else follows them.
-- [cheap] Web UI simulator (`sim/web/`): LVGL 9 → WebAssembly via Emscripten
+- [x] [cheap] Web UI simulator (`sim/web/`): LVGL 9 → WebAssembly via Emscripten
   (official `lv_web_emscripten` pattern, SDL2 backend, 240x320 canvas).
   Same `components/ui` sources, mock `ui_model` driven from an HTML side
   panel: fake keypad (3x4 buttons), reg state, incoming call, in-call timer,
@@ -33,7 +35,7 @@ inside a phase are parallel unless noted.
 - [cheap] Touch: XPT2046 via `esp_lcd_touch_xpt2046`, calibration screen,
   store in NVS.
 - [cheap] Keypad: matrix scan task, debounce, long-press, repeat; key events.
-- [cheap] Audio I2S: TX+RX tasks, ring buffers, loopback test (mic→speaker),
+- [x] [cheap] Audio I2S: TX+RX tasks, ring buffers, loopback test (mic→speaker),
   tone generator (dial/ring/busy). Verify levels, DC offset.
 - [cheap] SD card: mount if present, `config.json` import, call log append.
 - [core] Review: task priorities, DMA buffer sizing, PSRAM placement.
@@ -53,8 +55,8 @@ inside a phase are parallel unless noted.
   scripts against docker Asterisk.
 
 ## Phase 3 — Media
-- [cheap] G.711 µ-law/A-law codec + tests.
-- [core] RTP tx/rx, SSRC, seq/timestamp, RFC 2833 DTMF send; adaptive
+- [x] [cheap] G.711 µ-law/A-law codec + tests.
+- [x] [core] RTP tx/rx, SSRC, seq/timestamp, RFC 2833 DTMF send; adaptive
   jitter buffer (40–120 ms) with PLC (simple repeat/fade).
 - [core] Audio pipeline glue: 20 ms framing, mixer, clock drift handling.
 - [cheap] RTCP minimal (SR/RR) — optional.
