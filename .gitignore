@@ -8,3 +8,4 @@ sdkconfig.old
 *.swp
 build_host/
 sim/web/build/
+.claude/worktrees/
