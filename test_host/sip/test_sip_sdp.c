@@ -11,6 +11,7 @@ void tearDown(void) {}
 static sip_sdp_t s;
 static const uint8_t prefs_ua[] = { 0, 8 };
 static const uint8_t prefs_au[] = { 8, 0 };
+static const uint8_t prefs_wb[] = { 9, 0, 8 };   /* the phone's default */
 
 static int parse(const char *body)
 {
@@ -101,6 +102,8 @@ static void test_no_common_codec(void)
     TEST_ASSERT_EQUAL(0, parse("v=0\r\no=x 1 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n"
                                "m=audio 6000 RTP/AVP 18 9\r\na=rtpmap:18 G729/8000\r\n"));
     TEST_ASSERT_EQUAL(-1, sip_sdp_negotiate(&s, prefs_ua, 2, true, true, &n));
+    TEST_ASSERT_EQUAL(0, sip_sdp_negotiate(&s, prefs_wb, 3, true, true, &n));
+    TEST_ASSERT_EQUAL(9, n.pt);                 /* static PT 9 without rtpmap is G.722 */
     /* PT 0 remapped to something else by rtpmap is not PCMU */
     TEST_ASSERT_EQUAL(0, parse("v=0\r\no=x 1 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n"
                                "m=audio 6000 RTP/AVP 0\r\na=rtpmap:0 opus/48000\r\n"));
@@ -110,6 +113,43 @@ static void test_no_common_codec(void)
                                "m=audio 0 RTP/AVP 0\r\nm=audio 7000 RTP/SAVP 0\r\n"));
     TEST_ASSERT_EQUAL(-1, s.audio);
     TEST_ASSERT_EQUAL(-1, sip_sdp_negotiate(&s, prefs_ua, 2, true, true, &n));
+}
+
+static void test_g722_negotiation(void)
+{
+    sip_sdp_neg_t n;
+    /* Asterisk with allow = g722,ulaw,alaw */
+    TEST_ASSERT_EQUAL(0, parse("v=0\r\no=- 1 1 IN IP4 1.1.1.1\r\ns=Asterisk\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n"
+                               "m=audio 12000 RTP/AVP 9 0 8 101\r\n"
+                               "a=rtpmap:9 G722/8000\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\n"
+                               "a=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-16\r\n"
+                               "a=ptime:20\r\na=sendrecv\r\n"));
+    TEST_ASSERT_EQUAL(0, sip_sdp_negotiate(&s, prefs_wb, 3, true, true, &n));
+    TEST_ASSERT_EQUAL(9, n.pt);
+    TEST_ASSERT_EQUAL(101, n.dtmf_pt);
+    TEST_ASSERT_EQUAL(0, sip_sdp_negotiate(&s, prefs_ua, 2, true, true, &n));
+    TEST_ASSERT_EQUAL(0, n.pt);                 /* G.722 not in our list */
+    static const uint8_t nb_first[] = { 0, 9 };
+    TEST_ASSERT_EQUAL(0, sip_sdp_negotiate(&s, nb_first, 2, true, true, &n));
+    TEST_ASSERT_EQUAL(0, n.pt);                 /* answerer: our order wins */
+
+    /* Remote answer to our offer: its first format we support */
+    TEST_ASSERT_EQUAL(0, parse("v=0\r\no=- 1 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n"
+                               "m=audio 12000 RTP/AVP 0 9\r\na=rtpmap:9 G722/8000\r\n"));
+    TEST_ASSERT_EQUAL(0, sip_sdp_negotiate(&s, prefs_wb, 3, true, false, &n));
+    TEST_ASSERT_EQUAL(0, n.pt);
+
+    /* G722/16000 (a common mistake) is tolerated; PT 9 renamed is not G.722 */
+    TEST_ASSERT_EQUAL(0, parse("v=0\r\no=- 1 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n"
+                               "m=audio 12000 RTP/AVP 9\r\na=rtpmap:9 G722/16000\r\n"));
+    TEST_ASSERT_EQUAL(0, sip_sdp_negotiate(&s, prefs_wb, 3, true, true, &n));
+    TEST_ASSERT_EQUAL(9, n.pt);
+    TEST_ASSERT_EQUAL(0, parse("v=0\r\no=- 1 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n"
+                               "m=audio 12000 RTP/AVP 9\r\na=rtpmap:9 G7221/16000\r\n"));
+    TEST_ASSERT_EQUAL(-1, sip_sdp_negotiate(&s, prefs_wb, 3, true, true, &n));
+    TEST_ASSERT_EQUAL(0, parse("v=0\r\no=- 1 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n"
+                               "m=audio 12000 RTP/AVP 0\r\na=rtpmap:0 PCMU/16000\r\n"));
+    TEST_ASSERT_EQUAL(-1, sip_sdp_negotiate(&s, prefs_wb, 3, true, true, &n));
 }
 
 static void test_malformed(void)
@@ -166,6 +206,29 @@ static void test_build_offer(void)
     TEST_ASSERT_EQUAL(-1, sip_sdp_build(out, 64, &l)); /* overflow detected */
 }
 
+static void test_build_offer_g722(void)
+{
+    char out[512];
+    sip_sdp_local_t l = {
+        .ip = 0x0a000002, .port = 4000, .sess_id = 42, .sess_ver = 1,
+        .pts = prefs_wb, .n_pts = 3, .dtmf_pt = 101, .ptime = 20,
+        .dir = SIP_DIR_SENDRECV,
+    };
+    int n = sip_sdp_build(out, sizeof(out), &l);
+    TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_NOT_NULL(strstr(out, "m=audio 4000 RTP/AVP 9 0 8 101\r\n"
+                                     "a=rtpmap:9 G722/8000\r\n"
+                                     "a=rtpmap:0 PCMU/8000\r\n"
+                                     "a=rtpmap:8 PCMA/8000\r\n"
+                                     "a=rtpmap:101 telephone-event/8000\r\n"
+                                     "a=fmtp:101 0-16\r\n"
+                                     "a=ptime:20\r\n"));
+    TEST_ASSERT_EQUAL(0, sip_sdp_parse(&s, out, (size_t)n));
+    sip_sdp_neg_t neg;
+    TEST_ASSERT_EQUAL(0, sip_sdp_negotiate(&s, prefs_wb, 3, true, true, &neg));
+    TEST_ASSERT_EQUAL(9, neg.pt);
+}
+
 static void test_build_answer_mirrors_mlines(void)
 {
     TEST_ASSERT_EQUAL(0, parse("v=0\r\no=x 1 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n"
@@ -198,6 +261,8 @@ int main(void)
     RUN_TEST(test_media_level_overrides_and_bare_lf);
     RUN_TEST(test_hold_variants);
     RUN_TEST(test_no_common_codec);
+    RUN_TEST(test_g722_negotiation);
+    RUN_TEST(test_build_offer_g722);
     RUN_TEST(test_malformed);
     RUN_TEST(test_build_offer);
     RUN_TEST(test_build_answer_mirrors_mlines);

@@ -1,6 +1,7 @@
 #pragma once
 
-/* I2S speaker + mic. 8 kHz mono 16-bit at the API, 20 ms frames.
+/* I2S speaker + mic. 16 kHz mono 16-bit at the API (same rate as I2S, no
+ * resampling here), 20 ms frames. Narrowband codecs resample in rtp.
  * Owns two tasks (core 1): TX pulls frames from a source callback, RX pushes
  * mic frames to a sink callback. Callbacks run in those tasks: keep them
  * short, non-blocking (rtp pull/build under a mutex is fine). */
@@ -9,8 +10,8 @@
 #include <stdint.h>
 #include "esp_err.h"
 
-#define AUDIO_SAMPLE_RATE   8000
-#define AUDIO_FRAME_SAMPLES 160     /* 20 ms */
+#define AUDIO_SAMPLE_RATE   16000
+#define AUDIO_FRAME_SAMPLES 320     /* 20 ms */
 
 typedef void (*audio_source_cb_t)(int16_t frame[AUDIO_FRAME_SAMPLES], void *ctx);
 typedef void (*audio_sink_cb_t)(const int16_t frame[AUDIO_FRAME_SAMPLES], void *ctx);

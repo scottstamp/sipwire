@@ -123,7 +123,7 @@ typedef struct {
     char remote_ip_str[16];
     uint16_t remote_port;             /* remote RTP port */
     uint16_t local_port;              /* our RTP port (as offered/answered) */
-    uint8_t payload_type;             /* 0 = PCMU, 8 = PCMA */
+    uint8_t payload_type;             /* 9 = G.722, 0 = PCMU, 8 = PCMA */
     int16_t dtmf_pt;                  /* telephone-event PT, -1 if none */
     uint8_t ptime_ms;                 /* packetization to send with */
     sip_media_dir_t direction;
@@ -170,8 +170,11 @@ typedef struct {
     sip_ua_rtp_port_fn rtp_port_alloc;
     void *rtp_port_ctx;
 
-    /* Media: static payload types in preference order (0 = PCMU, 8 = PCMA);
-     * n_codecs == 0 → {0, 8}. dtmf_pt 0 → 101, < 0 → no telephone-event. */
+    /* Media: static payload types in preference order, no duplicates
+     * (9 = G.722, 0 = PCMU, 8 = PCMA); n_codecs == 0 → {9, 0, 8}. The offer
+     * lists them in this order; an answer picks the first one the offer
+     * contains. All use an 8000 Hz RTP clock ("G722/8000", RFC 3551).
+     * dtmf_pt 0 → 101, < 0 → no telephone-event. */
     uint8_t codecs[SIP_UA_MAX_CODECS];
     uint8_t n_codecs;
     int16_t dtmf_pt;

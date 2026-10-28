@@ -1,12 +1,18 @@
 /* Host tests for components/rtp: packetization, DTMF, parsing, jitter
- * buffer, PLC. Network behaviour is simulated with a virtual millisecond
- * clock and a deterministic PRNG (no wall clock, no real sockets). */
+ * buffer, PLC, for G.711 (PT 0/8, resampled to/from 16 kHz) and G.722
+ * (PT 9). Network behaviour is simulated with a virtual millisecond clock
+ * and a deterministic PRNG (no wall clock, no real sockets). Most jitter
+ * buffer tests run on PCMU, whose output can be predicted exactly even
+ * across losses; G.722 variants cover the codec-specific parts. */
 
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "g711.h"
+#include "g722.h"
+#include "resample2.h"
 #include "rtp.h"
 #include "unity.h"
 
@@ -32,11 +38,11 @@ static uint32_t rnd_range(uint32_t n)
     return rnd() % n;
 }
 
-/* Deterministic, unique-per-k noise frame. */
-static void gen_frame(uint32_t k, int16_t pcm[RTP_SAMPLES_8K])
+/* Deterministic, unique-per-k noise frame (16 kHz). */
+static void gen_frame(uint32_t k, int16_t pcm[RTP_FRAME_SAMPLES])
 {
     uint32_t x = k * 2654435761u + 12345u;
-    for (int i = 0; i < RTP_SAMPLES_8K; i++) {
+    for (int i = 0; i < RTP_FRAME_SAMPLES; i++) {
         x ^= x << 13;
         x ^= x >> 17;
         x ^= x << 5;
@@ -44,30 +50,139 @@ static void gen_frame(uint32_t k, int16_t pcm[RTP_SAMPLES_8K])
     }
 }
 
-/* What the receiver should output for frame k (G.711 round trip). */
-static void expected_frame(uint8_t pt, uint32_t k, int16_t out[RTP_SAMPLES_8K])
+/* ---- reference model of the codec path ----
+ * G.711: payload k = mu/A-law of the 2:1 decimation of frame k. The
+ * decimator's history reaches 46 samples (< one frame) back, so a sender that
+ * sent frame k-1 just before produces exactly ref_payload(). The receiver's
+ * 1:2 interpolator remembers 23 decoded samples: output samples >= 2 * 46
+ * depend on the payload of frame k alone, earlier ones also on the previously
+ * decoded frame (expected_after() models both exactly).
+ * G.722: the ADPCM state depends on the whole history, so the reference is a
+ * sender/receiver pair that ran frames 0..k in order (cached). */
+
+#define CMP_FROM        96      /* frame-local samples, see above */
+#define XF              64      /* PLC cross-fade length (rtp.c PLC_XFADE) */
+#define G722_REF_MAX    2100
+
+static uint8_t s_g722_pl[G722_REF_MAX][RTP_FRAME_BYTES];
+static int16_t s_g722_out[G722_REF_MAX][RTP_FRAME_SAMPLES];
+static uint32_t s_g722_n;
+static g722_enc_t s_g722_enc;
+static g722_dec_t s_g722_dec;
+
+static void g722_ref_upto(uint32_t k)
 {
-    int16_t in[RTP_SAMPLES_8K];
-    uint8_t enc[RTP_SAMPLES_8K];
-    gen_frame(k, in);
-    if (pt == 8) {
-        g711_alaw_encode_buf(in, enc, RTP_SAMPLES_8K);
-        g711_alaw_decode_buf(enc, out, RTP_SAMPLES_8K);
-    } else {
-        g711_ulaw_encode_buf(in, enc, RTP_SAMPLES_8K);
-        g711_ulaw_decode_buf(enc, out, RTP_SAMPLES_8K);
+    TEST_ASSERT_LESS_THAN_UINT32(G722_REF_MAX, k);
+    if (s_g722_n == 0) {
+        g722_enc_init(&s_g722_enc);
+        g722_dec_init(&s_g722_dec);
+    }
+    for (; s_g722_n <= k; s_g722_n++) {
+        int16_t pcm[RTP_FRAME_SAMPLES];
+        gen_frame(s_g722_n, pcm);
+        g722_encode(&s_g722_enc, pcm, RTP_FRAME_SAMPLES, s_g722_pl[s_g722_n]);
+        g722_decode(&s_g722_dec, s_g722_pl[s_g722_n], RTP_FRAME_BYTES, s_g722_out[s_g722_n]);
     }
 }
 
-/* Samples 0..31 may be cross-faded after a concealed frame: not compared. */
+static void g711_enc(uint8_t pt, const int16_t *nb, uint8_t *out)
+{
+    if (pt == 8) {
+        g711_alaw_encode_buf(nb, out, RTP_FRAME_TS);
+    } else {
+        g711_ulaw_encode_buf(nb, out, RTP_FRAME_TS);
+    }
+}
+
+static void g711_dec(uint8_t pt, const uint8_t *in, int16_t *nb)
+{
+    if (pt == 8) {
+        g711_alaw_decode_buf(in, nb, RTP_FRAME_TS);
+    } else {
+        g711_ulaw_decode_buf(in, nb, RTP_FRAME_TS);
+    }
+}
+
+/* Payload of frame k from a sender that sent frames 0..k in order. */
+static void ref_payload(uint8_t pt, uint32_t k, uint8_t out[RTP_FRAME_BYTES])
+{
+    if (pt == 9) {
+        g722_ref_upto(k);
+        memcpy(out, s_g722_pl[k], RTP_FRAME_BYTES);
+        return;
+    }
+    int16_t pcm[RTP_FRAME_SAMPLES], nb[RTP_FRAME_TS];
+    resample2_down_t d;
+    resample2_down_init(&d);
+    if (k > 0) {
+        gen_frame(k - 1, pcm);
+        resample2_down(&d, pcm, RTP_FRAME_TS, nb);
+    }
+    gen_frame(k, pcm);
+    resample2_down(&d, pcm, RTP_FRAME_TS, nb);
+    g711_enc(pt, nb, out);
+}
+
+/* Receiver output for frame k when the frame decoded before it was `prev`
+ * (-1: none). G.722 is only modelled for in-order playout (prev == k - 1). */
+static void expected_after(uint8_t pt, int prev, uint32_t k, int16_t out[RTP_FRAME_SAMPLES])
+{
+    if (pt == 9) {
+        TEST_ASSERT_EQUAL_INT((int)k - 1, prev);
+        g722_ref_upto(k);
+        memcpy(out, s_g722_out[k], sizeof(s_g722_out[k]));
+        return;
+    }
+    uint8_t pl[RTP_FRAME_BYTES];
+    int16_t nb[RTP_FRAME_TS];
+    resample2_up_t u;
+    resample2_up_init(&u);
+    if (prev >= 0) {
+        ref_payload(pt, (uint32_t)prev, pl);
+        g711_dec(pt, pl, nb);
+        resample2_up(&u, nb, RTP_FRAME_TS, out);
+    }
+    ref_payload(pt, k, pl);
+    g711_dec(pt, pl, nb);
+    resample2_up(&u, nb, RTP_FRAME_TS, out);
+}
+
+/* What the receiver should output for frame k in an in-order stream.
+ * Cached: classify() asks for the same frames over and over. */
+#define EXP_CACHE 6000
+static int16_t (*s_exp[2])[RTP_FRAME_SAMPLES];
+static uint8_t *s_exp_ok[2];
+
+static void expected_frame(uint8_t pt, uint32_t k, int16_t out[RTP_FRAME_SAMPLES])
+{
+    int c = pt == 8 ? 1 : 0;
+    if (pt == 9 || k >= EXP_CACHE) {
+        expected_after(pt, (int)k - 1, k, out);
+        return;
+    }
+    if (s_exp[c] == NULL) {
+        s_exp[c] = calloc(EXP_CACHE, sizeof(*s_exp[c]));
+        s_exp_ok[c] = calloc(EXP_CACHE, 1);
+        TEST_ASSERT_NOT_NULL(s_exp[c]);
+        TEST_ASSERT_NOT_NULL(s_exp_ok[c]);
+    }
+    if (!s_exp_ok[c][k]) {
+        expected_after(pt, (int)k - 1, k, s_exp[c][k]);
+        s_exp_ok[c][k] = 1;
+    }
+    memcpy(out, s_exp[c][k], sizeof(s_exp[c][k]));
+}
+
+/* Samples before CMP_FROM depend on filter history and may be cross-faded
+ * after a concealed frame: not compared. */
 static bool frames_match(const int16_t *a, const int16_t *b)
 {
-    return memcmp(a + 32, b + 32, (RTP_SAMPLES_8K - 32) * sizeof(int16_t)) == 0;
+    return memcmp(a + CMP_FROM, b + CMP_FROM, (RTP_FRAME_SAMPLES - CMP_FROM) * sizeof(int16_t)) == 0;
 }
 
 static bool is_silence(const int16_t *f)
 {
-    for (int i = 0; i < RTP_SAMPLES_8K; i++) {
+    for (int i = 0; i < RTP_FRAME_SAMPLES; i++) {
         if (f[i] != 0) {
             return false;
         }
@@ -84,7 +199,7 @@ static int classify(uint8_t pt, const int16_t *f, int from)
     if (is_silence(f)) {
         return FRAME_SILENCE;
     }
-    int16_t e[RTP_SAMPLES_8K];
+    int16_t e[RTP_FRAME_SAMPLES];
     for (int k = from < 0 ? 0 : from; k < from + 16; k++) {
         expected_frame(pt, (uint32_t)k, e);
         if (frames_match(f, e)) {
@@ -179,7 +294,7 @@ static void sim_done(sim_t *m)
 
 static void sim_send_frame(sim_t *m)
 {
-    int16_t pcm[RTP_SAMPLES_8K];
+    int16_t pcm[RTP_FRAME_SAMPLES];
     uint8_t pkt[RTP_MAX_PACKET];
     uint32_t k = m->k_sent++;
     gen_frame(k, pcm);
@@ -246,10 +361,10 @@ static void sim_advance(sim_t *m, uint32_t ms)
             sim_send_frame(m);
         }
         if (m->now == sim_pull_time(m, m->k_pulled)) {
-            int16_t out[RTP_SAMPLES_8K];
+            int16_t out[RTP_FRAME_SAMPLES];
             rtp_pull_frame(m->rx, out, m->now);
             if (m->rec != NULL && m->k_pulled < m->rec_cap) {
-                memcpy(m->rec + (size_t)m->k_pulled * RTP_SAMPLES_8K, out, sizeof(out));
+                memcpy(m->rec + (size_t)m->k_pulled * RTP_FRAME_SAMPLES, out, sizeof(out));
             }
             m->k_pulled++;
             if (m->track) {
@@ -268,7 +383,7 @@ static void sim_advance(sim_t *m, uint32_t ms)
 
 static const int16_t *rec_frame(const sim_t *m, size_t i)
 {
-    return m->rec + i * RTP_SAMPLES_8K;
+    return m->rec + i * RTP_FRAME_SAMPLES;
 }
 
 /* Walk the recording: leading frames must be silence, then every frame must
@@ -350,11 +465,9 @@ static size_t craft(uint8_t *b, const craft_t *c, const uint8_t *payload, size_t
     return n;
 }
 
-static void encode_frame(uint32_t k, uint8_t out[RTP_SAMPLES_8K])
+static void encode_frame(uint32_t k, uint8_t out[RTP_FRAME_BYTES])
 {
-    int16_t pcm[RTP_SAMPLES_8K];
-    gen_frame(k, pcm);
-    g711_ulaw_encode_buf(pcm, out, RTP_SAMPLES_8K);
+    ref_payload(0, k, out);
 }
 
 /* Feed 4 frames crafted with `base` (seq/ts advanced), pull, and expect the
@@ -365,8 +478,8 @@ static void check_craft_variant(const craft_t *base)
     rtp_session_t *rx = rtp_session_create(&cfg);
     craft_t c = *base;
     uint8_t buf[RTP_MAX_PACKET + 256];
-    uint8_t pl[RTP_SAMPLES_8K];
-    int16_t out[RTP_SAMPLES_8K], e[RTP_SAMPLES_8K];
+    uint8_t pl[RTP_FRAME_BYTES];
+    int16_t out[RTP_FRAME_SAMPLES], e[RTP_FRAME_SAMPLES];
     for (uint32_t k = 0; k < 4; k++) {
         encode_frame(k, pl);
         c.seq = (uint16_t)(base->seq + k);
@@ -381,7 +494,7 @@ static void check_craft_variant(const craft_t *base)
     for (uint32_t k = 0; k < 4; k++) {
         rtp_pull_frame(rx, out, 100 + k * 20);
         expected_frame(0, k, e);
-        TEST_ASSERT_EQUAL_INT16_ARRAY(e, out, RTP_SAMPLES_8K);
+        TEST_ASSERT_EQUAL_INT16_ARRAY(e, out, RTP_FRAME_SAMPLES);
     }
     rtp_session_destroy(rx);
 }
@@ -394,7 +507,7 @@ void test_header_build_and_roundtrip(void)
     rtp_session_t *tx = rtp_session_create(&cfg);
     rtp_session_t *rx = rtp_session_create(&cfg);
     uint8_t p[3][RTP_MAX_PACKET];
-    int16_t pcm[RTP_SAMPLES_8K];
+    int16_t pcm[RTP_FRAME_SAMPLES];
     for (uint32_t k = 0; k < 3; k++) {
         gen_frame(k, pcm);
         TEST_ASSERT_EQUAL_UINT(HDR + 160, rtp_build_audio(tx, pcm, p[k], sizeof(p[k])));
@@ -413,20 +526,19 @@ void test_header_build_and_roundtrip(void)
         TEST_ASSERT_EQUAL_UINT32(50000 + 160u * (uint32_t)k, ts);
         TEST_ASSERT_EQUAL_HEX32(0xA1B2C3D4, ssrc);
     }
-    uint8_t enc[RTP_SAMPLES_8K];
-    gen_frame(1, pcm);
-    g711_ulaw_encode_buf(pcm, enc, RTP_SAMPLES_8K);
+    uint8_t enc[RTP_FRAME_BYTES];
+    ref_payload(0, 1, enc);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(enc, p[1] + HDR, 160);
 
     /* Round trip through the parser and jitter buffer. */
     for (int k = 0; k < 3; k++) {
         rtp_on_packet(rx, p[k], HDR + 160, (uint32_t)k * 20);
     }
-    int16_t out[RTP_SAMPLES_8K], e[RTP_SAMPLES_8K];
+    int16_t out[RTP_FRAME_SAMPLES], e[RTP_FRAME_SAMPLES];
     for (uint32_t k = 0; k < 3; k++) {
         rtp_pull_frame(rx, out, 60 + k * 20);
         expected_frame(0, k, e);
-        TEST_ASSERT_EQUAL_INT16_ARRAY(e, out, RTP_SAMPLES_8K);
+        TEST_ASSERT_EQUAL_INT16_ARRAY(e, out, RTP_FRAME_SAMPLES);
     }
     rtp_stats_t st;
     rtp_get_stats(tx, &st);
@@ -442,19 +554,19 @@ void test_pcma_payload_and_pt(void)
 {
     rtp_config_t cfg = make_cfg(8);
     rtp_session_t *tx = rtp_session_create(&cfg);
-    int16_t pcm[RTP_SAMPLES_8K];
-    uint8_t p[RTP_MAX_PACKET], enc[RTP_SAMPLES_8K];
-    gen_frame(7, pcm);
+    int16_t pcm[RTP_FRAME_SAMPLES];
+    uint8_t p[RTP_MAX_PACKET], enc[RTP_FRAME_BYTES];
+    gen_frame(0, pcm);
     TEST_ASSERT_EQUAL_UINT(HDR + 160, rtp_build_audio(tx, pcm, p, sizeof(p)));
     TEST_ASSERT_EQUAL_HEX8(0x88, p[1]);             /* marker | PT 8 */
-    g711_alaw_encode_buf(pcm, enc, RTP_SAMPLES_8K);
+    ref_payload(8, 0, enc);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(enc, p + HDR, 160);
     rtp_session_destroy(tx);
 
     /* PCMA end to end */
     sim_t m;
     sim_init(&m, &cfg, &cfg);
-    static int16_t rec[100 * RTP_SAMPLES_8K];
+    static int16_t rec[100 * RTP_FRAME_SAMPLES];
     m.rec = rec;
     m.rec_cap = 100;
     sim_advance(&m, 100 * 20);
@@ -466,7 +578,7 @@ void test_build_audio_small_buffer_does_not_advance(void)
 {
     rtp_config_t cfg = make_cfg(0);
     rtp_session_t *tx = rtp_session_create(&cfg);
-    int16_t pcm[RTP_SAMPLES_8K] = {0};
+    int16_t pcm[RTP_FRAME_SAMPLES] = {0};
     uint8_t p[RTP_MAX_PACKET];
     TEST_ASSERT_EQUAL_UINT(0, rtp_build_audio(tx, pcm, p, 100));
     TEST_ASSERT_EQUAL_UINT(HDR + 160, rtp_build_audio(tx, pcm, p, sizeof(p)));
@@ -480,6 +592,12 @@ void test_create_validation_and_defaults(void)
     rtp_config_t cfg = make_cfg(0);
     TEST_ASSERT_NULL(rtp_session_create(NULL));
     cfg.payload_type = 18;
+    TEST_ASSERT_NULL(rtp_session_create(&cfg));
+    cfg.payload_type = 9;                           /* G.722 */
+    rtp_session_t *g = rtp_session_create(&cfg);
+    TEST_ASSERT_NOT_NULL(g);
+    rtp_session_destroy(g);
+    cfg.dtmf_payload_type = 9;                      /* clashes with the audio PT */
     TEST_ASSERT_NULL(rtp_session_create(&cfg));
     cfg = make_cfg(0);
     cfg.dtmf_payload_type = 0;
@@ -526,7 +644,7 @@ void test_rx_malformed_counts_invalid(void)
     rtp_config_t cfg = make_cfg(0);
     rtp_session_t *rx = rtp_session_create(&cfg);
     uint8_t buf[1024];
-    uint8_t pl[RTP_SAMPLES_8K];
+    uint8_t pl[RTP_FRAME_BYTES];
     encode_frame(0, pl);
     craft_t c = {.cc = 0, .ext_words = -1, .pad = 0, .pt = 0, .seq = 1, .ts = 160, .ssrc = 9};
     uint32_t expect_invalid = 0;
@@ -613,7 +731,7 @@ void test_rx_malformed_counts_invalid(void)
     /* NULL arguments are harmless */
     rtp_on_packet(rx, NULL, 0, 0);
     rtp_on_packet(NULL, buf, 10, 0);
-    int16_t out[RTP_SAMPLES_8K];
+    int16_t out[RTP_FRAME_SAMPLES];
     rtp_pull_frame(rx, out, 0);
     TEST_ASSERT_TRUE(is_silence(out));              /* still no audio */
     rtp_session_destroy(rx);
@@ -623,17 +741,17 @@ void test_rx_multi_frame_packet(void)
 {
     rtp_config_t cfg = make_cfg(0);
     rtp_session_t *rx = rtp_session_create(&cfg);
-    uint8_t buf[RTP_MAX_PACKET + 64], pl[RTP_SAMPLES_8K * 2];
+    uint8_t buf[RTP_MAX_PACKET + 64], pl[RTP_FRAME_BYTES * 2];
     encode_frame(0, pl);
-    encode_frame(1, pl + RTP_SAMPLES_8K);
+    encode_frame(1, pl + RTP_FRAME_BYTES);
     craft_t c = {.ext_words = -1, .pt = 0, .seq = 5, .ts = 4000, .ssrc = 3};
     size_t n = craft(buf, &c, pl, sizeof(pl));      /* one 40 ms packet */
     rtp_on_packet(rx, buf, n, 0);
-    int16_t out[RTP_SAMPLES_8K], e[RTP_SAMPLES_8K];
+    int16_t out[RTP_FRAME_SAMPLES], e[RTP_FRAME_SAMPLES];
     for (uint32_t k = 0; k < 2; k++) {
         rtp_pull_frame(rx, out, 50 + k * 20);
         expected_frame(0, k, e);
-        TEST_ASSERT_EQUAL_INT16_ARRAY(e, out, RTP_SAMPLES_8K);
+        TEST_ASSERT_EQUAL_INT16_ARRAY(e, out, RTP_FRAME_SAMPLES);
     }
     rtp_session_destroy(rx);
 }
@@ -646,7 +764,7 @@ void test_perfect_stream(void)
     sim_t m;
     sim_init(&m, &cfg, &cfg);
     enum { N = 600 };
-    static int16_t rec[N * RTP_SAMPLES_8K];
+    static int16_t rec[N * RTP_FRAME_SAMPLES];
     m.rec = rec;
     m.rec_cap = N;
     sim_advance(&m, N * 20);
@@ -676,7 +794,7 @@ void test_wraparound_seq_and_ts(void)
     sim_t m;
     sim_init(&m, &cfg, &cfg);
     enum { N = 120 };
-    static int16_t rec[N * RTP_SAMPLES_8K];
+    static int16_t rec[N * RTP_FRAME_SAMPLES];
     m.rec = rec;
     m.rec_cap = N;
     sim_advance(&m, N * 20);
@@ -736,7 +854,7 @@ void test_reordering_adjacent_swap(void)
     sim_init(&m, &cfg, &cfg);
     m.net.swap_every = 6;
     enum { N = 400 };
-    static int16_t rec[N * RTP_SAMPLES_8K];
+    static int16_t rec[N * RTP_FRAME_SAMPLES];
     m.rec = rec;
     m.rec_cap = N;
     sim_advance(&m, N * 20);
@@ -757,7 +875,7 @@ void test_duplicates_are_counted_and_dropped(void)
     sim_init(&m, &cfg, &cfg);
     m.net.dup_every = 7;
     enum { N = 300 };
-    static int16_t rec[N * RTP_SAMPLES_8K];
+    static int16_t rec[N * RTP_FRAME_SAMPLES];
     m.rec = rec;
     m.rec_cap = N;
     sim_advance(&m, N * 20);
@@ -783,7 +901,7 @@ void test_duplicate_of_already_played_packet(void)
     rtp_session_t *tx = rtp_session_create(&cfg);
     rtp_session_t *rx = rtp_session_create(&cfg);
     uint8_t p[10][RTP_MAX_PACKET];
-    int16_t pcm[RTP_SAMPLES_8K], out[RTP_SAMPLES_8K];
+    int16_t pcm[RTP_FRAME_SAMPLES], out[RTP_FRAME_SAMPLES];
     for (uint32_t k = 0; k < 10; k++) {
         gen_frame(k, pcm);
         rtp_build_audio(tx, pcm, p[k], sizeof(p[k]));
@@ -806,7 +924,7 @@ void test_late_packet_is_counted_and_dropped(void)
     rtp_session_t *tx = rtp_session_create(&cfg);
     rtp_session_t *rx = rtp_session_create(&cfg);
     uint8_t p[12][RTP_MAX_PACKET];
-    int16_t pcm[RTP_SAMPLES_8K], out[RTP_SAMPLES_8K];
+    int16_t pcm[RTP_FRAME_SAMPLES], out[RTP_FRAME_SAMPLES];
     for (uint32_t k = 0; k < 12; k++) {
         gen_frame(k, pcm);
         rtp_build_audio(tx, pcm, p[k], sizeof(p[k]));
@@ -839,7 +957,7 @@ void test_random_loss_5_percent(void)
     m.guard_end = 1900;
     s_rng = 12345;
     enum { N = 2000 };
-    static int16_t rec[N * RTP_SAMPLES_8K];
+    static int16_t rec[N * RTP_FRAME_SAMPLES];
     m.rec = rec;
     m.rec_cap = N;
     sim_advance(&m, N * 20);
@@ -878,7 +996,7 @@ void test_burst_loss_of_four_plc_then_silence(void)
     m.net.burst_from = 50;
     m.net.burst_n = 4;
     enum { N = 120 };
-    static int16_t rec[N * RTP_SAMPLES_8K];
+    static int16_t rec[N * RTP_FRAME_SAMPLES];
     m.rec = rec;
     m.rec_cap = N;
     sim_advance(&m, N * 20);
@@ -893,24 +1011,27 @@ void test_burst_loss_of_four_plc_then_silence(void)
         i++;
     }
     TEST_ASSERT_EQUAL_INT(49, last);
-    int16_t real49[RTP_SAMPLES_8K], e[RTP_SAMPLES_8K];
-    expected_frame(0, 49, real49);
+    int16_t e[RTP_FRAME_SAMPLES];
+    const int16_t *real49 = rec_frame(&m, i - 1);   /* as played */
+    expected_frame(0, 49, e);
+    TEST_ASSERT_EQUAL_INT16_ARRAY(e, real49, RTP_FRAME_SAMPLES);
     static const int32_t gain[3] = {22938, 16056, 11239};
     for (int n = 0; n < 3; n++) {
         const int16_t *f = rec_frame(&m, i + (size_t)n);
-        for (int j = 0; j < RTP_SAMPLES_8K; j++) {
+        for (int j = 0; j < RTP_FRAME_SAMPLES; j++) {
             e[j] = (int16_t)((real49[j] * gain[n]) >> 15);
         }
-        TEST_ASSERT_EQUAL_INT16_ARRAY(e, f, RTP_SAMPLES_8K);
+        TEST_ASSERT_EQUAL_INT16_ARRAY(e, f, RTP_FRAME_SAMPLES);
     }
     TEST_ASSERT_TRUE(is_silence(rec_frame(&m, i + 3)));     /* 4th loss: silence */
 
-    /* Frame 54 returns, cross-faded in from the (silent) tail. */
+    /* Frame 54 returns, cross-faded in from the (silent) tail; the
+     * interpolator still holds the tail of frame 49. */
     const int16_t *f54 = rec_frame(&m, i + 4);
-    expected_frame(0, 54, e);
+    expected_after(0, 49, 54, e);
     TEST_ASSERT_EQUAL_INT16(0, f54[0]);
-    TEST_ASSERT_EQUAL_INT16((int16_t)((e[16] * 16) / 32), f54[16]);
-    TEST_ASSERT_EQUAL_INT16_ARRAY(e + 32, f54 + 32, RTP_SAMPLES_8K - 32);
+    TEST_ASSERT_EQUAL_INT16((int16_t)((e[XF / 2] * (XF / 2)) / XF), f54[XF / 2]);
+    TEST_ASSERT_EQUAL_INT16_ARRAY(e + XF, f54 + XF, RTP_FRAME_SAMPLES - XF);
 
     rtp_stats_t st;
     rtp_get_stats(m.rx, &st);
@@ -932,7 +1053,7 @@ void test_single_loss_crossfades_smoothly(void)
     m.net.burst_from = 30;
     m.net.burst_n = 1;
     enum { N = 70 };
-    static int16_t rec[N * RTP_SAMPLES_8K];
+    static int16_t rec[N * RTP_FRAME_SAMPLES];
     m.rec = rec;
     m.rec_cap = N;
     sim_advance(&m, N * 20);
@@ -940,19 +1061,19 @@ void test_single_loss_crossfades_smoothly(void)
     while (classify(0, rec_frame(&m, i), 29) != 29) {
         i++;
     }
-    int16_t e[RTP_SAMPLES_8K], r29[RTP_SAMPLES_8K], r31[RTP_SAMPLES_8K];
-    expected_frame(0, 29, r29);
-    expected_frame(0, 31, r31);
+    int16_t e[RTP_FRAME_SAMPLES], r31[RTP_FRAME_SAMPLES];
+    const int16_t *r29 = rec_frame(&m, i);          /* as played */
+    expected_after(0, 29, 31, r31);
     /* concealed frame = 0.7 x frame 29 */
-    for (int j = 0; j < RTP_SAMPLES_8K; j++) {
+    for (int j = 0; j < RTP_FRAME_SAMPLES; j++) {
         e[j] = (int16_t)((r29[j] * 22938) >> 15);
     }
-    TEST_ASSERT_EQUAL_INT16_ARRAY(e, rec_frame(&m, i + 1), RTP_SAMPLES_8K);
+    TEST_ASSERT_EQUAL_INT16_ARRAY(e, rec_frame(&m, i + 1), RTP_FRAME_SAMPLES);
     /* frame 31 starts from the 0.49 continuation and fades to the real signal */
     const int16_t *f31 = rec_frame(&m, i + 2);
     int16_t t0 = (int16_t)((r29[0] * 16056) >> 15);
     TEST_ASSERT_EQUAL_INT16(t0, f31[0]);
-    TEST_ASSERT_EQUAL_INT16_ARRAY(r31 + 32, f31 + 32, RTP_SAMPLES_8K - 32);
+    TEST_ASSERT_EQUAL_INT16_ARRAY(r31 + XF, f31 + XF, RTP_FRAME_SAMPLES - XF);
     sim_done(&m);
 }
 
@@ -1094,7 +1215,7 @@ void test_timestamp_gap_silence_suppression(void)
     rtp_session_t *tx = rtp_session_create(&cfg);
     rtp_session_t *rx = rtp_session_create(&cfg);
     uint8_t p[RTP_MAX_PACKET];
-    int16_t pcm[RTP_SAMPLES_8K], out[RTP_SAMPLES_8K], e[RTP_SAMPLES_8K];
+    int16_t pcm[RTP_FRAME_SAMPLES], out[RTP_FRAME_SAMPLES], e[RTP_FRAME_SAMPLES];
     uint32_t t = 0;
     for (uint32_t k = 0; k < 20; k++, t += 20) {
         gen_frame(k, pcm);
@@ -1150,7 +1271,7 @@ void test_ssrc_switch_after_three_packets(void)
     rtp_session_t *b = rtp_session_create(&cb);
     rtp_session_t *rx = rtp_session_create(&ca);
     uint8_t p[RTP_MAX_PACKET];
-    int16_t pcm[RTP_SAMPLES_8K], out[RTP_SAMPLES_8K];
+    int16_t pcm[RTP_FRAME_SAMPLES], out[RTP_FRAME_SAMPLES];
     uint32_t t = 0;
     for (uint32_t k = 0; k < 30; k++, t += 20) {
         gen_frame(k, pcm);
@@ -1161,7 +1282,7 @@ void test_ssrc_switch_after_three_packets(void)
     rtp_get_stats(rx, &st);
     TEST_ASSERT_EQUAL_UINT32(30, st.rx_packets);
 
-    static int16_t rec[40][RTP_SAMPLES_8K];
+    static int16_t rec[40][RTP_FRAME_SAMPLES];
     for (uint32_t k = 0; k < 40; k++, t += 20) {
         gen_frame(1000 + k, pcm);
         rtp_build_audio(b, pcm, p, sizeof(p));
@@ -1203,7 +1324,7 @@ void test_ssrc_stray_packets_are_ignored(void)
     rtp_session_t *b = rtp_session_create(&cb);
     rtp_session_t *rx = rtp_session_create(&ca);
     uint8_t p[RTP_MAX_PACKET];
-    int16_t pcm[RTP_SAMPLES_8K], out[RTP_SAMPLES_8K];
+    int16_t pcm[RTP_FRAME_SAMPLES], out[RTP_FRAME_SAMPLES];
     uint32_t t = 0;
     /* Strays at k = 20 (alone), 30,31 and 33,34 (pairs split by an A packet). */
     for (uint32_t k = 0; k < 60; k++, t += 20) {
@@ -1241,11 +1362,11 @@ void test_ssrc_stray_does_not_disturb_stream(void)
     sim_init(&m, &ca, &ca);
     rtp_session_t *b = rtp_session_create(&cb);
     enum { N = 100 };
-    static int16_t rec[N * RTP_SAMPLES_8K];
+    static int16_t rec[N * RTP_FRAME_SAMPLES];
     m.rec = rec;
     m.rec_cap = N;
     sim_advance(&m, 40 * 20);
-    int16_t pcm[RTP_SAMPLES_8K] = {1000};
+    int16_t pcm[RTP_FRAME_SAMPLES] = {1000};
     uint8_t p[RTP_MAX_PACKET];
     rtp_build_audio(b, pcm, p, sizeof(p));
     rtp_on_packet(m.rx, p, HDR + 160, m.now);
@@ -1280,7 +1401,7 @@ void test_dtmf_sequence_100ms(void)
 {
     rtp_config_t cfg = make_cfg(0);
     rtp_session_t *s = rtp_session_create(&cfg);
-    int16_t pcm[RTP_SAMPLES_8K];
+    int16_t pcm[RTP_FRAME_SAMPLES];
     gen_frame(1, pcm);
     uint8_t p[RTP_MAX_PACKET];
 
@@ -1337,7 +1458,7 @@ void test_dtmf_digit_mapping_and_limits(void)
     static const char digits[] = "0123456789*#ABCDabcd";
     rtp_config_t cfg = make_cfg(8);
     rtp_session_t *s = rtp_session_create(&cfg);
-    int16_t pcm[RTP_SAMPLES_8K] = {0};
+    int16_t pcm[RTP_FRAME_SAMPLES] = {0};
     uint8_t p[RTP_MAX_PACKET];
     for (size_t i = 0; i < sizeof(digits) - 1; i++) {
         uint8_t want = (uint8_t)(i < 16 ? i : i - 4);
@@ -1389,17 +1510,312 @@ void test_dtmf_event_packets_ignored_on_rx(void)
     sim_done(&m);
 }
 
+/* ---- tests: G.722 (PT 9, 16 kHz audio, 8000 Hz RTP clock) ------------ */
+
+static double frame_snr_db(const int16_t *ref, const int16_t *got)
+{
+    double sig = 0, err = 0;
+    for (int i = 0; i < RTP_FRAME_SAMPLES; i++) {
+        double d = (double)got[i] - ref[i];
+        sig += (double)ref[i] * ref[i];
+        err += d * d;
+    }
+    return err == 0 ? 200.0 : 10.0 * log10(sig / err);
+}
+
+void test_g722_header_ts_and_roundtrip(void)
+{
+    rtp_config_t cfg = make_cfg(9);
+    rtp_session_t *tx = rtp_session_create(&cfg);
+    rtp_session_t *rx = rtp_session_create(&cfg);
+    uint8_t p[3][RTP_MAX_PACKET], ref[RTP_FRAME_BYTES];
+    int16_t pcm[RTP_FRAME_SAMPLES];
+    for (uint32_t k = 0; k < 3; k++) {
+        gen_frame(k, pcm);
+        /* 320 samples in, 160 payload bytes out */
+        TEST_ASSERT_EQUAL_UINT(HDR + 160, rtp_build_audio(tx, pcm, p[k], sizeof(p[k])));
+        TEST_ASSERT_EQUAL_HEX8(k == 0 ? 0x89 : 0x09, p[k][1]);     /* PT 9, M on first */
+        /* RFC 3551: G.722's RTP clock is 8000 Hz, so +160 per 20 ms */
+        TEST_ASSERT_EQUAL_UINT32(50000 + 160u * k,
+                                 ((uint32_t)p[k][4] << 24) | ((uint32_t)p[k][5] << 16) |
+                                 ((uint32_t)p[k][6] << 8) | p[k][7]);
+        ref_payload(9, k, ref);
+        TEST_ASSERT_EQUAL_UINT8_ARRAY(ref, p[k] + HDR, RTP_FRAME_BYTES);
+    }
+    for (uint32_t k = 0; k < 3; k++) {
+        rtp_on_packet(rx, p[k], HDR + 160, k * 20);
+    }
+    int16_t out[RTP_FRAME_SAMPLES], e[RTP_FRAME_SAMPLES];
+    for (uint32_t k = 0; k < 3; k++) {
+        rtp_pull_frame(rx, out, 60 + k * 20);
+        expected_frame(9, k, e);
+        TEST_ASSERT_EQUAL_INT16_ARRAY(e, out, RTP_FRAME_SAMPLES);
+    }
+    rtp_stats_t st;
+    rtp_get_stats(rx, &st);
+    TEST_ASSERT_EQUAL_UINT32(3, st.rx_packets);
+    TEST_ASSERT_EQUAL_UINT32(0, st.rx_invalid);
+
+    /* A G.711-sized packet with the wrong PT is not G.722 */
+    p[0][1] = 0;
+    rtp_on_packet(rx, p[0], HDR + 160, 200);
+    rtp_get_stats(rx, &st);
+    TEST_ASSERT_EQUAL_UINT32(1, st.rx_invalid);
+    rtp_session_destroy(tx);
+    rtp_session_destroy(rx);
+}
+
+void test_g722_perfect_stream_with_reordering(void)
+{
+    rtp_config_t cfg = make_cfg(9);
+    sim_t m;
+    sim_init(&m, &cfg, &cfg);
+    m.net.swap_every = 6;
+    enum { N = 600 };
+    static int16_t rec[N * RTP_FRAME_SAMPLES];
+    m.rec = rec;
+    m.rec_cap = N;
+    sim_advance(&m, N * 20);
+    size_t real;
+    size_t lead = check_perfect(&m, 9, N, &real);   /* bit-exact, in order */
+    TEST_ASSERT_LESS_OR_EQUAL_UINT(6, lead);
+    TEST_ASSERT_EQUAL_UINT(N - lead, real);
+    rtp_stats_t st;
+    rtp_get_stats(m.rx, &st);
+    TEST_ASSERT_EQUAL_UINT32(0, st.plc_frames);
+    TEST_ASSERT_EQUAL_UINT32(0, st.rx_lost);
+    TEST_ASSERT_EQUAL_UINT32(0, st.rx_late);
+    TEST_ASSERT_EQUAL_UINT16(40, st.jb_target_ms);
+    sim_done(&m);
+}
+
+void test_g722_dtmf_timestamps_and_encoder_state(void)
+{
+    rtp_config_t cfg = make_cfg(9);
+    rtp_session_t *s = rtp_session_create(&cfg);
+    int16_t pcm[RTP_FRAME_SAMPLES];
+    uint8_t p[RTP_MAX_PACKET], ref[RTP_FRAME_BYTES];
+
+    for (uint32_t k = 0; k < 2; k++) {
+        gen_frame(k, pcm);
+        TEST_ASSERT_EQUAL_UINT(HDR + 160, rtp_build_audio(s, pcm, p, sizeof(p)));
+    }
+    uint16_t seq0 = pkt_seq(p);
+    uint32_t start_ts = pkt_ts(p) + 160;
+
+    TEST_ASSERT_TRUE(rtp_send_dtmf(s, '#', 100));
+    gen_frame(999, pcm);                            /* audio during the event: not sent */
+    for (int i = 0; i < 8; i++) {
+        TEST_ASSERT_EQUAL_UINT(16, rtp_build_audio(s, pcm, p, sizeof(p)));
+        TEST_ASSERT_EQUAL_HEX8(i == 0 ? (0x80 | 101) : 101, p[1]);
+        TEST_ASSERT_EQUAL_UINT16((uint16_t)(seq0 + 1 + i), pkt_seq(p));
+        TEST_ASSERT_EQUAL_UINT32(start_ts, pkt_ts(p));
+        TEST_ASSERT_EQUAL_UINT8(11, p[12]);                         /* '#' */
+        /* durations in 8000 Hz units, like the G.722 media clock */
+        TEST_ASSERT_EQUAL_UINT16(i < 5 ? (uint16_t)(160 * (i + 1)) : 800, pkt_dur(p));
+        TEST_ASSERT_EQUAL_UINT8(i < 5 ? 0 : 0x80, p[13] & 0x80);
+    }
+    /* Back to audio: ts past the event, and the encoder did not run during
+     * it, so frame 2 encodes exactly as if it followed frame 1 directly. */
+    gen_frame(2, pcm);
+    TEST_ASSERT_EQUAL_UINT(HDR + 160, rtp_build_audio(s, pcm, p, sizeof(p)));
+    TEST_ASSERT_EQUAL_HEX8(0x89, p[1]);
+    TEST_ASSERT_EQUAL_UINT32(start_ts + 8 * 160, pkt_ts(p));
+    ref_payload(9, 2, ref);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(ref, p + HDR, RTP_FRAME_BYTES);
+    rtp_session_destroy(s);
+}
+
+void test_g722_burst_loss_plc_and_recovery(void)
+{
+    rtp_config_t cfg = make_cfg(9);
+    sim_t m;
+    sim_init(&m, &cfg, &cfg);
+    m.net.burst_from = 50;
+    m.net.burst_n = 4;
+    enum { N = 120 };
+    static int16_t rec[N * RTP_FRAME_SAMPLES];
+    m.rec = rec;
+    m.rec_cap = N;
+    sim_advance(&m, N * 20);
+
+    size_t i = 0;
+    int last = -1;
+    while (i < N && last != 49) {
+        int k = classify(9, rec_frame(&m, i), last + 1);
+        if (k >= 0) {
+            TEST_ASSERT_EQUAL_INT(last + 1, k);     /* exact, in order, before the loss */
+            last = k;
+        }
+        i++;
+    }
+    TEST_ASSERT_EQUAL_INT(49, last);
+    const int16_t *real49 = rec_frame(&m, i - 1);
+    static const int32_t gain[3] = {22938, 16056, 11239};
+    int16_t e[RTP_FRAME_SAMPLES];
+    for (int n = 0; n < 3; n++) {
+        for (int j = 0; j < RTP_FRAME_SAMPLES; j++) {
+            e[j] = (int16_t)((real49[j] * gain[n]) >> 15);
+        }
+        TEST_ASSERT_EQUAL_INT16_ARRAY(e, rec_frame(&m, i + (size_t)n), RTP_FRAME_SAMPLES);
+    }
+    TEST_ASSERT_TRUE(is_silence(rec_frame(&m, i + 3)));
+    TEST_ASSERT_EQUAL_INT16(0, rec_frame(&m, i + 4)[0]);  /* fade in from silence */
+
+    /* After the gap the decoder has missed 4 frames of ADPCM updates, so the
+     * output is no longer bit-exact, but it must re-converge on the sender's
+     * signal quickly and stay there. */
+    int first_good = -1;
+    for (size_t j = i + 4; j < N - 5; j++) {
+        int16_t ref[RTP_FRAME_SAMPLES];
+        uint32_t k = 54 + (uint32_t)(j - (i + 4));
+        expected_frame(9, k, ref);
+        double snr = frame_snr_db(ref, rec_frame(&m, j));
+        if (first_good < 0 && snr > 25) {
+            first_good = (int)(j - (i + 4));
+        }
+        if (first_good >= 0 && j > i + 4 + (size_t)first_good) {
+            TEST_ASSERT_TRUE_MESSAGE(snr > 25, "G.722 output diverged again after recovery");
+        }
+    }
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, first_good);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(10, first_good);  /* <= 200 ms */
+
+    rtp_stats_t st;
+    rtp_get_stats(m.rx, &st);
+    TEST_ASSERT_EQUAL_UINT32(4, st.plc_frames);
+    TEST_ASSERT_EQUAL_UINT32(4, st.rx_lost);
+    sim_done(&m);
+}
+
+void test_g722_random_loss_stats(void)
+{
+    rtp_config_t cfg = make_cfg(9);
+    sim_t m;
+    sim_init(&m, &cfg, &cfg);
+    m.net.loss_pct = 5;
+    m.guard_end = 1900;
+    s_rng = 12345;
+    enum { N = 2000 };
+    sim_advance(&m, N * 20);
+    TEST_ASSERT_GREATER_THAN_UINT32(50, m.dropped);
+    rtp_stats_t st;
+    rtp_get_stats(m.rx, &st);
+    TEST_ASSERT_EQUAL_UINT32(m.dropped, st.rx_lost);
+    TEST_ASSERT_EQUAL_UINT32(m.dropped, st.plc_frames);
+    TEST_ASSERT_EQUAL_UINT32(0, st.rx_late);
+    TEST_ASSERT_EQUAL_UINT32(0, st.rx_invalid);
+    sim_done(&m);
+}
+
+void test_g722_dropped_frames_keep_decoder_in_step(void)
+{
+    /* 12 frames arrive at once into a 60 ms jitter buffer: the hard cap drops
+     * the oldest ones. They are decoded and discarded, so what is played
+     * afterwards is still bit-exact. */
+    rtp_config_t cfg = make_cfg(9);
+    cfg.jb_max_ms = 60;
+    rtp_session_t *tx = rtp_session_create(&cfg);
+    rtp_session_t *rx = rtp_session_create(&cfg);
+    uint8_t p[RTP_MAX_PACKET];
+    int16_t pcm[RTP_FRAME_SAMPLES], out[RTP_FRAME_SAMPLES], e[RTP_FRAME_SAMPLES];
+    uint32_t k = 0;
+    for (; k < 12; k++) {
+        gen_frame(k, pcm);
+        rtp_build_audio(tx, pcm, p, sizeof(p));
+        rtp_on_packet(rx, p, HDR + 160, 0);
+    }
+    uint32_t t = 10;
+    rtp_pull_frame(rx, out, t);
+    int first = classify(9, out, 0);
+    TEST_ASSERT_GREATER_THAN_INT(0, first);         /* some frames were skipped */
+    expected_frame(9, (uint32_t)first, e);
+    TEST_ASSERT_EQUAL_INT16_ARRAY(e, out, RTP_FRAME_SAMPLES);
+    for (int n = 1; n < 30; n++, k++) {
+        t += 20;
+        gen_frame(k, pcm);
+        rtp_build_audio(tx, pcm, p, sizeof(p));
+        rtp_on_packet(rx, p, HDR + 160, t - 5);
+        rtp_pull_frame(rx, out, t);
+        expected_frame(9, (uint32_t)(first + n), e);
+        TEST_ASSERT_EQUAL_INT16_ARRAY(e, out, RTP_FRAME_SAMPLES);
+    }
+    rtp_stats_t st;
+    rtp_get_stats(rx, &st);
+    TEST_ASSERT_EQUAL_UINT32(0, st.plc_frames);
+    rtp_session_destroy(tx);
+    rtp_session_destroy(rx);
+}
+
+void test_g722_ssrc_switch_resets_decoder(void)
+{
+    /* A new source starts a fresh encoder: after the switch the receiver
+     * must decode it bit-exactly, i.e. its decoder was reset too. */
+    rtp_config_t ca = make_cfg(9);
+    rtp_config_t cb = make_cfg(9);
+    cb.ssrc = 0x55667788;
+    cb.initial_seq = 40000;
+    cb.initial_ts = 0x12345678;
+    rtp_session_t *a = rtp_session_create(&ca);
+    rtp_session_t *b = rtp_session_create(&cb);
+    rtp_session_t *rx = rtp_session_create(&ca);
+    uint8_t p[RTP_MAX_PACKET];
+    int16_t pcm[RTP_FRAME_SAMPLES], out[RTP_FRAME_SAMPLES];
+    uint32_t t = 0;
+    for (uint32_t k = 0; k < 30; k++, t += 20) {
+        gen_frame(1000 + k, pcm);                   /* unrelated audio first */
+        rtp_build_audio(a, pcm, p, sizeof(p));
+        feed_and_pull(rx, p, HDR + 160, t, out);
+    }
+    /* B sends frames 0.. from a fresh encoder. The SSRC lock withholds its
+     * first two packets, so playout starts at frame 2: the reference is a
+     * fresh decoder fed B's frames from 2 on. Matching it bit-exactly means
+     * nothing of A's decoder state was carried over. */
+    static uint8_t pl[40][RTP_FRAME_BYTES];
+    static int16_t want[40][RTP_FRAME_SAMPLES];
+    g722_enc_t re;
+    g722_dec_t rd;
+    g722_enc_init(&re);
+    g722_dec_init(&rd);
+    for (uint32_t k = 0; k < 40; k++) {
+        gen_frame(k, pcm);
+        g722_encode(&re, pcm, RTP_FRAME_SAMPLES, pl[k]);
+        if (k >= 2) {
+            g722_decode(&rd, pl[k], RTP_FRAME_BYTES, want[k]);
+        }
+    }
+    int matched = 0, next = 2;
+    for (uint32_t k = 0; k < 40; k++, t += 20) {
+        gen_frame(k, pcm);
+        rtp_build_audio(b, pcm, p, sizeof(p));
+        feed_and_pull(rx, p, HDR + 160, t, out);
+        for (int j = next; j < 40; j++) {
+            if (frames_match(out, want[j])) {       /* in order; first may be cross-faded */
+                matched++;
+                next = j + 1;
+                break;
+            }
+        }
+    }
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(30, matched);
+    rtp_session_destroy(a);
+    rtp_session_destroy(b);
+    rtp_session_destroy(rx);
+}
+
 /* ---- fuzz ------------------------------------------------------------- */
 
 void test_fuzz_packets_and_pulls(void)
 {
-    for (int pt = 0; pt <= 8; pt += 8) {
-        rtp_config_t cfg = make_cfg((uint8_t)pt);
+    static const uint8_t pts[] = {0, 8, 9};
+    for (size_t pi = 0; pi < sizeof(pts); pi++) {
+        uint8_t pt = pts[pi];
+        rtp_config_t cfg = make_cfg(pt);
         rtp_session_t *tx = rtp_session_create(&cfg);
         rtp_session_t *rx = rtp_session_create(&cfg);
-        s_rng = 0xC0FFEEu + (uint32_t)pt;
+        s_rng = 0xC0FFEEu + pt;
         uint8_t pkt[RTP_MAX_PACKET + 128];
-        int16_t pcm[RTP_SAMPLES_8K], out[RTP_SAMPLES_8K];
+        int16_t pcm[RTP_FRAME_SAMPLES], out[RTP_FRAME_SAMPLES];
         uint32_t now = 0;
         for (int it = 0; it < 25000; it++) {
             gen_frame((uint32_t)it, pcm);
@@ -1459,7 +1875,7 @@ void test_fuzz_random_noise_50k(void)
     rtp_session_t *rx = rtp_session_create(&cfg);
     s_rng = 0xBADF00Du;
     uint8_t pkt[RTP_MAX_PACKET + 64];
-    int16_t out[RTP_SAMPLES_8K];
+    int16_t out[RTP_FRAME_SAMPLES];
     uint32_t now = 0;
     for (int it = 0; it < 50000; it++) {
         size_t len = rnd_range(sizeof(pkt));
@@ -1516,7 +1932,19 @@ int main(void)
     RUN_TEST(test_dtmf_sequence_100ms);
     RUN_TEST(test_dtmf_digit_mapping_and_limits);
     RUN_TEST(test_dtmf_event_packets_ignored_on_rx);
+    RUN_TEST(test_g722_header_ts_and_roundtrip);
+    RUN_TEST(test_g722_perfect_stream_with_reordering);
+    RUN_TEST(test_g722_dtmf_timestamps_and_encoder_state);
+    RUN_TEST(test_g722_burst_loss_plc_and_recovery);
+    RUN_TEST(test_g722_random_loss_stats);
+    RUN_TEST(test_g722_dropped_frames_keep_decoder_in_step);
+    RUN_TEST(test_g722_ssrc_switch_resets_decoder);
     RUN_TEST(test_fuzz_packets_and_pulls);
     RUN_TEST(test_fuzz_random_noise_50k);
-    return UNITY_END();
+    int rc = UNITY_END();
+    for (int c = 0; c < 2; c++) {
+        free(s_exp[c]);
+        free(s_exp_ok[c]);
+    }
+    return rc;
 }

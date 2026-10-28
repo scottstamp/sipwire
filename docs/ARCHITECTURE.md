@@ -7,8 +7,8 @@ components/
   board/             Kconfig pins, board_init(), bus bring-up (SPI, I2S, SDMMC)
   display/           ILI9341 + XPT2046 via esp_lcd + esp_lvgl_port
   keypad/            matrix scanner → key events (press/release/long/repeat)
-  audio/             I2S in/out tasks, ring buffers, gain, DC block, tone gen
-  codec/             G.711 µ/A-law (G.722 later). Pure C, host-testable
+  audio/             I2S in/out tasks (16 kHz), gain, DC block, tone gen
+  codec/             G.722 (64k), G.711 µ/A-law, 2:1 half-band resampler. Pure C, host-testable
   rtp/               RTP tx/rx, RFC 3550, RFC 2833 DTMF, adaptive jitter buffer
   sip/               minimal SIP UA: parser, digest auth, transactions, dialogs,
                      REGISTER / INVITE / ACK / BYE / CANCEL / OPTIONS, SDP
@@ -50,12 +50,18 @@ Write our own minimal UA in C (UDP first, TCP later). Rationale:
 - PJSIP/baresip too large / awkward on IDF.
 - esp-adf `esp_sip` is a closed binary blob — avoid.
 - A phone UA needs a small subset: REGISTER (digest), INVITE/200/ACK, BYE,
-  CANCEL, re-INVITE answer, OPTIONS ping, SDP offer/answer with PCMU/PCMA
-  + telephone-event. ~3–4 k lines, fully testable against Asterisk.
+  CANCEL, re-INVITE answer, OPTIONS ping, SDP offer/answer with G.722/PCMU/
+  PCMA + telephone-event. ~3–4 k lines, fully testable against Asterisk.
 
 ## Media path
-mic → I2S RX → 16-bit → (AEC later) → G.711 enc → RTP tx (20 ms frames)
-RTP rx → jitter buf → G.711 dec → mixer (+ tones) → I2S TX → amp
+Everything between the I2S driver and `rtp` runs at 16 kHz, 20 ms frames
+(320 samples); `rtp` adapts to the negotiated codec.
+mic → I2S RX (16 kHz) → DC block → (AEC later) → rtp: G.722 enc
+                                                  or ↓2 → G.711 enc → RTP tx
+RTP rx → jitter buf → G.722 dec, or G.711 dec → ↑2 → mixer (+ tones, 16 kHz)
+       → gain/soft clip → I2S TX → amp
+Codec preference (settings `codec_pref`): G.722 > PCMU > PCMA. On the wire all
+three are 64 kbit/s with an 8000 Hz RTP clock (RFC 3551, G.722 included).
 
 ## Config (NVS)
 wifi ssid/pass, sip server/port/transport, user, auth user, password,

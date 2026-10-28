@@ -76,7 +76,10 @@ inside a phase are parallel unless noted.
 ## Phase 5 — Hardening / nice-to-have
 - [core] AEC/noise suppression for speakerphone (esp-sr AEC if license OK,
   else simple NLMS). Half-duplex suppressor as fallback.
-- [cheap] G.722 (wideband) via libg722.
+- [x] [core] G.722 (wideband, 64 kbit/s): own `codec/g722.c` (SpanDSP/Asterisk
+  public-domain code, bit-exact with Asterisk), 16 kHz audio path end to end,
+  G.711 resampled 16↔8 kHz in `rtp`; SDP offers `9 0 8 101`; `codec_pref`
+  setting. Verify on hardware: sidetone/echo levels at 16 kHz, CPU headroom.
 - [cheap] OTA update from SD / HTTP; version in UI.
 - [cheap] Power: light sleep when idle, backlight timeout, battery ADC.
 - [core] SIP over TCP/TLS, SRTP (mbedtls) — optional.

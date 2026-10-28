@@ -158,7 +158,7 @@ static int cmd_rtp(int argc, char **argv)
     phone_get_status(&st);
     const rtp_stats_t *r = &st.rtp;
     printf("%s, pt %u (%s), local %u -> %s\n", st.media_active ? "active" : "last call", st.payload_type,
-           st.payload_type == 8 ? "PCMA" : "PCMU", st.rtp_local_port, st.rtp_remote[0] ? st.rtp_remote : "-");
+           phone_codec_name(st.payload_type), st.rtp_local_port, st.rtp_remote[0] ? st.rtp_remote : "-");
     printf("rx %" PRIu32 " lost %" PRIu32 " late %" PRIu32 " dup %" PRIu32 " invalid %" PRIu32 " plc %" PRIu32 "\n",
            r->rx_packets, r->rx_lost, r->rx_late, r->rx_dup, r->rx_invalid, r->plc_frames);
     printf("tx %" PRIu32 " (errors %" PRIu32 "), jitter %" PRIu32 " ms, jb %u/%u ms\n", r->tx_packets,

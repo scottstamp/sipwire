@@ -434,7 +434,8 @@ static void test_outgoing_call_success(void)
     const sip_msg_t *m = fx_parse(f, inv);
     TEST_ASSERT_EQUAL_STRING("INVITE sip:600@10.0.0.1 SIP/2.0", strtok(strcpy(sbuf, f->sent[inv].buf), "\r"));
     TEST_ASSERT_TRUE(m->body.len > 0);
-    TEST_ASSERT_NOT_NULL(strstr(f->sent[inv].buf, "m=audio 4000 RTP/AVP 0 8 101\r\n"));
+    TEST_ASSERT_NOT_NULL(strstr(f->sent[inv].buf, "m=audio 4000 RTP/AVP 9 0 8 101\r\n"));
+    TEST_ASSERT_NOT_NULL(strstr(f->sent[inv].buf, "a=rtpmap:9 G722/8000\r\n"));
     TEST_ASSERT_EQUAL_STRING("<sip:600@10.0.0.1>", fx_hdr(f, inv, "To"));
 
     fx_reply(f, inv, 100, NULL, NULL, NULL);
@@ -864,6 +865,87 @@ static void test_incoming_busy_second_call(void)
     TEST_ASSERT_EQUAL(1, sip_ua_debug_call_slots(f->ua));
 }
 
+static void test_outgoing_g722_answer(void)
+{
+    fx_init(f, NULL);
+    sip_call_handle_t h;
+    sip_call_dial(f->ua, "600", &h);
+    int inv = fx_find(f, "INVITE", 0);
+    fx_reply(f, inv, 200, "callee", NULL, FX_SDP_G722);
+    const fx_ev_t *me = fx_last_ev(f, FXE_MEDIA);
+    TEST_ASSERT_NOT_NULL(me);
+    TEST_ASSERT_EQUAL(9, me->media.payload_type);
+    TEST_ASSERT_EQUAL(101, me->media.dtmf_pt);
+    TEST_ASSERT_EQUAL(20006, me->media.remote_port);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_ACTIVE, sip_call_state(f->ua, h));
+}
+
+static void test_incoming_g722_offer_answered_in_pref_order(void)
+{
+    fx_init(f, NULL);
+    inject_invite("g1@x", "z9hG4bKg1", 1, FX_SDP_G722, NULL);
+    sip_call_handle_t h = fx_last_ev(f, FXE_INCOMING)->call;
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_answer(f->ua, h));
+    int ok = fx_find(f, "SIP/2.0 200", 0);
+    TEST_ASSERT_NOT_NULL(strstr(f->sent[ok].buf, "m=audio 4000 RTP/AVP 9 101\r\n"));
+    TEST_ASSERT_NOT_NULL(strstr(f->sent[ok].buf, "a=rtpmap:9 G722/8000\r\n"));
+    TEST_ASSERT_EQUAL(9, fx_last_ev(f, FXE_MEDIA)->media.payload_type);
+}
+
+static int bad_send(void *ctx, const sip_addr_t *to, const void *data, size_t len)
+{
+    (void)ctx;
+    (void)to;
+    (void)data;
+    (void)len;
+    return 0;
+}
+
+static uint32_t bad_rand(void *ctx)
+{
+    (void)ctx;
+    return 4;
+}
+
+static void tweak_narrowband_first(sip_ua_config_t *c)
+{
+    c->codecs[0] = 0;
+    c->codecs[1] = 9;
+    c->n_codecs = 2;
+}
+
+static void test_codec_preference_config(void)
+{
+    fx_init(f, tweak_narrowband_first);
+    sip_call_handle_t h;
+    sip_call_dial(f->ua, "600", &h);
+    int inv = fx_find(f, "INVITE", 0);
+    TEST_ASSERT_NOT_NULL(strstr(f->sent[inv].buf, "m=audio 4000 RTP/AVP 0 9 101\r\n"));
+    TEST_ASSERT_NULL(strstr(f->sent[inv].buf, "PCMA"));
+    fx_free(f);
+
+    /* incoming G.722-first offer: our order picks PCMU */
+    fx_init(f, tweak_narrowband_first);
+    inject_invite("g2@x", "z9hG4bKg2", 1, FX_SDP_G722, NULL);
+    sip_call_answer(f->ua, fx_last_ev(f, FXE_INCOMING)->call);
+    TEST_ASSERT_EQUAL(0, fx_last_ev(f, FXE_MEDIA)->media.payload_type);
+    fx_free(f);
+
+    /* invalid lists are rejected */
+    static const uint8_t bad[][SIP_UA_MAX_CODECS] = { {18}, {9, 9}, {0, 8, 0} };
+    static const uint8_t n_bad[] = { 1, 2, 3 };
+    for (size_t i = 0; i < sizeof(n_bad); i++) {
+        sip_ua_config_t c = {
+            .server_host = "10.0.0.1", .user = "u", .password = "p",
+            .local_addr = { FX_LOCAL_IP, 5060 }, .rtp_port = 4000,
+            .send = bad_send, .rand = bad_rand, .n_codecs = n_bad[i],
+        };
+        memcpy(c.codecs, bad[i], sizeof(c.codecs));
+        sip_ua_t *ua = NULL;
+        TEST_ASSERT_EQUAL(SIP_ERR_ARG, sip_ua_create(&c, &ua));
+    }
+}
+
 static void test_incoming_no_codec_488(void)
 {
     fx_init(f, NULL);
@@ -964,7 +1046,7 @@ static void test_delayed_offer_incoming(void)
     sip_call_handle_t h = fx_last_ev(f, FXE_INCOMING)->call;
     sip_call_answer(f->ua, h);
     int ok = fx_find(f, "SIP/2.0 200", 0);
-    TEST_ASSERT_NOT_NULL(strstr(f->sent[ok].buf, "m=audio 4000 RTP/AVP 0 8 101\r\n")); /* our offer */
+    TEST_ASSERT_NOT_NULL(strstr(f->sent[ok].buf, "m=audio 4000 RTP/AVP 9 0 8 101\r\n")); /* our offer */
     TEST_ASSERT_EQUAL(0, fx_count_ev(f, FXE_MEDIA));
     char tag[80];
     snprintf(tag, sizeof(tag), "%s", to_tag_of(ok));
@@ -1072,6 +1154,9 @@ int main(void)
     RUN_TEST(test_incoming_reject_no_ack_timer_h);
     RUN_TEST(test_incoming_remote_cancel);
     RUN_TEST(test_incoming_busy_second_call);
+    RUN_TEST(test_outgoing_g722_answer);
+    RUN_TEST(test_incoming_g722_offer_answered_in_pref_order);
+    RUN_TEST(test_codec_preference_config);
     RUN_TEST(test_incoming_no_codec_488);
     RUN_TEST(test_incoming_remote_bye_and_cseq);
     RUN_TEST(test_remote_reinvite_hold);

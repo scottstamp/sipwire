@@ -55,6 +55,20 @@ void phone_media_flags(sip_ua_call_state_t state, sip_media_dir_t dir, bool earl
  *  private c= address but sends from the address we register with. */
 bool phone_rtp_source_ok(uint32_t sdp_ip, uint32_t server_ip, uint32_t src_ip, const uint8_t *pkt, size_t len);
 
+/* ---- codecs ------------------------------------------------------------------ */
+
+#define PHONE_CODEC_PREF_DEFAULT "g722,pcmu,pcma"
+
+/** "G722", "PCMU", "PCMA" for PT 9/0/8, "?" otherwise. */
+const char *phone_codec_name(uint8_t pt);
+
+/** Parse a codec preference list such as "g722,pcmu,pcma" into static
+ *  payload types for sip_ua_config_t.codecs. Names (case-insensitive):
+ *  g722, pcmu or ulaw, pcma or alaw; separated by ',' and/or spaces.
+ *  Returns the number of entries (1..max), or 0 if the string is empty or
+ *  has an unknown name, a duplicate, or more than max entries. */
+int phone_codec_pref_parse(const char *s, uint8_t *pts, int max);
+
 /* ---- RTP port allocation --------------------------------------------------- */
 
 #define PHONE_RTP_PORT_MIN      16384u

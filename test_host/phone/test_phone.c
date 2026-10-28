@@ -388,6 +388,37 @@ static void test_build_model_is_deterministic(void)
     TEST_ASSERT_EQUAL_MEMORY(&a, &b, sizeof(a));
 }
 
+static void test_codec_names(void)
+{
+    TEST_ASSERT_EQUAL_STRING("G722", phone_codec_name(9));
+    TEST_ASSERT_EQUAL_STRING("PCMU", phone_codec_name(0));
+    TEST_ASSERT_EQUAL_STRING("PCMA", phone_codec_name(8));
+    TEST_ASSERT_EQUAL_STRING("?", phone_codec_name(18));
+}
+
+static void test_codec_pref_parse(void)
+{
+    uint8_t pts[SIP_UA_MAX_CODECS];
+    TEST_ASSERT_EQUAL_INT(3, phone_codec_pref_parse(PHONE_CODEC_PREF_DEFAULT, pts, SIP_UA_MAX_CODECS));
+    TEST_ASSERT_EQUAL_UINT8(9, pts[0]);
+    TEST_ASSERT_EQUAL_UINT8(0, pts[1]);
+    TEST_ASSERT_EQUAL_UINT8(8, pts[2]);
+    TEST_ASSERT_EQUAL_INT(2, phone_codec_pref_parse(" ALaw, G722 ", pts, SIP_UA_MAX_CODECS));
+    TEST_ASSERT_EQUAL_UINT8(8, pts[0]);
+    TEST_ASSERT_EQUAL_UINT8(9, pts[1]);
+    TEST_ASSERT_EQUAL_INT(1, phone_codec_pref_parse("ulaw", pts, SIP_UA_MAX_CODECS));
+    TEST_ASSERT_EQUAL_UINT8(0, pts[0]);
+    TEST_ASSERT_EQUAL_INT(2, phone_codec_pref_parse("pcmu pcma", pts, SIP_UA_MAX_CODECS));
+    /* rejected */
+    TEST_ASSERT_EQUAL_INT(0, phone_codec_pref_parse("", pts, SIP_UA_MAX_CODECS));
+    TEST_ASSERT_EQUAL_INT(0, phone_codec_pref_parse(" , ", pts, SIP_UA_MAX_CODECS));
+    TEST_ASSERT_EQUAL_INT(0, phone_codec_pref_parse(NULL, pts, SIP_UA_MAX_CODECS));
+    TEST_ASSERT_EQUAL_INT(0, phone_codec_pref_parse("g722,opus", pts, SIP_UA_MAX_CODECS));
+    TEST_ASSERT_EQUAL_INT(0, phone_codec_pref_parse("g7221", pts, SIP_UA_MAX_CODECS));
+    TEST_ASSERT_EQUAL_INT(0, phone_codec_pref_parse("pcmu,ulaw", pts, SIP_UA_MAX_CODECS));   /* duplicate */
+    TEST_ASSERT_EQUAL_INT(0, phone_codec_pref_parse("g722,pcmu,pcma", pts, 2));             /* too many */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -405,6 +436,8 @@ int main(void)
     RUN_TEST(test_dtmf_event_fits_in_gap);
     RUN_TEST(test_dtmf_push_rejects);
     RUN_TEST(test_volume_kind);
+    RUN_TEST(test_codec_names);
+    RUN_TEST(test_codec_pref_parse);
     RUN_TEST(test_account_format);
     RUN_TEST(test_call_seconds);
     RUN_TEST(test_hhmm);

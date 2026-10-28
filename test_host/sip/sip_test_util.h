@@ -83,6 +83,7 @@ const fx_ev_t *fx_last_ev(const fx_t *f, fx_ev_kind_t kind);
 
 /* A typical server SDP offer/answer at 10.0.0.1:20000 */
 extern const char *FX_SDP_PCMU;
+extern const char *FX_SDP_G722;        /* Asterisk-style "9 0 8 101" */
 extern const char *FX_SDP_PCMA_ONLY;
 extern const char *FX_SDP_G729_ONLY;
 extern const char *FX_SDP_SENDONLY;

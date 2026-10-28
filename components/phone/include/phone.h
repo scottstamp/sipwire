@@ -52,7 +52,7 @@ typedef struct {
 
     /* media (current call, or the last one if none is active) */
     bool media_active;
-    uint8_t payload_type;           /* 0 = PCMU, 8 = PCMA */
+    uint8_t payload_type;           /* 9 = G.722, 0 = PCMU, 8 = PCMA */
     char rtp_remote[24];            /* "ip:port" we send to */
     uint16_t rtp_local_port;
     rtp_stats_t rtp;

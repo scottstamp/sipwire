@@ -2,7 +2,7 @@
 
 Own RFC 3261 UA for the handset (see `docs/ARCHITECTURE.md`, "SIP stack
 choice"): UDP, REGISTER with digest auth, INVITE/ACK/BYE/CANCEL/OPTIONS,
-re-INVITE (hold), SDP offer/answer for G.711 + telephone-event. No media —
+re-INVITE (hold), SDP offer/answer for G.722 / G.711 + telephone-event. No media —
 the UA reports the negotiated RTP parameters and `rtp` (Phase 3) does the rest.
 
 ## Layout
@@ -13,7 +13,7 @@ the UA reports the negotiated RTP parameters and `rtp` (Phase 3) does the rest.
 | `sip_msg.c` | parser (in place, bounded, compact forms, folding, lists) + writer |
 | `sip_md5.c` | MD5 (RFC 1321, written from the spec) |
 | `sip_auth.c` | digest (RFC 2617: MD5, qop=auth / legacy), challenge parsing |
-| `sip_sdp.c` | SDP parse / negotiate / build (PCMU, PCMA, telephone-event, ptime, direction) |
+| `sip_sdp.c` | SDP parse / negotiate / build (G722, PCMU, PCMA, telephone-event, ptime, direction) |
 | `sip_txn.c` | transactions (§17 + RFC 6026 Accepted), timers A–K, ACK for non-2xx |
 | `sip_dialog.c` | dialogs: tags, remote target, route set (loose/strict), CSeq |
 | `sip_ua.c` | TU: registration, calls, request dispatch, callbacks |
@@ -39,6 +39,7 @@ sip_ua_config_t cfg = {
     .password = settings.sip_password, .display_name = settings.sip_display_name,
     .expires = settings.sip_reg_expires,
     .local_addr = { lip, udp.port }, .rtp_port = 40000,
+    .codecs = { 9, 0, 8 }, .n_codecs = 3,   /* G.722 > PCMU > PCMA (also the default) */
     .keepalive_s = 25,
     .send = sip_udp_send, .send_ctx = &udp,
     .rand = esp_rand_cb,            /* wraps esp_random() */
@@ -57,6 +58,28 @@ for (;;) {
 
 `sip_ua_reg_state_t` and `sip_ua_call_state_t` have the same order as
 `sip_reg_state_t` / `call_state_t` in `sipwire_events.h`, so the phone can cast.
+
+### Codecs
+
+`cfg.codecs[]` is the preference list of static payload types: 9 = G.722,
+0 = PCMU, 8 = PCMA (no duplicates; `n_codecs = 0` means `{9, 0, 8}`). Our
+offer lists them in that order plus telephone-event, e.g.
+
+```
+m=audio 4000 RTP/AVP 9 0 8 101
+a=rtpmap:9 G722/8000
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-16
+a=ptime:20
+```
+
+When answering we pick the first entry of our list that the offer contains;
+for an answer to our offer, the answerer's first format we support. G.722 is
+announced as `G722/8000`: RFC 3551 fixes its RTP clock at 8000 Hz although it
+samples at 16 kHz (`G722/16000` from a broken peer is tolerated). The `media`
+callback reports the chosen PT (9, 0 or 8); `rtp` handles the rest.
 Functions return `sip_err_t` (0 / negative) because the core cannot depend on
 `esp_err.h`; the phone maps them.
 
@@ -71,7 +94,7 @@ Functions return `sip_err_t` (0 / negative) because the core cannot depend on
   `sip_call_state`
 * callbacks: `reg_state(state, code)`, `incoming_call(handle, number, name)`,
   `call_state(handle, info)` (state, end reason, status code, number, name),
-  `media(handle, info)` (remote IP/port, PT 0/8, telephone-event PT, ptime,
+  `media(handle, info)` (remote IP/port, PT 9/0/8, telephone-event PT, ptime,
   direction from our point of view, local RTP port, early flag)
 
 ### Callback rules
@@ -127,7 +150,7 @@ Contact entries per message, 64 header lines.
   PRACK/100rel, no UPDATE, no session timers, no REFER/transfer, no MESSAGE,
   no SUBSCRIBE/MWI.
 * RFC 2543 (no magic cookie) request retransmissions are not matched.
-* Codecs: G.711 only, static payload types 0/8; one audio stream.
+* Codecs: G.722 and G.711 only, static payload types 9/0/8; one audio stream.
 * Re-INVITE glare (491) is reported/logged but not retried automatically.
 * Digest: MD5 and qop=auth only (no MD5-sess, auth-int, SHA-256).
 * Raw NUL / control characters in headers are rejected (RFC 4475 "intmeth"
@@ -142,12 +165,14 @@ Host (`tools/ci.sh host-test`, needs `IDF_PATH` for Unity), under ASan/UBSan:
   ltgtruri, lwsruri, lwsstart, trws, badvers, bigcode, mismatch01, insuf,
   multi01), compact forms, lists, URIs, writer.
 * `test_sip_auth` — RFC 1321 vectors, RFC 2617 §3.5 digest, challenge parsing.
-* `test_sip_sdp` — parse/negotiate/build, hold variants, failures.
+* `test_sip_sdp` — parse/negotiate/build, G.722 negotiation and offer, hold
+  variants, failures.
 * `test_sip_ua` — fake transport + virtual clock: REGISTER 401→200, refresh
   timing, backoff, timers B/F/G/H, NAT rport, keepalive, outgoing call, 407,
   486 (ACK), CANCEL (incl. before provisional and the 200 race), incoming
   answer/reject/remote CANCEL/busy/488, BYE both ways, retransmissions,
-  re-INVITE hold (remote and local), delayed offer, callback re-entrancy.
+  re-INVITE hold (remote and local), delayed offer, G.722 offer/answer and
+  codec preference config, callback re-entrancy.
 * `test_sip_fuzz` — 50k deterministic mutations through all parsers plus 10k
   through the full UA.
 
@@ -159,7 +184,13 @@ export IDF_PATH=...            # only needed if sipcli is not built yet
 test_host/sip/integration.sh   # KEEP_STATE=1 / VERBOSE=1 for debugging
 ```
 
-It registers 1001, checks `pjsip show contacts`, calls 600 (Echo: media,
-hold/resume, BYE → 200), calls 601 (remote BYE), answers an inbound
-`channel originate PJSIP/1001 application Wait 3`, and unregisters.
+First it checks the G.722 codec against Asterisk's `codec_g722` (`file
+convert` both ways must be bit-exact with `g722tool`). Then it registers 1001,
+checks `pjsip show contacts`, calls 600 (Echo: PT 9 negotiated, a 5 kHz tone
+sent as G.722 RTP must come back at the same level, hold/resume, BYE → 200),
+calls 602 (Asterisk records the 5 kHz tone through its own G.722 decoder;
+`tone_check.py` verifies the recording), calls 601 (remote BYE), answers an
+inbound `channel originate PJSIP/1001 application Wait 3`, and unregisters.
+A second, PCMU-only UA (1002) then echoes a 1 kHz tone through the
+resampled G.711 path.
 `build_host/sip/sipcli` can also be used by hand against any server.

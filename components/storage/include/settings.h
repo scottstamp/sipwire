@@ -22,6 +22,7 @@ typedef struct {
     char sip_password[64];
     char sip_display_name[64];
     uint32_t sip_reg_expires;  /* seconds, default 300 */
+    char codec_pref[24];       /* "g722,pcmu,pcma" (default); "" = default */
     /* audio */
     uint8_t ring_volume;       /* 0-100 */
     uint8_t call_volume;       /* 0-100 */

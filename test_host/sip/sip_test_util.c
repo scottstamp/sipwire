@@ -20,6 +20,21 @@ const char *FX_SDP_PCMU =
     "a=ptime:20\r\n"
     "a=sendrecv\r\n";
 
+const char *FX_SDP_G722 =
+    "v=0\r\n"
+    "o=srv 1 1 IN IP4 10.0.0.1\r\n"
+    "s=-\r\n"
+    "c=IN IP4 10.0.0.1\r\n"
+    "t=0 0\r\n"
+    "m=audio 20006 RTP/AVP 9 0 8 101\r\n"
+    "a=rtpmap:9 G722/8000\r\n"
+    "a=rtpmap:0 PCMU/8000\r\n"
+    "a=rtpmap:8 PCMA/8000\r\n"
+    "a=rtpmap:101 telephone-event/8000\r\n"
+    "a=fmtp:101 0-16\r\n"
+    "a=ptime:20\r\n"
+    "a=sendrecv\r\n";
+
 const char *FX_SDP_PCMA_ONLY =
     "v=0\r\n"
     "o=srv 1 1 IN IP4 10.0.0.1\r\n"
