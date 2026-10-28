@@ -69,4 +69,4 @@ static void outgoing_key(char key, ui_key_action_t action)
     }
 }
 
-const ui_screen_ops_t ui_ops_outgoing = {outgoing_create, outgoing_update, outgoing_key};
+const ui_screen_ops_t ui_ops_outgoing = {outgoing_create, outgoing_update, outgoing_key, NULL, NULL};

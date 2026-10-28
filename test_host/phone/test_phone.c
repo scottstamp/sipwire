@@ -1,5 +1,6 @@
 /* Host tests: phone call-control policy + UI-bridge model building. */
 
+#define _GNU_SOURCE /* memmem */
 #include <string.h>
 
 #include "phone_logic.h"
@@ -282,6 +283,13 @@ static void test_build_model(void)
     ui_bridge_local_t loc = { .net = UI_NET_CONNECTED, .rssi = -61, .time_valid = true, .hour = 7, .minute = 3 };
     strcpy(loc.ip, "192.168.1.50");
     strcpy(loc.account, "1001@pbx");
+    strcpy(loc.wifi_ssid, "homenet");
+    loc.wifi_pass_set = true;
+    strcpy(loc.sip_server, "pbx.lan");
+    loc.sip_port = 5061;
+    strcpy(loc.sip_user, "1001");
+    strcpy(loc.sip_display_name, "Alice");
+    loc.sip_pass_set = false;
     phone_status_t ph;
     memset(&ph, 0, sizeof(ph));
     ph.reg = SIP_REG_REGISTERED;
@@ -310,6 +318,13 @@ static void test_build_model(void)
     TEST_ASSERT_EQUAL(55, m.volume);
     TEST_ASSERT_EQUAL(-1, m.battery_pct);
     TEST_ASSERT_EQUAL_STRING("07:03", m.time_hhmm);
+    TEST_ASSERT_EQUAL_STRING("homenet", m.wifi_ssid);
+    TEST_ASSERT_TRUE(m.wifi_pass_set);
+    TEST_ASSERT_EQUAL_STRING("pbx.lan", m.sip_server);
+    TEST_ASSERT_EQUAL_UINT16(5061, m.sip_port);
+    TEST_ASSERT_EQUAL_STRING("1001", m.sip_user);
+    TEST_ASSERT_EQUAL_STRING("Alice", m.sip_display_name);
+    TEST_ASSERT_FALSE(m.sip_pass_set);
 
     ph.call = CALL_ENDED;
     ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
@@ -325,6 +340,37 @@ static void test_build_model(void)
     TEST_ASSERT_EQUAL_STRING("", m.ip);
     TEST_ASSERT_EQUAL(0, m.rssi);
     TEST_ASSERT_EQUAL_STRING("", m.time_hhmm);
+}
+
+static void test_fill_settings(void)
+{
+    ui_bridge_local_t loc;
+    memset(&loc, 0, sizeof(loc));
+    ui_bridge_fill_settings(&loc, "homenet", "hunter2", "pbx.lan", 5062, "1001", "", "Alice");
+    TEST_ASSERT_EQUAL_STRING("homenet", loc.wifi_ssid);
+    TEST_ASSERT_TRUE(loc.wifi_pass_set);
+    TEST_ASSERT_EQUAL_STRING("pbx.lan", loc.sip_server);
+    TEST_ASSERT_EQUAL_UINT16(5062, loc.sip_port);
+    TEST_ASSERT_EQUAL_STRING("1001", loc.sip_user);
+    TEST_ASSERT_FALSE(loc.sip_pass_set);
+    TEST_ASSERT_EQUAL_STRING("Alice", loc.sip_display_name);
+    TEST_ASSERT_EQUAL_STRING("Alice <1001@pbx.lan>", loc.account);
+
+    /* the secret itself must not appear anywhere in what the UI gets */
+    phone_status_t ph;
+    memset(&ph, 0, sizeof(ph));
+    ui_model_t m;
+    ui_bridge_build_model(&loc, &ph, 0, &m);
+    TEST_ASSERT_NULL(memmem(&m, sizeof(m), "hunter2", 7));
+    TEST_ASSERT_TRUE(m.wifi_pass_set);
+
+    /* unset / NULL -> empty strings and cleared flags */
+    ui_bridge_fill_settings(&loc, NULL, NULL, NULL, 0, NULL, NULL, NULL);
+    TEST_ASSERT_EQUAL_STRING("", loc.wifi_ssid);
+    TEST_ASSERT_FALSE(loc.wifi_pass_set);
+    TEST_ASSERT_EQUAL_STRING("", loc.sip_server);
+    TEST_ASSERT_EQUAL_UINT16(0, loc.sip_port);
+    TEST_ASSERT_EQUAL_STRING("", loc.account);
 }
 
 static void test_build_model_is_deterministic(void)
@@ -364,6 +410,7 @@ int main(void)
     RUN_TEST(test_hhmm);
     RUN_TEST(test_state_maps);
     RUN_TEST(test_build_model);
+    RUN_TEST(test_fill_settings);
     RUN_TEST(test_build_model_is_deterministic);
     return UNITY_END();
 }

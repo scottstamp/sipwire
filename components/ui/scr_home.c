@@ -172,4 +172,4 @@ static void home_key(char key, ui_key_action_t action)
     }
 }
 
-const ui_screen_ops_t ui_ops_home = {home_create, home_update, home_key};
+const ui_screen_ops_t ui_ops_home = {home_create, home_update, home_key, NULL, NULL};

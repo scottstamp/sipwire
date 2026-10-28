@@ -1,4 +1,6 @@
-/* Settings: list -> Wi-Fi / SIP account forms (on-screen keyboard) / About.
+/* Settings: list -> Wi-Fi / SIP account forms (on-screen keyboard) / About /
+ * touch calibration screen. The forms are prefilled from the model when opened
+ * (passwords are never in the model: an empty field keeps the stored one).
  * All pages live in one screen and are switched by hiding; the keyboard is
  * shared and only shown while a field is being edited. */
 
@@ -92,6 +94,36 @@ static void eye_clicked(lv_event_t *e)
 
 /* ---- pages ----------------------------------------------------------------- */
 
+/* Password fields never hold the stored secret: "unchanged" when one is set,
+ * an amber "required" otherwise. */
+static void set_pass_placeholder(lv_obj_t *ta, bool is_set, const char *required)
+{
+    lv_textarea_set_placeholder_text(ta, is_set ? "unchanged" : required);
+    lv_obj_set_style_text_color(ta, is_set ? lv_color_hex(0x7D8996) : UI_COL_WARN,
+                                LV_PART_TEXTAREA_PLACEHOLDER);
+}
+
+static void prefill(settings_t *s, page_t p)
+{
+    const ui_model_t *m = ui_model();
+    if (p == PG_WIFI) {
+        lv_textarea_set_text(s->ssid, m->wifi_ssid);
+        lv_textarea_set_text(s->wpass, "");
+        set_pass_placeholder(s->wpass, m->wifi_pass_set, "required");
+    } else if (p == PG_ACCOUNT) {
+        char port[8] = "";
+        if (m->sip_port) {
+            snprintf(port, sizeof(port), "%u", (unsigned)m->sip_port);
+        }
+        lv_textarea_set_text(s->server, m->sip_server);
+        lv_textarea_set_text(s->port, port);
+        lv_textarea_set_text(s->user, m->sip_user);
+        lv_textarea_set_text(s->apass, "");
+        lv_textarea_set_text(s->dname, m->sip_display_name);
+        set_pass_placeholder(s->apass, m->sip_pass_set, "required");
+    }
+}
+
 static void show_page(settings_t *s, page_t p)
 {
     kb_hide(s);
@@ -105,6 +137,7 @@ static void show_page(settings_t *s, page_t p)
     s->cur = p;
     lv_label_set_text(s->title, TITLES[p]);
     if (is_form(p)) {
+        prefill(s, p);
         lv_obj_set_hidden(s->save, false);
         lv_obj_scroll_to_y(s->page[p], 0, LV_ANIM_OFF);
     } else {
@@ -135,14 +168,29 @@ static void on_row(lv_event_t *e)
     }
 }
 
-static void list_row(lv_obj_t *page, page_t target, const char *icon, const char *text,
-                     int32_t y)
+static void on_calibrate(lv_event_t *e)
 {
-    lv_obj_t *b = ui_btn_create(page, UI_BTN_NEUTRAL, NULL, 6, y, 228, 56);
-    lv_obj_add_event_cb(b, on_row, LV_EVENT_CLICKED, (void *)(intptr_t)target);
+    (void)e;
+    ui_goto(UI_SCR_CALIBRATE, NULL);
+}
+
+#define ROW_H 54
+#define ROW_PITCH 60
+
+static void list_row(lv_obj_t *page, int row, page_t target, const char *icon, const char *text)
+{
+    lv_obj_t *b = ui_btn_create(page, UI_BTN_NEUTRAL, NULL, 6, 6 + row * ROW_PITCH, 228, ROW_H);
+    if (target == PG_COUNT) { /* not a page: the calibration screen */
+        lv_obj_add_event_cb(b, on_calibrate, LV_EVENT_CLICKED, NULL);
+    } else {
+        lv_obj_add_event_cb(b, on_row, LV_EVENT_CLICKED, (void *)(intptr_t)target);
+    }
     lv_obj_t *ic = ui_label_create(b, &lv_font_montserrat_24, UI_COL_BLUE, icon);
     lv_obj_align(ic, LV_ALIGN_LEFT_MID, 12, 0);
-    lv_obj_t *t = ui_label_create(b, &lv_font_montserrat_24, UI_COL_TEXT, text);
+    /* 24 pt, or 14 pt when the text would not fit between icon and chevron */
+    bool small = strlen(text) > 11;
+    lv_obj_t *t = ui_label_create(b, small ? &lv_font_montserrat_14 : &lv_font_montserrat_24,
+                                  UI_COL_TEXT, text);
     lv_obj_align(t, LV_ALIGN_LEFT_MID, 48, 0);
     lv_obj_t *ch = ui_label_create(b, &lv_font_montserrat_24, UI_COL_DIM, LV_SYMBOL_RIGHT);
     lv_obj_align(ch, LV_ALIGN_RIGHT_MID, -10, 0);
@@ -243,9 +291,10 @@ static lv_obj_t *settings_create(const char *arg)
 
     /* pages first so the header/status bar sit above scrolled content */
     s->page[PG_LIST] = ui_box_create(scr, 0, BODY_Y, UI_W, BODY_H);
-    list_row(s->page[PG_LIST], PG_WIFI, LV_SYMBOL_WIFI, "Wi-Fi", 8);
-    list_row(s->page[PG_LIST], PG_ACCOUNT, LV_SYMBOL_CALL, "SIP account", 70);
-    list_row(s->page[PG_LIST], PG_ABOUT, LV_SYMBOL_LIST, "About", 132);
+    list_row(s->page[PG_LIST], 0, PG_WIFI, LV_SYMBOL_WIFI, "Wi-Fi");
+    list_row(s->page[PG_LIST], 1, PG_ACCOUNT, LV_SYMBOL_CALL, "SIP account");
+    list_row(s->page[PG_LIST], 2, PG_COUNT, LV_SYMBOL_EDIT, "Touch calibration");
+    list_row(s->page[PG_LIST], 3, PG_ABOUT, LV_SYMBOL_LIST, "About");
 
     s->page[PG_WIFI] = form_create(s, scr);
     s->ssid = field_create(s, s->page[PG_WIFI], "Network name (SSID)", "SSID", 32, false);
@@ -342,4 +391,4 @@ static void settings_update(const ui_model_t *m)
     ui_fit_set(s->about_reg, reg, &lv_font_montserrat_24, false);
 }
 
-const ui_screen_ops_t ui_ops_settings = {settings_create, settings_update, NULL};
+const ui_screen_ops_t ui_ops_settings = {settings_create, settings_update, NULL, NULL, NULL};

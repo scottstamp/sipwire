@@ -25,7 +25,9 @@
 static ui_model_t s_model;
 static ui_actions_t s_actions;
 static lv_timer_t *s_phase_timer;   /* one-shot call state transitions */
-static char s_json[768];
+static char s_json[1536];
+static lv_indev_t *s_mouse;         /* disabled while the calibration screen is open */
+static bool s_cal_active;
 
 /* ---- page hooks ---------------------------------------------------------- */
 
@@ -34,6 +36,9 @@ EM_JS(void, js_log, (const char *msg), {
 });
 EM_JS(void, js_model_changed, (void), {
     if (Module.simModelChanged) Module.simModelChanged();
+});
+EM_JS(void, js_touch_cal, (int active), {
+    if (Module.simTouchCal) Module.simTouchCal(active != 0);
 });
 EM_JS(void, js_ready, (void), {
     if (Module.simReady) Module.simReady();
@@ -205,11 +210,18 @@ static void act_hold(void *ctx, bool hold)
     push_model();
 }
 
+/* Like the device: saving updates what the forms prefill from; an empty
+ * password keeps the stored one. */
 static void act_save_wifi(void *ctx, const char *ssid, const char *pass)
 {
     (void)ctx;
     sim_log("action save_wifi(ssid=\"%s\", pass=%s)", ssid ? ssid : "",
             (pass && pass[0]) ? "<set>" : "<empty>");
+    snprintf(s_model.wifi_ssid, sizeof(s_model.wifi_ssid), "%s", ssid ? ssid : "");
+    if (pass && pass[0]) {
+        s_model.wifi_pass_set = true;
+    }
+    push_model();
 }
 
 static void act_save_account(void *ctx, const char *server, uint16_t port,
@@ -221,6 +233,52 @@ static void act_save_account(void *ctx, const char *server, uint16_t port,
             server ? server : "", (unsigned)port, user ? user : "",
             (password && password[0]) ? "<set>" : "<empty>",
             display_name ? display_name : "");
+    snprintf(s_model.sip_server, sizeof(s_model.sip_server), "%s", server ? server : "");
+    s_model.sip_port = port;
+    snprintf(s_model.sip_user, sizeof(s_model.sip_user), "%s", user ? user : "");
+    snprintf(s_model.sip_display_name, sizeof(s_model.sip_display_name), "%s",
+             display_name ? display_name : "");
+    if (password && password[0]) {
+        s_model.sip_pass_set = true;
+    }
+    push_model();
+}
+
+static void act_touch_cal_begin(void *ctx)
+{
+    (void)ctx;
+    sim_log("action touch_cal_begin(): LVGL pointer off, raw samples on");
+    s_cal_active = true;
+    if (s_mouse) {
+        lv_indev_enable(s_mouse, false);
+    }
+    js_touch_cal(1);
+}
+
+/* Give LVGL its mouse back only once the button is up, so the press that ended
+ * calibration (Save by holding) cannot click what is underneath afterwards. */
+static void mouse_back_cb(lv_timer_t *t)
+{
+    if (!(SDL_GetMouseState(NULL, NULL) & SDL_BUTTON_LMASK)) {
+        lv_indev_enable(s_mouse, true);
+        lv_timer_delete(t);
+    }
+}
+
+static void act_touch_cal_end(void *ctx, const ui_touch_cal_t *cal)
+{
+    (void)ctx;
+    s_cal_active = false;
+    js_touch_cal(0);
+    if (s_mouse) {
+        lv_timer_create(mouse_back_cb, 50, NULL);
+    }
+    if (cal) {
+        sim_log("action touch_cal_end(x_min=%d, x_max=%d, y_min=%d, y_max=%d)", cal->x_min,
+                cal->x_max, cal->y_min, cal->y_max);
+    } else {
+        sim_log("action touch_cal_end(cancelled)");
+    }
 }
 
 /* ---- exported to the HTML panel ------------------------------------------ */
@@ -315,6 +373,13 @@ EMSCRIPTEN_KEEPALIVE void sim_key(int key, int action)
     ui_key((char)key, (ui_key_action_t)action);
 }
 
+/* Raw touch sample as the device's display hook would deliver it (the page
+ * calls this with a fake rotated/offset mapping while calibration is active). */
+EMSCRIPTEN_KEEPALIVE void sim_touch_raw(int ax, int ay, int pressed)
+{
+    ui_touch_raw(ax, ay, pressed != 0);
+}
+
 EMSCRIPTEN_KEEPALIVE void sim_set_time(const char *hhmm)
 {
     snprintf(s_model.time_hhmm, sizeof(s_model.time_hhmm), "%s",
@@ -371,7 +436,16 @@ EMSCRIPTEN_KEEPALIVE const char *sim_get_model_json(void)
         m->speaker ? "true" : "false", (unsigned)m->volume, m->battery_pct,
         m->charging ? "true" : "false");
     PUTS(m->time_hhmm);
-    PUT("}");
+    PUT(",\"wifi_ssid\":");
+    PUTS(m->wifi_ssid);
+    PUT(",\"wifi_pass_set\":%s,\"sip_server\":", m->wifi_pass_set ? "true" : "false");
+    PUTS(m->sip_server);
+    PUT(",\"sip_port\":%u,\"sip_user\":", (unsigned)m->sip_port);
+    PUTS(m->sip_user);
+    PUT(",\"sip_display_name\":");
+    PUTS(m->sip_display_name);
+    PUT(",\"sip_pass_set\":%s,\"cal_active\":%s}", m->sip_pass_set ? "true" : "false",
+        s_cal_active ? "true" : "false");
 #undef PUT
 #undef PUTS
     return s_json;
@@ -398,11 +472,19 @@ int main(void)
     lv_tick_set_cb(tick_cb);
 
     lv_display_t *disp = lv_sdl_window_create(SIM_W, SIM_H);
-    lv_sdl_mouse_create();   /* mouse == touch */
+    s_mouse = lv_sdl_mouse_create();   /* mouse == touch */
 
     memset(&s_model, 0, sizeof(s_model));
     s_model.battery_pct = -1;
     s_model.volume = 60;
+    /* plausible stored settings, so the Settings forms show up prefilled */
+    snprintf(s_model.wifi_ssid, sizeof(s_model.wifi_ssid), "HomeNet-5G");
+    s_model.wifi_pass_set = true;
+    snprintf(s_model.sip_server, sizeof(s_model.sip_server), "sip.example.com");
+    s_model.sip_port = 5060;
+    snprintf(s_model.sip_user, sizeof(s_model.sip_user), "alice");
+    snprintf(s_model.sip_display_name, sizeof(s_model.sip_display_name), "Alice");
+    s_model.sip_pass_set = true;
 
     s_actions = (ui_actions_t){
         .ctx = NULL,
@@ -416,6 +498,8 @@ int main(void)
         .hold = act_hold,
         .save_wifi = act_save_wifi,
         .save_account = act_save_account,
+        .touch_cal_begin = act_touch_cal_begin,
+        .touch_cal_end = act_touch_cal_end,
     };
 
     ui_init(disp, &s_actions);

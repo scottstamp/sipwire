@@ -37,6 +37,11 @@ sim/web/             Emscripten build of components/ui + mock model → browser
   answer, hangup, dtmf, settings save...). On device `phone` fills the
   model and handles actions; in `sim/web` an HTML panel does. UI code must
   compile for both without `#ifdef`.
+- The model carries the non-secret settings that prefill the Settings forms
+  (passwords only as "is set"; an empty password on save keeps the stored one).
+- Touch calibration: `ui_actions_t.touch_cal_begin/end` + `ui_touch_raw()`. The
+  bridge installs `display_touch_raw_hook()` (raw samples to the UI, none to LVGL)
+  between begin and end and stores the result in `settings.touch_cal`.
 - Tasks (core pin): audio_tx/rx (core1, prio high), rtp_rx (core1), sip (core0),
   keypad (core0, low), lvgl (core0, esp_lvgl_port default).
 

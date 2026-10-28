@@ -33,8 +33,8 @@ inside a phase are parallel unless noted.
 - [x] [cheap] Display: ILI9341 via `esp_lcd_ili9341` + `lvgl_port_add_disp`.
   Backlight PWM. Replace stub in `display.c`.
 - [x] [cheap] Touch: XPT2046 via `esp_lcd_touch_xpt2046` (raw coords, swap/mirror/cal in
-  `display.c`). TODO: calibration screen + raw-touch API; separate touch
-  swap/mirror Kconfig if a board's touch axes differ from the panel's.
+  `display.c`). Calibration screen (Settings) + `display_touch_raw_hook()` done; separate
+  touch swap/mirror Kconfig if a board's touch axes differ from the panel's.
 - [x] [cheap] Keypad: matrix scan task, debounce, long-press, repeat; key events.
 - [x] [cheap] Audio I2S: TX+RX tasks, ring buffers, loopback test (mic→speaker),
   tone generator (dial/ring/busy). Verify levels, DC offset.
@@ -100,6 +100,5 @@ integration, and the QEMU smoke test (`tools/qemu/README.md`).
 ## Next (after hardware spec)
 - Set pins/flash size in `sdkconfig.defaults` for the real board; verify panel
   orientation/colors, touch axes, mic shift/slot, amp pops (see component notes).
-- Touch calibration screen + raw-touch API in `display`.
-- Settings forms: expose current SSID/server/user in `ui_model_t` so forms prefill.
+- Verify the touch calibration screen on hardware (done in sim + QEMU build only).
 - AEC / speakerphone (Phase 5), OTA (partitions already dual-slot).

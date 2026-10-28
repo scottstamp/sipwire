@@ -73,6 +73,14 @@ static struct {
     touch_cal_t cal;                /* guarded by cal_lock */
     bool swallow;                   /* first touch while backlight off: eat until release */
     int64_t swallow_last_us;        /* touched only from the LVGL task */
+
+    /* raw touch hook (calibration); all of this is touched only with the LVGL lock held */
+    esp_lcd_touch_handle_t tp;
+    display_touch_raw_cb_t raw_cb;
+    void *raw_ctx;
+    bool raw_down;                  /* hook was told "pressed" and not yet "released" */
+    bool raw_have;                  /* process_coordinates saw a sample in this read */
+    int32_t raw_x, raw_y;
 } s = {
     .cal_lock = portMUX_INITIALIZER_UNLOCKED,
 };
@@ -349,11 +357,75 @@ static void touch_process_coordinates(esp_lcd_touch_handle_t tp, uint16_t *x, ui
         rx = rx * XPT2046_ADC_MAX / tp->config.x_max;
         ry = ry * XPT2046_ADC_MAX / tp->config.y_max;
 #endif
+        if (s.raw_cb) {
+            /* calibration: keep the sample for touch_read_cb, LVGL gets nothing */
+            s.raw_x = board_cfg()->touch.swap_xy ? ry : rx;
+            s.raw_y = board_cfg()->touch.swap_xy ? rx : ry;
+            s.raw_have = true;
+            *point_num = 0;
+            return;
+        }
         int32_t sx, sy;
         touch_to_screen(rx, ry, &sx, &sy);
         x[i] = (uint16_t)sx;
         y[i] = (uint16_t)sy;
     }
+}
+
+/* Replaces esp_lvgl_port's indev read callback (same job: read the controller, report the first
+ * point) so a release can be reported to the raw hook too; process_coordinates only runs on
+ * samples with a touch. */
+static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
+{
+    (void)indev;
+    esp_lcd_touch_point_data_t pt[1] = {0};
+    uint8_t cnt = 0;
+
+    s.raw_have = false;
+    if (esp_lcd_touch_read_data(s.tp) != ESP_OK ||
+        esp_lcd_touch_get_data(s.tp, pt, &cnt, 1) != ESP_OK) {
+        cnt = 0;
+    }
+
+    display_touch_raw_cb_t cb = s.raw_cb;
+    if (cb) {
+        void *ctx = s.raw_ctx;
+        data->state = LV_INDEV_STATE_RELEASED;
+        if (s.raw_have) {
+            s.raw_down = true;      /* before the call: the hook may clear itself */
+            cb(s.raw_x, s.raw_y, true, ctx);
+        } else if (s.raw_down) {
+            s.raw_down = false;
+            cb(0, 0, false, ctx);
+        }
+        return;
+    }
+    if (cnt > 0) {
+        data->point.x = pt[0].x;
+        data->point.y = pt[0].y;
+        data->state = LV_INDEV_STATE_PRESSED;
+    } else {
+        data->state = LV_INDEV_STATE_RELEASED;
+    }
+}
+
+void display_touch_raw_hook(display_touch_raw_cb_t cb, void *ctx)
+{
+#if CONFIG_SIPWIRE_QEMU
+    (void)cb;
+    (void)ctx;
+#else
+    bool was_set = s.raw_cb != NULL;
+    s.raw_ctx = ctx;
+    s.raw_cb = cb;
+    s.raw_down = false;
+    s.raw_have = false;
+    if (was_set && cb == NULL) {
+        /* the finger that ended calibration may still be down: LVGL must not click with it */
+        s.swallow = true;
+        s.swallow_last_us = esp_timer_get_time();
+    }
+#endif
 }
 
 static esp_err_t touch_init(lv_display_t *disp)
@@ -389,7 +461,13 @@ static esp_err_t touch_init(lv_display_t *disp)
         .disp = disp,
         .handle = tp,
     };
-    ESP_RETURN_ON_FALSE(lvgl_port_add_touch(&port_cfg) != NULL, ESP_FAIL, TAG, "lvgl_port_add_touch");
+    lv_indev_t *indev = lvgl_port_add_touch(&port_cfg);
+    ESP_RETURN_ON_FALSE(indev != NULL, ESP_FAIL, TAG, "lvgl_port_add_touch");
+    s.tp = tp;
+    if (lvgl_port_lock(0)) {
+        lv_indev_set_read_cb(indev, touch_read_cb);
+        lvgl_port_unlock();
+    }
     ESP_LOGI(TAG, "touch xpt2046: cs=%d irq=%d %d Hz (%s)", b->touch.cs, b->touch.irq, (int)io_cfg.pclk_hz,
              b->touch.irq == GPIO_NUM_NC ? "polling" : "interrupt");
     return ESP_OK;

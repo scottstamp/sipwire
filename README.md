@@ -31,4 +31,5 @@ idf.py build flash monitor
 
 - Verify display orientation, colour order and touch axes on the real board
   (see `components/display/include/display.h`).
-- Touch calibration screen (`display_touch_calibrate_start()` is a stub).
+- Run Settings -> Touch calibration on the real board and check the result
+  (`display_touch_raw_hook()`, `components/ui/scr_calibrate.c`).

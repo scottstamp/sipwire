@@ -171,4 +171,4 @@ static void dialer_key(char key, ui_key_action_t action)
     }
 }
 
-const ui_screen_ops_t ui_ops_dialer = {dialer_create, dialer_update, dialer_key};
+const ui_screen_ops_t ui_ops_dialer = {dialer_create, dialer_update, dialer_key, NULL, NULL};

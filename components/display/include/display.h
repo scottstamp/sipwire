@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
 #include "lvgl.h"
@@ -37,6 +38,23 @@ void display_wake(void);
  * screen Y. min > max is allowed (inverted axis). When valid, the board's touch mirror
  * flags are not applied (calibration already encodes direction).
  *
- * Returns ESP_ERR_NOT_SUPPORTED: the interactive procedure is not implemented yet.
+ * Returns ESP_ERR_NOT_SUPPORTED: the interactive procedure is the UI's calibration screen
+ * (Settings -> Touch calibration), which uses display_touch_raw_hook() below and stores the
+ * result in settings.touch_cal.
  */
 esp_err_t display_touch_calibrate_start(void);
+
+/**
+ * Raw touch hook, used by the touch calibration screen. While a hook is set every touch
+ * sample is delivered to it as raw 12-bit XPT2046 values after swap_xy but before mirror /
+ * calibration (the same space as settings.touch_cal), plus one pressed=false call when the
+ * finger lifts (ax/ay are 0 then). LVGL sees no touches meanwhile (always "released"), so
+ * nothing underneath gets clicked; when the hook is cleared again while the finger is still
+ * down, that touch is swallowed until it lifts.
+ *
+ * The hook runs in the LVGL indev read path: LVGL task, LVGL lock held. Keep it trivial.
+ * Call display_touch_raw_hook() itself with the LVGL lock held too. NULL clears the hook.
+ * No-op in the QEMU build (no touch).
+ */
+typedef void (*display_touch_raw_cb_t)(int32_t ax, int32_t ay, bool pressed, void *ctx);
+void display_touch_raw_hook(display_touch_raw_cb_t cb, void *ctx);

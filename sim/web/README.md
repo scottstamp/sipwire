@@ -79,6 +79,15 @@ incoming call (number/name), remote hangup (with SIP code), action log (every
 `ui_actions_t` call and mock event) and a live JSON view of the model. Mouse
 clicks on the canvas are touch input.
 
+Touch calibration (Settings -> Touch calibration): the mock's `touch_cal_begin`
+switches LVGL's mouse off and the page turns canvas mouse events into raw samples
+via `sim_touch_raw(ax, ay, pressed)` (`window.sim.touch_raw`), using a fake panel
+rotated by 180 degrees: `raw_x = 3900 - 15 x`, `raw_y = 3900 - 11 y`. A finished
+calibration is logged by `touch_cal_end` (expected: x 3900..315, y 3900..391). The
+calibration screen's keys are `#` save, `0` retry, `*` cancel (the side-panel keypad
+works). Model fields for the Settings forms (`wifi_ssid`, `sip_server`, ...) start
+with mock values so the forms open prefilled.
+
 Mock call flow: `dial` -> DIALING -> 1 s -> RINGING_OUT -> 2 s -> ACTIVE (timer
 ticks); `hangup` -> ENDED -> 1.5 s -> IDLE; `answer` from RINGING_IN -> ACTIVE.
 

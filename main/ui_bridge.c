@@ -59,6 +59,8 @@ static struct {
     char user[sizeof(((settings_t *)0)->sip_user)];
     char apass[sizeof(((settings_t *)0)->sip_password)];
     char dname[sizeof(((settings_t *)0)->sip_display_name)];
+    bool cal_pending;
+    ui_touch_cal_t cal;
 } b;
 
 static void kick(void)
@@ -67,12 +69,15 @@ static void kick(void)
     xQueueSend(b.q, &m, 0);         /* full queue: a refresh is coming anyway */
 }
 
-static void update_account_locked(void)
+/* Account string + the non-secret fields that prefill the Settings forms. */
+static void update_settings_locked(void)
 {
     static settings_t st;           /* callers hold b.mtx */
     settings_get(&st);
-    ui_bridge_format_account(b.loc.account, sizeof(b.loc.account), st.sip_display_name, st.sip_user,
-                             st.sip_server);
+    ui_bridge_fill_settings(&b.loc, st.wifi_ssid, st.wifi_pass, st.sip_server, st.sip_port, st.sip_user,
+                            st.sip_password, st.sip_display_name);
+    memset(st.wifi_pass, 0, sizeof(st.wifi_pass));
+    memset(st.sip_password, 0, sizeof(st.sip_password));
 }
 
 /* ------------------------------------------------------------------ */
@@ -135,7 +140,8 @@ static bool fits(const char *s, size_t size)
     return s && strlen(s) < size;
 }
 
-/* Persisting goes through NVS (slow): hand it to the bridge task. */
+/* Persisting goes through NVS (slow): hand it to the bridge task.
+ * An empty password keeps the stored one (the form never shows it). */
 static void act_save_wifi(void *ctx, const char *ssid, const char *pass)
 {
     (void)ctx;
@@ -151,7 +157,7 @@ static void act_save_wifi(void *ctx, const char *ssid, const char *pass)
     kick();
 }
 
-/* An empty password keeps the stored one (the form never shows it). */
+/* Likewise: an empty password keeps the stored one. */
 static void act_save_account(void *ctx, const char *server, uint16_t port, const char *user,
                              const char *password, const char *display_name)
 {
@@ -173,6 +179,35 @@ static void act_save_account(void *ctx, const char *server, uint16_t port, const
     kick();
 }
 
+/* Display hook (LVGL task, lock held): raw samples straight into the UI. */
+static void raw_touch_cb(int32_t ax, int32_t ay, bool pressed, void *ctx)
+{
+    (void)ctx;
+    ui_touch_raw(ax, ay, pressed);
+}
+
+static void act_touch_cal_begin(void *ctx)
+{
+    (void)ctx;
+    display_touch_raw_hook(raw_touch_cb, NULL);
+}
+
+/* The hook goes off right here; the NVS write is left to the bridge task and
+ * the display picks the result up from the settings event. */
+static void act_touch_cal_end(void *ctx, const ui_touch_cal_t *cal)
+{
+    (void)ctx;
+    display_touch_raw_hook(NULL, NULL);
+    if (!cal) {
+        return;
+    }
+    xSemaphoreTake(b.mtx, portMAX_DELAY);
+    b.cal = *cal;
+    b.cal_pending = true;
+    xSemaphoreGive(b.mtx);
+    kick();
+}
+
 static const ui_actions_t s_actions = {
     .dial = act_dial,
     .answer = act_answer,
@@ -184,6 +219,8 @@ static const ui_actions_t s_actions = {
     .hold = act_hold,
     .save_wifi = act_save_wifi,
     .save_account = act_save_account,
+    .touch_cal_begin = act_touch_cal_begin,
+    .touch_cal_end = act_touch_cal_end,
 };
 
 /* ------------------------------------------------------------------ */
@@ -257,7 +294,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             break;
         }
     } else if (base == SIPWIRE_SETTINGS_EVENT) {
-        update_account_locked();
+        update_settings_locked();
     }
     /* SIP / CALL events: the phone status already holds the news */
     xSemaphoreGive(b.mtx);
@@ -275,19 +312,22 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 static void do_saves(void)
 {
     static settings_t st;           /* bridge task only */
-    bool wifi, acc;
+    bool wifi, acc, cal;
 
     xSemaphoreTake(b.mtx, portMAX_DELAY);
     wifi = b.wifi_pending;
     acc = b.acc_pending;
-    if (!wifi && !acc) {
+    cal = b.cal_pending;
+    if (!wifi && !acc && !cal) {
         xSemaphoreGive(b.mtx);
         return;
     }
     settings_get(&st);
     if (wifi) {
         strlcpy(st.wifi_ssid, b.ssid, sizeof(st.wifi_ssid));
-        strlcpy(st.wifi_pass, b.wpass, sizeof(st.wifi_pass));
+        if (b.wpass[0]) {
+            strlcpy(st.wifi_pass, b.wpass, sizeof(st.wifi_pass));
+        }
     }
     if (acc) {
         strlcpy(st.sip_server, b.server, sizeof(st.sip_server));
@@ -298,8 +338,16 @@ static void do_saves(void)
         }
         strlcpy(st.sip_display_name, b.dname, sizeof(st.sip_display_name));
     }
+    if (cal) {
+        st.touch_cal.valid = true;
+        st.touch_cal.x_min = b.cal.x_min;
+        st.touch_cal.x_max = b.cal.x_max;
+        st.touch_cal.y_min = b.cal.y_min;
+        st.touch_cal.y_max = b.cal.y_max;
+    }
     b.wifi_pending = false;
     b.acc_pending = false;
+    b.cal_pending = false;
     memset(b.wpass, 0, sizeof(b.wpass));
     memset(b.apass, 0, sizeof(b.apass));
     xSemaphoreGive(b.mtx);
@@ -310,8 +358,8 @@ static void do_saves(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "saving settings: %s", esp_err_to_name(err));
     } else {
-        ESP_LOGI(TAG, "settings saved from the UI (%s%s%s)", wifi ? "wifi" : "", wifi && acc ? ", " : "",
-                 acc ? "account" : "");
+        ESP_LOGI(TAG, "settings saved from the UI (%s%s%s%s%s)", wifi ? "wifi" : "", wifi && acc ? ", " : "",
+                 acc ? "account" : "", (wifi || acc) && cal ? ", " : "", cal ? "touch calibration" : "");
     }
 }
 
@@ -387,7 +435,7 @@ esp_err_t ui_bridge_init(lv_display_t *disp)
     xSemaphoreTake(b.mtx, portMAX_DELAY);
     b.loc.net = net_is_connected() ? UI_NET_CONNECTED : UI_NET_OFF;
     strlcpy(b.loc.ip, net_ip_str(), sizeof(b.loc.ip));
-    update_account_locked();
+    update_settings_locked();
     xSemaphoreGive(b.mtx);
 
     lvgl_port_lock(0);

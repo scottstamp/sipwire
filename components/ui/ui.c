@@ -24,6 +24,7 @@ static const ui_screen_ops_t *const OPS[UI_SCR_COUNT] = {
     [UI_SCR_CALL] = &ui_ops_call,
     [UI_SCR_ENDED] = &ui_ops_ended,
     [UI_SCR_SETTINGS] = &ui_ops_settings,
+    [UI_SCR_CALIBRATE] = &ui_ops_calibrate,
 };
 
 static const ui_actions_t *s_actions;
@@ -46,6 +47,9 @@ static void show(ui_screen_t kind, const char *arg, lv_screen_load_anim_t anim)
     if (!scr) {
         return;
     }
+    if (old && OPS[s_kind]->leave) {
+        OPS[s_kind]->leave(); /* e.g. calibration must end now, not when `old` is deleted */
+    }
     s_scr = scr;
     s_kind = kind;
     ui_statusbar_update(&s_model);
@@ -65,8 +69,8 @@ void ui_goto(ui_screen_t screen, const char *arg)
     if (!s_inited || screen >= UI_SCR_COUNT || screen == s_kind) {
         return;
     }
-    show(screen, arg, screen == UI_SCR_HOME ? LV_SCREEN_LOAD_ANIM_MOVE_RIGHT
-                                            : LV_SCREEN_LOAD_ANIM_MOVE_LEFT);
+    bool back = screen == UI_SCR_HOME || (s_kind == UI_SCR_CALIBRATE && screen == UI_SCR_SETTINGS);
+    show(screen, arg, back ? LV_SCREEN_LOAD_ANIM_MOVE_RIGHT : LV_SCREEN_LOAD_ANIM_MOVE_LEFT);
 }
 
 static bool is_call_screen(ui_screen_t s)
@@ -142,6 +146,13 @@ void ui_key(char key, ui_key_action_t action)
     }
 }
 
+void ui_touch_raw(int32_t ax, int32_t ay, bool pressed)
+{
+    if (s_inited && OPS[s_kind]->touch_raw) {
+        OPS[s_kind]->touch_raw(ax, ay, pressed);
+    }
+}
+
 /* ---- NULL-safe action wrappers ------------------------------------------- */
 
 void ui_act_dial(const char *number)
@@ -212,6 +223,20 @@ void ui_act_save_account(const char *server, uint16_t port, const char *user,
 {
     if (s_actions && s_actions->save_account) {
         s_actions->save_account(s_actions->ctx, server, port, user, password, display_name);
+    }
+}
+
+void ui_act_touch_cal_begin(void)
+{
+    if (s_actions && s_actions->touch_cal_begin) {
+        s_actions->touch_cal_begin(s_actions->ctx);
+    }
+}
+
+void ui_act_touch_cal_end(const ui_touch_cal_t *cal_or_null)
+{
+    if (s_actions && s_actions->touch_cal_end) {
+        s_actions->touch_cal_end(s_actions->ctx, cal_or_null);
     }
 }
 
