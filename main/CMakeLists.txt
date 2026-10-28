@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "display.c"
+        "ui/ui.c"
+    INCLUDE_DIRS
+        "."
+        "ui"
+    PRIV_REQUIRES
+        esp_timer
+        log
+)
