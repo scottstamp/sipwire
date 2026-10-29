@@ -38,7 +38,7 @@ STATE="$(mktemp -d /tmp/sipwire-qemu.XXXXXX)"
 mkdir -p "$STATE"/{etc,cache,varlib,db,keys,agi,spool,run,log}
 sed -e "s|@STATE@|$STATE|g" -e "s|@MODDIR@|$MODDIR|g" -e "s|@DATADIR@|$DATADIR|g" \
     "$AST_CFG/asterisk.conf.in" > "$STATE/etc/asterisk.conf"
-cp "$AST_CFG"/{modules,extensions,rtp,logger}.conf "$STATE/etc/"
+cp "$AST_CFG"/{modules,extensions,rtp,logger,voicemail}.conf "$STATE/etc/"
 # Inside slirp the host is 10.0.2.2: advertise that in SDP instead of 127.0.0.1.
 sed '/^\[phone\](!)/a media_address = 10.0.2.2' "$AST_CFG/pjsip.conf" > "$STATE/etc/pjsip.conf"
 CONF="$STATE/etc/asterisk.conf"

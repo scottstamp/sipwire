@@ -9,214 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "sip_auth.h"
-#include "sip_dialog.h"
-#include "sip_msg.h"
-#include "sip_sdp.h"
-#include "sip_txn.h"
 #include "sip_ua_internal.h"
-
-#define MAX_CALLS        2
-#define EVQ_LEN          16
-#define STR_MAX          64
-#define TAG_LEN          16
-#define REG_BACKOFF_MIN  5000u
-#define REG_BACKOFF_MAX  300000u
-#define ALLOW_HDR        "Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, INFO\r\n"
-#define UA_HDR           "User-Agent: " SIP_UA_USER_AGENT "\r\n"
-
-typedef enum {
-    OWN_NONE = 0,
-    OWN_REG,
-    OWN_KEEPALIVE,
-    OWN_INVITE,        /* our initial INVITE */
-    OWN_REINVITE,      /* our re-INVITE (hold) */
-    OWN_CANCEL,
-    OWN_BYE,
-    OWN_SERVER_INVITE, /* incoming INVITE / re-INVITE */
-} owner_t;
-
-typedef enum {
-    CS_FREE = 0,
-    CS_OUT_CALLING,    /* INVITE sent, nothing back yet but maybe 100 */
-    CS_OUT_EARLY,      /* 18x received */
-    CS_IN_RINGING,     /* incoming, 180 sent */
-    CS_CONFIRMED,      /* 2xx sent or received */
-    CS_ENDING,         /* ENDED reported; protocol cleanup still running */
-} call_st_t;
-
-/* What a UAS needs to answer a request after the datagram is gone. */
-typedef struct {
-    char hdrs[800];            /* Via..., From, Call-ID, CSeq lines */
-    uint16_t hdrs_len;
-    char to[SIP_NAMEADDR_MAX + 96];
-    bool to_has_tag;
-    char rr[512];              /* Record-Route lines */
-    uint16_t rr_len;
-} resp_tpl_t;
-
-/* What our SDP said last time, to decide on an o= version bump. */
-typedef struct {
-    uint32_t ip;
-    uint16_t port;
-    uint8_t pts[SIP_UA_MAX_CODECS];
-    uint8_t n_pts;
-    int16_t dtmf;
-    uint8_t dir;
-    bool valid;
-} sdp_sig_t;
-
-typedef struct {
-    call_st_t st;
-    sip_call_handle_t handle;
-    bool outgoing;
-    bool end_reported;
-    int last_code;
-    char number[STR_MAX];
-    char display[STR_MAX];
-
-    sip_dialog_t dlg;
-    bool dlg_valid;
-
-    /* UAC: initial INVITE */
-    char ruri[SIP_URI_MAX];
-    char to_na[SIP_URI_MAX + 2];
-    char call_id[48];
-    char local_tag[TAG_LEN + 1];
-    uint32_t invite_cseq;
-    uint32_t inv_txn;
-    uint8_t auth_tries;
-    bool got_provisional;
-    bool cancel_pending;
-    bool cancel_sent;
-    char ack[SIP_MAX_MSG_OUT];
-    uint16_t ack_len;
-    uint32_t ack_cseq;
-
-    /* UAS */
-    resp_tpl_t tpl;
-    bool awaiting_ack;         /* 2xx sent, ACK not yet seen */
-    uint32_t uas_ack_cseq;
-    uint32_t uas_inv_txn;
-    bool bye_pending;          /* hang up once the ACK arrives */
-    bool offer_in_2xx;         /* we offered in the 2xx; answer comes in ACK */
-
-    /* media */
-    uint16_t rtp_port;
-    uint32_t sdp_id;
-    uint32_t sdp_ver;
-    sdp_sig_t sdp_last;        /* parameters of the last SDP we sent */
-    sip_sdp_t offer;           /* remote offer awaiting our answer */
-    bool have_offer;
-    sip_media_info_t media;
-    bool media_valid;
-    bool local_hold;
-
-    /* our re-INVITE */
-    uint32_t reinv_txn;
-    bool reinv_hold;
-    uint8_t reinv_auth_tries;
-
-    uint64_t deadline;         /* CS_ENDING cleanup */
-} call_t;
-
-typedef struct {
-    sip_ua_reg_state_t state;
-    int code;
-    bool reported;
-    sip_ua_reg_state_t rep_state;
-    int rep_code;
-    bool active;               /* app wants to be registered */
-    bool unregistering;
-    char call_id[48];
-    char tag[TAG_LEN + 1];
-    uint32_t cseq;
-    uint32_t txn;
-    uint32_t sent_expires;
-    uint8_t auth_tries;
-    uint8_t interval_tries;
-    uint32_t expires_req;
-    uint32_t granted;
-    uint64_t t_refresh;
-    uint64_t t_retry;
-    uint32_t backoff_ms;
-    uint64_t t_keepalive;
-} reg_t;
-
-typedef enum { EV_REG, EV_INCOMING, EV_CALL, EV_MEDIA } ev_kind_t;
-
-typedef struct {
-    ev_kind_t kind;
-    sip_call_handle_t call;
-    int state;
-    int reason;
-    int code;
-    bool outgoing;
-    char number[STR_MAX];
-    char display[STR_MAX];
-    sip_media_info_t media;
-} ev_t;
-
-struct sip_ua {
-    /* configuration (copied) */
-    char server_host[STR_MAX];
-    uint16_t server_port;
-    sip_addr_t server;
-    char domain[STR_MAX];
-    char user[STR_MAX];
-    char auth_user[STR_MAX];
-    char password[STR_MAX];
-    char display[STR_MAX];
-    uint32_t expires;
-    sip_addr_t local;
-    sip_addr_t contact;        /* = local unless NAT discovered */
-    uint16_t rtp_port;
-    sip_ua_rtp_port_fn rtp_alloc;
-    void *rtp_ctx;
-    uint8_t codecs[SIP_UA_MAX_CODECS];
-    uint8_t n_codecs;
-    int dtmf_pt;
-    uint8_t ptime;
-    uint32_t keepalive_s;
-    sip_keepalive_mode_t ka_mode;
-    bool nat_fix;
-    bool any_source;
-    sip_ua_send_fn send;
-    void *send_ctx;
-    sip_ua_rand_fn rand;
-    void *rand_ctx;
-    sip_ua_log_fn log;
-    void *log_ctx;
-    sip_log_level_t log_level;
-    sip_ua_callbacks_t cb;
-
-    /* derived */
-    char from_na[SIP_NAMEADDR_MAX];  /* "Name" <sip:user@domain> */
-    char registrar[SIP_URI_MAX];     /* sip:domain[:port] */
-    char hostpart[STR_MAX + 8];      /* domain[:port] for URIs */
-
-    /* state */
-    uint64_t now;
-    sip_txn_layer_t txl;
-    reg_t reg;
-    sip_auth_t auth;                 /* cached credentials */
-    call_t calls[MAX_CALLS];
-    sip_call_handle_t next_handle;
-
-    ev_t evq[EVQ_LEN];
-    int ev_head;
-    int ev_count;
-    int depth;
-    bool draining;
-    bool destroy_pending;
-
-    /* scratch (kept off the stack) */
-    sip_msg_t msg;
-    char rx[SIP_MAX_MSG_IN + 1];
-    char tx[SIP_MAX_MSG_OUT + 1];
-    char sdp[700];
-    resp_tpl_t tpl_scratch;
-};
+#include "sip_ua_priv.h"
 
 /* ------------------------------------------------------------------ */
 /* small helpers                                                        */
@@ -264,10 +58,7 @@ void sip_ip_format(uint32_t ip, char out[16])
              (unsigned)(ip >> 8) & 255, (unsigned)ip & 255);
 }
 
-static void ua_log(sip_ua_t *ua, sip_log_level_t lvl, const char *fmt, ...)
-    __attribute__((format(printf, 3, 4)));
-
-static void ua_log(sip_ua_t *ua, sip_log_level_t lvl, const char *fmt, ...)
+void sipua_log(sip_ua_t *ua, sip_log_level_t lvl, const char *fmt, ...)
 {
     if (!ua->log || lvl > ua->log_level) {
         return;
@@ -280,20 +71,15 @@ static void ua_log(sip_ua_t *ua, sip_log_level_t lvl, const char *fmt, ...)
     ua->log(ua->log_ctx, lvl, buf);
 }
 
-#define LOGE(...) ua_log(ua, SIP_LOG_ERROR, __VA_ARGS__)
-#define LOGW(...) ua_log(ua, SIP_LOG_WARN, __VA_ARGS__)
-#define LOGI(...) ua_log(ua, SIP_LOG_INFO, __VA_ARGS__)
-#define LOGD(...) ua_log(ua, SIP_LOG_DEBUG, __VA_ARGS__)
-
 /* Dump a message line by line at VERBOSE, never showing credentials. */
-static void log_msg(sip_ua_t *ua, const char *dir, const char *buf, size_t len, const sip_addr_t *peer)
+void sipua_log_msg(sip_ua_t *ua, const char *dir, const char *buf, size_t len, const sip_addr_t *peer)
 {
     if (!ua->log || ua->log_level < SIP_LOG_VERBOSE) {
         return;
     }
     char ip[16];
     sip_ip_format(peer->ip, ip);
-    ua_log(ua, SIP_LOG_VERBOSE, "%s %s:%u (%u bytes)", dir, ip, (unsigned)peer->port, (unsigned)len);
+    sipua_log(ua, SIP_LOG_VERBOSE, "%s %s:%u (%u bytes)", dir, ip, (unsigned)peer->port, (unsigned)len);
     const char *p = buf;
     const char *e = buf + len;
     while (p < e) {
@@ -307,7 +93,7 @@ static void log_msg(sip_ua_t *ua, const char *dir, const char *buf, size_t len, 
         const char *colon = memchr(p, ':', n);
         sip_str_t name = colon ? sip_str_trim((sip_str_t){ p, (size_t)(colon - p) }) : SIP_STR_NULL;
         if (colon && (sip_str_ieq_c(name, "Authorization") || sip_str_ieq_c(name, "Proxy-Authorization"))) {
-            ua_log(ua, SIP_LOG_VERBOSE, "  %.*s: <redacted>", (int)name.len, name.p);
+            sipua_log(ua, SIP_LOG_VERBOSE, "  %.*s: <redacted>", (int)name.len, name.p);
         } else {
             char lb[180];
             size_t m = line.len < sizeof(lb) - 1 ? line.len : sizeof(lb) - 1;
@@ -316,15 +102,15 @@ static void log_msg(sip_ua_t *ua, const char *dir, const char *buf, size_t len, 
                 lb[i] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
             }
             lb[m] = '\0';
-            ua_log(ua, SIP_LOG_VERBOSE, "  %s", lb);
+            sipua_log(ua, SIP_LOG_VERBOSE, "  %s", lb);
         }
         p = nl ? nl + 1 : e;
     }
 }
 
-static void send_raw(sip_ua_t *ua, const sip_addr_t *to, const char *buf, size_t len)
+void sipua_send_raw(sip_ua_t *ua, const sip_addr_t *to, const char *buf, size_t len)
 {
-    log_msg(ua, "send", buf, len, to);
+    sipua_log_msg(ua, "send", buf, len, to);
     if (ua->send(ua->send_ctx, to, buf, len) != 0) {
         LOGW("send failed (%u bytes)", (unsigned)len);
     }
@@ -337,18 +123,18 @@ static void rand_hex(sip_ua_t *ua, char *out, int words)
     }
 }
 
-static void new_branch(sip_ua_t *ua, char out[32])
+void sipua_new_branch(sip_ua_t *ua, char out[32])
 {
     memcpy(out, "z9hG4bK", 7);
     rand_hex(ua, out + 7, 2);
 }
 
-static void new_tag(sip_ua_t *ua, char out[TAG_LEN + 1])
+void sipua_new_tag(sip_ua_t *ua, char out[TAG_LEN + 1])
 {
     rand_hex(ua, out, 2);
 }
 
-static void new_call_id(sip_ua_t *ua, char out[48])
+void sipua_new_call_id(sip_ua_t *ua, char out[48])
 {
     char ip[16];
     rand_hex(ua, out, 3);
@@ -356,28 +142,28 @@ static void new_call_id(sip_ua_t *ua, char out[48])
     snprintf(out + 24, 48 - 24, "@%s", ip);
 }
 
-static void sent_by(sip_ua_t *ua, char out[24])
+void sipua_sent_by(sip_ua_t *ua, char out[24])
 {
     char ip[16];
     sip_ip_format(ua->local.ip, ip);
     snprintf(out, 24, "%s:%u", ip, (unsigned)ua->local.port);
 }
 
-static void w_via(sip_ua_t *ua, sip_wbuf_t *w, const char *branch)
+void sipua_w_via(sip_ua_t *ua, sip_wbuf_t *w, const char *branch)
 {
     char sb[24];
-    sent_by(ua, sb);
+    sipua_sent_by(ua, sb);
     sip_w_fmt(w, "Via: SIP/2.0/UDP %s;rport;branch=%s\r\n", sb, branch);
 }
 
-static void w_contact(sip_ua_t *ua, sip_wbuf_t *w)
+void sipua_w_contact(sip_ua_t *ua, sip_wbuf_t *w)
 {
     char ip[16];
     sip_ip_format(ua->contact.ip, ip);
     sip_w_fmt(w, "Contact: <sip:%s@%s:%u>\r\n", ua->user, ip, (unsigned)ua->contact.port);
 }
 
-static void w_auth(sip_ua_t *ua, sip_wbuf_t *w, const char *method, const char *uri)
+void sipua_w_auth(sip_ua_t *ua, sip_wbuf_t *w, const char *method, const char *uri)
 {
     if (!ua->auth.valid) {
         return;
@@ -403,7 +189,7 @@ static bool is_sdp(const sip_msg_t *m)
 /* ------------------------------------------------------------------ */
 /* events + re-entrancy                                                 */
 
-static ev_t *ev_push(sip_ua_t *ua, ev_kind_t kind, sip_call_handle_t call)
+ev_t *sipua_ev_push(sip_ua_t *ua, ev_kind_t kind, sip_call_handle_t call)
 {
     if (ua->ev_count == EVQ_LEN) {
         LOGE("event queue overflow, dropping event");
@@ -424,13 +210,13 @@ static void free_ua(sip_ua_t *ua)
     free(ua);
 }
 
-static void enter(sip_ua_t *ua)
+void sipua_enter(sip_ua_t *ua)
 {
     ua->depth++;
 }
 
 /* Deliver queued callbacks once the outermost entry point is done. */
-static void leave(sip_ua_t *ua)
+void sipua_leave(sip_ua_t *ua)
 {
     if (ua->depth == 1 && !ua->draining) {
         ua->draining = true;
@@ -466,6 +252,16 @@ static void leave(sip_ua_t *ua)
             case EV_MEDIA:
                 if (cb->media) {
                     cb->media(cb->ctx, e.call, &e.media);
+                }
+                break;
+            case EV_BLF:
+                if (cb->blf_state) {
+                    cb->blf_state(cb->ctx, e.call, e.number, (sip_blf_state_t)e.state);
+                }
+                break;
+            case EV_MWI:
+                if (cb->mwi) {
+                    cb->mwi(cb->ctx, e.state != 0, e.reason, e.code);
                 }
                 break;
             }
@@ -554,7 +350,7 @@ static sip_ua_call_state_t public_state(const call_t *c)
 
 static void emit_call(sip_ua_t *ua, call_t *c, sip_ua_call_state_t st, sip_ua_end_reason_t reason, int code)
 {
-    ev_t *e = ev_push(ua, EV_CALL, c->handle);
+    ev_t *e = sipua_ev_push(ua, EV_CALL, c->handle);
     if (!e) {
         return;
     }
@@ -609,7 +405,7 @@ static void emit_media(sip_ua_t *ua, call_t *c, const sip_sdp_neg_t *neg, sip_me
     LOGI("call %d media: %s:%u pt %u dtmf %d %s%s", c->handle, mi.remote_ip_str,
          (unsigned)mi.remote_port, (unsigned)mi.payload_type, (int)mi.dtmf_pt,
          sip_sdp_dir_name(dir), early ? " (early)" : "");
-    ev_t *e = ev_push(ua, EV_MEDIA, c->handle);
+    ev_t *e = sipua_ev_push(ua, EV_MEDIA, c->handle);
     if (e) {
         e->media = mi;
     }
@@ -664,12 +460,6 @@ static sip_media_dir_t want_dir(const call_t *c)
 /* ------------------------------------------------------------------ */
 /* UAS responses                                                        */
 
-enum {
-    RF_CONTACT = 1,
-    RF_RR = 2,
-    RF_ALLOW = 4,
-};
-
 /* Top Via with RFC 3581 rport/received filled in. */
 static void w_resp_via(sip_wbuf_t *w, const sip_via_t *v, const sip_addr_t *src, bool top)
 {
@@ -703,7 +493,7 @@ static void w_resp_via(sip_wbuf_t *w, const sip_via_t *v, const sip_addr_t *src,
     sip_w_cstr(w, "\r\n");
 }
 
-static int tpl_from_msg(resp_tpl_t *tpl, const sip_msg_t *m, const sip_addr_t *src)
+int sipua_tpl_from_msg(resp_tpl_t *tpl, const sip_msg_t *m, const sip_addr_t *src)
 {
     sip_wbuf_t w;
     sip_w_init(&w, tpl->hdrs, sizeof(tpl->hdrs));
@@ -739,7 +529,7 @@ static int tpl_from_msg(resp_tpl_t *tpl, const sip_msg_t *m, const sip_addr_t *s
 }
 
 /* Build and send a response. t may be NULL (stateless). */
-static void respond_tpl(sip_ua_t *ua, sip_txn_t *t, const resp_tpl_t *tpl, const sip_addr_t *peer,
+void sipua_respond_tpl(sip_ua_t *ua, sip_txn_t *t, const resp_tpl_t *tpl, const sip_addr_t *peer,
                         int code, const char *to_tag, unsigned flags, const char *extra,
                         const char *body, size_t body_len)
 {
@@ -756,7 +546,7 @@ static void respond_tpl(sip_ua_t *ua, sip_txn_t *t, const resp_tpl_t *tpl, const
         sip_w_mem(&w, tpl->rr, tpl->rr_len);
     }
     if (flags & RF_CONTACT) {
-        w_contact(ua, &w);
+        sipua_w_contact(ua, &w);
     }
     if (flags & RF_ALLOW) {
         sip_w_cstr(&w, ALLOW_HDR "Accept: application/sdp\r\n");
@@ -776,24 +566,24 @@ static void respond_tpl(sip_ua_t *ua, sip_txn_t *t, const resp_tpl_t *tpl, const
         return;
     }
     if (t) {
-        log_msg(ua, "send", ua->tx, w.len, &t->peer);
+        sipua_log_msg(ua, "send", ua->tx, w.len, &t->peer);
         sip_txn_respond(&ua->txl, ua->now, t, code, ua->tx, w.len);
     } else {
-        send_raw(ua, peer, ua->tx, w.len);
+        sipua_send_raw(ua, peer, ua->tx, w.len);
     }
 }
 
 /* Respond to the request currently in ua->msg. */
-static void respond_msg(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const sip_addr_t *from,
+void sipua_respond_msg(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const sip_addr_t *from,
                         int code, unsigned flags, const char *extra)
 {
     char tag[TAG_LEN + 1];
-    if (tpl_from_msg(&ua->tpl_scratch, m, from) != 0) {
+    if (sipua_tpl_from_msg(&ua->tpl_scratch, m, from) != 0) {
         LOGW("cannot build response template");
         return;
     }
-    new_tag(ua, tag);
-    respond_tpl(ua, t, &ua->tpl_scratch, from, code, tag, flags, extra, NULL, 0);
+    sipua_new_tag(ua, tag);
+    sipua_respond_tpl(ua, t, &ua->tpl_scratch, from, code, tag, flags, extra, NULL, 0);
 }
 
 /* response on a call's INVITE server transaction (tag = dialog local tag) */
@@ -804,7 +594,7 @@ static void call_respond(sip_ua_t *ua, call_t *c, int code, unsigned flags, cons
         LOGW("call %d: INVITE transaction gone, cannot send %d", c->handle, code);
         return;
     }
-    respond_tpl(ua, t, &c->tpl, &t->peer, code, c->dlg.local_tag, flags, NULL, body, len);
+    sipua_respond_tpl(ua, t, &c->tpl, &t->peer, code, c->dlg.local_tag, flags, NULL, body, len);
 }
 
 /* ------------------------------------------------------------------ */
@@ -812,7 +602,7 @@ static void call_respond(sip_ua_t *ua, call_t *c, int code, unsigned flags, cons
 
 /* Retry once per challenge; a stale=true challenge may be retried again
  * (bounded). Adopts the new challenge as cached credentials. */
-static bool auth_retry(sip_ua_t *ua, uint8_t *tries, const sip_msg_t *m)
+bool sipua_auth_retry(sip_ua_t *ua, uint8_t *tries, const sip_msg_t *m)
 {
     sip_auth_t ch;
     if (sip_auth_from_response(m, &ch) != 0) {
@@ -839,7 +629,7 @@ static void reg_set_state(sip_ua_t *ua, sip_ua_reg_state_t st, int code)
         ua->reg.reported = true;
         ua->reg.rep_state = st;
         ua->reg.rep_code = code;
-        ev_t *e = ev_push(ua, EV_REG, 0);
+        ev_t *e = sipua_ev_push(ua, EV_REG, 0);
         if (e) {
             e->state = st;
             e->code = code;
@@ -847,7 +637,7 @@ static void reg_set_state(sip_ua_t *ua, sip_ua_reg_state_t st, int code)
     }
 }
 
-static uint32_t refresh_delay_s(uint32_t e)
+uint32_t sipua_refresh_delay_s(uint32_t e)
 {
     /* refresh at min(expires/2, expires-30); never earlier than 1 s */
     uint32_t half = e / 2;
@@ -873,20 +663,20 @@ static int reg_send(sip_ua_t *ua, uint32_t expires)
 {
     char branch[32];
     sip_wbuf_t w;
-    new_branch(ua, branch);
+    sipua_new_branch(ua, branch);
     uint32_t cseq = ++ua->reg.cseq;
     sip_w_init(&w, ua->tx, sizeof(ua->tx));
     sip_w_fmt(&w, "REGISTER %s SIP/2.0\r\n", ua->registrar);
-    w_via(ua, &w, branch);
+    sipua_w_via(ua, &w, branch);
     sip_w_cstr(&w, "Max-Forwards: 70\r\n");
     sip_w_fmt(&w, "From: %s;tag=%s\r\n", ua->from_na, ua->reg.tag);
     sip_w_fmt(&w, "To: %s\r\n", ua->from_na);
     sip_w_fmt(&w, "Call-ID: %s\r\n", ua->reg.call_id);
     sip_w_fmt(&w, "CSeq: %lu REGISTER\r\n", (unsigned long)cseq);
-    w_contact(ua, &w);
+    sipua_w_contact(ua, &w);
     sip_w_fmt(&w, "Expires: %lu\r\n", (unsigned long)expires);
     sip_w_cstr(&w, ALLOW_HDR UA_HDR);
-    w_auth(ua, &w, "REGISTER", ua->registrar);
+    sipua_w_auth(ua, &w, "REGISTER", ua->registrar);
     sip_w_cstr(&w, "Content-Length: 0\r\n\r\n");
     if (w.overflow) {
         LOGE("REGISTER does not fit");
@@ -898,7 +688,7 @@ static int reg_send(sip_ua_t *ua, uint32_t expires)
         LOGE("no free transaction for REGISTER");
         return -1;
     }
-    log_msg(ua, "send", ua->tx, w.len, &ua->server);
+    sipua_log_msg(ua, "send", ua->tx, w.len, &ua->server);
     t->owner = OWN_REG;
     ua->reg.txn = t->id;
     ua->reg.sent_expires = expires;
@@ -953,7 +743,7 @@ static void reg_on_response(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m)
     }
     ua->reg.txn = 0;
     if (code == 401 || code == 407) {
-        if (auth_retry(ua, &ua->reg.auth_tries, m)) {
+        if (sipua_auth_retry(ua, &ua->reg.auth_tries, m)) {
             if (reg_send(ua, ua->reg.sent_expires) != 0) {
                 reg_fail(ua, code);
             }
@@ -987,8 +777,9 @@ static void reg_on_response(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m)
     ua->reg.granted = granted;
     ua->reg.backoff_ms = 0;
     ua->reg.t_retry = 0;
-    ua->reg.t_refresh = ua->now + (uint64_t)refresh_delay_s(granted) * 1000u;
-    if (ua->reg.state != SIP_UA_REG_REGISTERED) {
+    ua->reg.t_refresh = ua->now + (uint64_t)sipua_refresh_delay_s(granted) * 1000u;
+    bool was_registered = ua->reg.state == SIP_UA_REG_REGISTERED;
+    if (!was_registered) {
         LOGI("registered, expires %lu s", (unsigned long)granted);
         ua->reg.t_keepalive = ua->now + (uint64_t)ua->keepalive_s * 1000u;
     }
@@ -1012,29 +803,33 @@ static void reg_on_response(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m)
             ua->contact = pub;
             ua->reg.t_refresh = 0;
             reg_start(ua);
+            sipua_sub_contact_changed(ua);
         }
+    }
+    if (!was_registered) {
+        sipua_sub_registered(ua);
     }
 }
 
 static void keepalive_send(sip_ua_t *ua)
 {
     if (ua->ka_mode == SIP_KEEPALIVE_CRLF) {
-        send_raw(ua, &ua->server, "\r\n\r\n", 4);
+        sipua_send_raw(ua, &ua->server, "\r\n\r\n", 4);
         return;
     }
     char branch[32], tag[TAG_LEN + 1], cid[48];
     sip_wbuf_t w;
-    new_branch(ua, branch);
-    new_tag(ua, tag);
-    new_call_id(ua, cid);
+    sipua_new_branch(ua, branch);
+    sipua_new_tag(ua, tag);
+    sipua_new_call_id(ua, cid);
     sip_w_init(&w, ua->tx, sizeof(ua->tx));
     sip_w_fmt(&w, "OPTIONS %s SIP/2.0\r\n", ua->registrar);
-    w_via(ua, &w, branch);
+    sipua_w_via(ua, &w, branch);
     sip_w_cstr(&w, "Max-Forwards: 70\r\n");
     sip_w_fmt(&w, "From: %s;tag=%s\r\n", ua->from_na, tag);
     sip_w_fmt(&w, "To: <%s>\r\n", ua->registrar);
     sip_w_fmt(&w, "Call-ID: %s\r\nCSeq: 1 OPTIONS\r\n", cid);
-    w_contact(ua, &w);
+    sipua_w_contact(ua, &w);
     sip_w_cstr(&w, "Accept: application/sdp\r\n" UA_HDR "Content-Length: 0\r\n\r\n");
     if (w.overflow) {
         return;
@@ -1042,7 +837,7 @@ static void keepalive_send(sip_ua_t *ua)
     sip_txn_t *t = sip_txn_client_start(&ua->txl, ua->now, SIP_METHOD_OPTIONS, branch, 1,
                                         &ua->server, ua->tx, w.len);
     if (t) {
-        log_msg(ua, "send", ua->tx, w.len, &ua->server);
+        sipua_log_msg(ua, "send", ua->tx, w.len, &ua->server);
         t->owner = OWN_KEEPALIVE;
     }
 }
@@ -1079,18 +874,18 @@ static int invite_send(sip_ua_t *ua, call_t *c)
     if (sdp_len < 0) {
         return SIP_ERR_OVERFLOW;
     }
-    new_branch(ua, branch);
+    sipua_new_branch(ua, branch);
     sip_w_init(&w, ua->tx, sizeof(ua->tx));
     sip_w_fmt(&w, "INVITE %s SIP/2.0\r\n", c->ruri);
-    w_via(ua, &w, branch);
+    sipua_w_via(ua, &w, branch);
     sip_w_cstr(&w, "Max-Forwards: 70\r\n");
     sip_w_fmt(&w, "From: %s;tag=%s\r\n", ua->from_na, c->local_tag);
     sip_w_fmt(&w, "To: %s\r\n", c->to_na);
     sip_w_fmt(&w, "Call-ID: %s\r\n", c->call_id);
     sip_w_fmt(&w, "CSeq: %lu INVITE\r\n", (unsigned long)c->invite_cseq);
-    w_contact(ua, &w);
+    sipua_w_contact(ua, &w);
     sip_w_cstr(&w, ALLOW_HDR UA_HDR);
-    w_auth(ua, &w, "INVITE", c->ruri);
+    sipua_w_auth(ua, &w, "INVITE", c->ruri);
     sip_w_fmt(&w, "Content-Type: application/sdp\r\nContent-Length: %d\r\n\r\n", sdp_len);
     sip_w_mem(&w, ua->sdp, (size_t)sdp_len);
     if (w.overflow) {
@@ -1101,7 +896,7 @@ static int invite_send(sip_ua_t *ua, call_t *c)
     if (!t) {
         return SIP_ERR_NOMEM;
     }
-    log_msg(ua, "send", ua->tx, w.len, &ua->server);
+    sipua_log_msg(ua, "send", ua->tx, w.len, &ua->server);
     t->owner = OWN_INVITE;
     t->owner_ref = c->handle;
     c->inv_txn = t->id;
@@ -1114,8 +909,8 @@ static void send_ack_2xx(sip_ua_t *ua, call_t *c, uint32_t cseq, const char *bod
 {
     char branch[32], sb[24];
     sip_wbuf_t w;
-    new_branch(ua, branch);
-    sent_by(ua, sb);
+    sipua_new_branch(ua, branch);
+    sipua_sent_by(ua, sb);
     sip_w_init(&w, c->ack, sizeof(c->ack));
     sip_dialog_write_request(&c->dlg, &w, "ACK", cseq, sb, branch);
     sip_w_cstr(&w, UA_HDR);
@@ -1132,7 +927,7 @@ static void send_ack_2xx(sip_ua_t *ua, call_t *c, uint32_t cseq, const char *bod
     }
     c->ack_len = (uint16_t)w.len;
     c->ack_cseq = cseq;
-    send_raw(ua, &ua->server, c->ack, c->ack_len);
+    sipua_send_raw(ua, &ua->server, c->ack, c->ack_len);
 }
 
 static void send_in_dialog(sip_ua_t *ua, call_t *c, const char *method, sip_method_t mid, owner_t owner,
@@ -1140,18 +935,18 @@ static void send_in_dialog(sip_ua_t *ua, call_t *c, const char *method, sip_meth
 {
     char branch[32], sb[24];
     sip_wbuf_t w;
-    new_branch(ua, branch);
-    sent_by(ua, sb);
+    sipua_new_branch(ua, branch);
+    sipua_sent_by(ua, sb);
     uint32_t cseq = ++c->dlg.local_cseq;
     sip_w_init(&w, ua->tx, sizeof(ua->tx));
     sip_dialog_write_request(&c->dlg, &w, method, cseq, sb, branch);
     if (contact) {
-        w_contact(ua, &w);
+        sipua_w_contact(ua, &w);
         sip_w_cstr(&w, ALLOW_HDR);
     }
     sip_w_cstr(&w, UA_HDR);
     if (mid == SIP_METHOD_INVITE) {
-        w_auth(ua, &w, method, c->dlg.remote_target);
+        sipua_w_auth(ua, &w, method, c->dlg.remote_target);
     }
     if (body && body_len) {
         sip_w_fmt(&w, "Content-Type: application/sdp\r\nContent-Length: %u\r\n\r\n", (unsigned)body_len);
@@ -1168,7 +963,7 @@ static void send_in_dialog(sip_ua_t *ua, call_t *c, const char *method, sip_meth
         LOGE("no free transaction for %s", method);
         return;
     }
-    log_msg(ua, "send", ua->tx, w.len, &ua->server);
+    sipua_log_msg(ua, "send", ua->tx, w.len, &ua->server);
     t->owner = owner;
     t->owner_ref = c->handle;
     if (owner == OWN_REINVITE) {
@@ -1203,7 +998,7 @@ static void send_cancel(sip_ua_t *ua, call_t *c)
         LOGE("no free transaction for CANCEL");
         return;
     }
-    log_msg(ua, "send", ua->tx, (size_t)n, &ua->server);
+    sipua_log_msg(ua, "send", ua->tx, (size_t)n, &ua->server);
     t->owner = OWN_CANCEL;
     t->owner_ref = c->handle;
     c->cancel_sent = true;
@@ -1260,7 +1055,7 @@ static void on_invite_response(sip_ua_t *ua, call_t *c, sip_txn_t *t, const sip_
         if (c->dlg_valid && c->dlg.confirmed) {
             /* retransmitted 2xx: our ACK was lost (§13.2.2.4) */
             if (c->ack_len && m->cseq == c->ack_cseq) {
-                send_raw(ua, &ua->server, c->ack, c->ack_len);
+                sipua_send_raw(ua, &ua->server, c->ack, c->ack_len);
             }
             return;
         }
@@ -1289,7 +1084,7 @@ static void on_invite_response(sip_ua_t *ua, call_t *c, sip_txn_t *t, const sip_
         }
         if (c->media.early) {
             c->media.early = false;
-            ev_t *e = ev_push(ua, EV_MEDIA, c->handle);
+            ev_t *e = sipua_ev_push(ua, EV_MEDIA, c->handle);
             if (e) {
                 e->media = c->media;
             }
@@ -1301,7 +1096,7 @@ static void on_invite_response(sip_ua_t *ua, call_t *c, sip_txn_t *t, const sip_
         return;
     }
     /* 3xx-6xx: the transaction already sent the ACK */
-    if ((code == 401 || code == 407) && c->st != CS_ENDING && auth_retry(ua, &c->auth_tries, m)) {
+    if ((code == 401 || code == 407) && c->st != CS_ENDING && sipua_auth_retry(ua, &c->auth_tries, m)) {
         c->invite_cseq++;
         c->dlg_valid = false;
         if (invite_send(ua, c) == SIP_OK) {
@@ -1323,7 +1118,7 @@ static void on_reinvite_response(sip_ua_t *ua, call_t *c, sip_txn_t *t, const si
     }
     if (code < 300) {
         if (c->ack_len && c->ack_cseq == t->cseq) {
-            send_raw(ua, &ua->server, c->ack, c->ack_len); /* 2xx retransmission */
+            sipua_send_raw(ua, &ua->server, c->ack, c->ack_len); /* 2xx retransmission */
             return;
         }
         send_ack_2xx(ua, c, t->cseq, NULL, 0);
@@ -1343,7 +1138,7 @@ static void on_reinvite_response(sip_ua_t *ua, call_t *c, sip_txn_t *t, const si
         return;
     }
     c->reinv_txn = 0;
-    if ((code == 401 || code == 407) && auth_retry(ua, &c->reinv_auth_tries, m)) {
+    if ((code == 401 || code == 407) && sipua_auth_retry(ua, &c->reinv_auth_tries, m)) {
         int n = make_sdp(ua, c, NULL, NULL, c->reinv_hold ? SIP_DIR_SENDONLY : SIP_DIR_SENDRECV);
         if (n > 0) {
             send_in_dialog(ua, c, "INVITE", SIP_METHOD_INVITE, OWN_REINVITE, ua->sdp, (size_t)n, true);
@@ -1400,6 +1195,9 @@ static void tu_on_response(void *ctx, sip_txn_t *t, const sip_msg_t *m)
             LOGI("call %d: BYE answered %d", t->owner_ref, m->status);
         }
         break;
+    case OWN_SUBSCRIBE:
+        sipua_sub_on_response(ua, t, m);
+        break;
     default:
         break;
     }
@@ -1445,6 +1243,9 @@ static void tu_on_timeout(void *ctx, sip_txn_t *t)
         break;
     case OWN_BYE:
         LOGW("call %d: BYE timed out", t->owner_ref);
+        break;
+    case OWN_SUBSCRIBE:
+        sipua_sub_on_timeout(ua, t);
         break;
     case OWN_SERVER_INVITE:
         if (c && t->state == SIP_TS_ACCEPTED && c->awaiting_ack && c->uas_inv_txn == t->id) {
@@ -1498,21 +1299,21 @@ static void caller_identity(call_t *c, const sip_nameaddr_t *from)
 
 static void on_invite_new(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const sip_addr_t *from)
 {
-    respond_msg(ua, t, m, from, 100, 0, NULL);
+    sipua_respond_msg(ua, t, m, from, 100, 0, NULL);
     if (m->body.len && !is_sdp(m)) {
-        respond_msg(ua, t, m, from, 415, 0, "Accept: application/sdp\r\n");
+        sipua_respond_msg(ua, t, m, from, 415, 0, "Accept: application/sdp\r\n");
         return;
     }
     call_t *c = have_visible_call(ua) ? NULL : call_alloc(ua);
     if (!c) {
         LOGI("busy: rejecting incoming INVITE with 486");
-        respond_msg(ua, t, m, from, 486, 0, NULL);
+        sipua_respond_msg(ua, t, m, from, 486, 0, NULL);
         return;
     }
     char tag[TAG_LEN + 1];
-    new_tag(ua, tag);
-    if (sip_dialog_init_uas(&c->dlg, m, tag) != 0 || tpl_from_msg(&c->tpl, m, from) != 0) {
-        respond_msg(ua, t, m, from, 400, 0, NULL);
+    sipua_new_tag(ua, tag);
+    if (sip_dialog_init_uas(&c->dlg, m, tag) != 0 || sipua_tpl_from_msg(&c->tpl, m, from) != 0) {
+        sipua_respond_msg(ua, t, m, from, 400, 0, NULL);
         call_free(c);
         return;
     }
@@ -1537,7 +1338,7 @@ static void on_invite_new(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const 
     call_respond(ua, c, 180, RF_CONTACT | RF_RR, NULL, 0);
     c->last_code = 180;
     LOGI("incoming call %d from %s \"%s\"", c->handle, c->number, c->display);
-    ev_t *e = ev_push(ua, EV_INCOMING, c->handle);
+    ev_t *e = sipua_ev_push(ua, EV_INCOMING, c->handle);
     if (e) {
         strcpy(e->number, c->number);
         strcpy(e->display, c->display);
@@ -1577,19 +1378,19 @@ static int answer_invite(sip_ua_t *ua, call_t *c, unsigned flags)
 static void on_reinvite(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const sip_addr_t *from, call_t *c)
 {
     if (c->st != CS_CONFIRMED) {
-        respond_msg(ua, t, m, from, c->st == CS_ENDING ? 481 : 491, 0, NULL);
+        sipua_respond_msg(ua, t, m, from, c->st == CS_ENDING ? 481 : 491, 0, NULL);
         return;
     }
     if (c->reinv_txn || c->awaiting_ack) {
-        respond_msg(ua, t, m, from, 491, 0, NULL); /* §14.2 glare */
+        sipua_respond_msg(ua, t, m, from, 491, 0, NULL); /* §14.2 glare */
         return;
     }
     if (m->body.len && !is_sdp(m)) {
-        respond_msg(ua, t, m, from, 415, 0, "Accept: application/sdp\r\n");
+        sipua_respond_msg(ua, t, m, from, 415, 0, "Accept: application/sdp\r\n");
         return;
     }
-    if (tpl_from_msg(&c->tpl, m, from) != 0) {
-        respond_msg(ua, t, m, from, 500, 0, NULL);
+    if (sipua_tpl_from_msg(&c->tpl, m, from) != 0) {
+        sipua_respond_msg(ua, t, m, from, 500, 0, NULL);
         return;
     }
     t->owner = OWN_SERVER_INVITE;
@@ -1658,12 +1459,12 @@ static void on_cancel(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const sip_
         }
     }
     if (!inv) {
-        respond_msg(ua, t, m, from, 481, 0, NULL);
+        sipua_respond_msg(ua, t, m, from, 481, 0, NULL);
         return;
     }
     call_t *c = find_call(ua, inv->owner_ref);
-    if (tpl_from_msg(&ua->tpl_scratch, m, from) == 0) {
-        respond_tpl(ua, t, &ua->tpl_scratch, from, 200, c ? c->dlg.local_tag : NULL, 0, NULL, NULL, 0);
+    if (sipua_tpl_from_msg(&ua->tpl_scratch, m, from) == 0) {
+        sipua_respond_tpl(ua, t, &ua->tpl_scratch, from, 200, c ? c->dlg.local_tag : NULL, 0, NULL, NULL, 0);
     }
     if (c && c->st == CS_IN_RINGING && inv->state == SIP_TS_PROCEEDING) {
         call_respond(ua, c, 487, 0, NULL, 0);
@@ -1675,14 +1476,14 @@ static void on_in_dialog(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const s
 {
     /* §12.2.2: CSeq must increase */
     if (c->dlg.remote_cseq_valid && m->cseq <= c->dlg.remote_cseq) {
-        respond_msg(ua, t, m, from, 500, 0, NULL);
+        sipua_respond_msg(ua, t, m, from, 500, 0, NULL);
         return;
     }
     c->dlg.remote_cseq = m->cseq;
     c->dlg.remote_cseq_valid = true;
     switch (m->method) {
     case SIP_METHOD_BYE:
-        respond_msg(ua, t, m, from, 200, 0, NULL);
+        sipua_respond_msg(ua, t, m, from, 200, 0, NULL);
         if (c->st == CS_IN_RINGING) {
             call_respond(ua, c, 487, 0, NULL, 0);
         }
@@ -1697,13 +1498,13 @@ static void on_in_dialog(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const s
         on_reinvite(ua, t, m, from, c);
         break;
     case SIP_METHOD_OPTIONS:
-        respond_msg(ua, t, m, from, 200, RF_ALLOW, NULL);
+        sipua_respond_msg(ua, t, m, from, 200, RF_ALLOW, NULL);
         break;
     case SIP_METHOD_INFO:
-        respond_msg(ua, t, m, from, 200, 0, NULL);
+        sipua_respond_msg(ua, t, m, from, 200, 0, NULL);
         break;
     default:
-        respond_msg(ua, t, m, from, 501, RF_ALLOW, NULL);
+        sipua_respond_msg(ua, t, m, from, 501, RF_ALLOW, NULL);
         break;
     }
 }
@@ -1720,32 +1521,32 @@ static void on_request(sip_ua_t *ua, const sip_msg_t *m, const sip_addr_t *from)
     }
     sip_uri_t ru;
     if (sip_uri_parse(m->ruri, &ru) != 0) {
-        respond_msg(ua, NULL, m, from, 416, 0, NULL);
+        sipua_respond_msg(ua, NULL, m, from, 416, 0, NULL);
         return;
     }
     if (ru.headers.p) {
-        respond_msg(ua, NULL, m, from, 400, 0, NULL); /* RFC 4475 escruri */
+        sipua_respond_msg(ua, NULL, m, from, 400, 0, NULL); /* RFC 4475 escruri */
         return;
     }
     t = sip_txn_server_create(&ua->txl, ua->now, m, from);
     if (!t) {
-        respond_msg(ua, NULL, m, from, 503, 0, "Retry-After: 5\r\n");
+        sipua_respond_msg(ua, NULL, m, from, 503, 0, "Retry-After: 5\r\n");
         return;
     }
     if (m->require.p && m->method != SIP_METHOD_CANCEL) {
         char extra[160];
         snprintf(extra, sizeof(extra), "Unsupported: %.*s\r\n",
                  (int)(m->require.len < 120 ? m->require.len : 120), m->require.p);
-        respond_msg(ua, t, m, from, 420, 0, extra);
+        sipua_respond_msg(ua, t, m, from, 420, 0, extra);
         return;
     }
     if (m->to.tag.len) {
         call_t *c = find_call_by_dialog(ua, m);
-        if (!c) {
-            respond_msg(ua, t, m, from, 481, 0, NULL);
-            return;
+        if (c) {
+            on_in_dialog(ua, t, m, from, c);
+        } else if (m->method != SIP_METHOD_NOTIFY || !sipua_sub_on_notify(ua, t, m, from)) {
+            sipua_respond_msg(ua, t, m, from, 481, 0, NULL);
         }
-        on_in_dialog(ua, t, m, from, c);
         return;
     }
     switch (m->method) {
@@ -1756,19 +1557,22 @@ static void on_request(sip_ua_t *ua, const sip_msg_t *m, const sip_addr_t *from)
         on_cancel(ua, t, m, from);
         break;
     case SIP_METHOD_OPTIONS:
-        respond_msg(ua, t, m, from, 200, RF_ALLOW, NULL);
+        sipua_respond_msg(ua, t, m, from, 200, RF_ALLOW, NULL);
         break;
     case SIP_METHOD_BYE:
-        respond_msg(ua, t, m, from, 481, 0, NULL);
+        sipua_respond_msg(ua, t, m, from, 481, 0, NULL);
         break;
     case SIP_METHOD_NOTIFY:
-        respond_msg(ua, t, m, from, 200, 0, NULL); /* unsolicited (e.g. MWI) */
+        /* unsolicited message-summary (MWI), or a NOTIFY for none of ours */
+        if (!sipua_sub_on_notify(ua, t, m, from)) {
+            sipua_respond_msg(ua, t, m, from, 481, 0, NULL);
+        }
         break;
     case SIP_METHOD_UNKNOWN:
-        respond_msg(ua, t, m, from, 501, RF_ALLOW, NULL);
+        sipua_respond_msg(ua, t, m, from, 501, RF_ALLOW, NULL);
         break;
     default:
-        respond_msg(ua, t, m, from, 405, RF_ALLOW, NULL);
+        sipua_respond_msg(ua, t, m, from, 405, RF_ALLOW, NULL);
         break;
     }
 }
@@ -1918,9 +1722,11 @@ sip_err_t sip_ua_create(const sip_ua_config_t *cfg, sip_ua_t **out)
         .ctx = ua,
     };
     sip_txn_layer_init(&ua->txl, &tu);
+    ua->sub_expires = cfg->sub_expires ? cfg->sub_expires : 600;
+    sipua_sub_init(ua);
     ua->reg.expires_req = ua->expires;
-    new_call_id(ua, ua->reg.call_id);
-    new_tag(ua, ua->reg.tag);
+    sipua_new_call_id(ua, ua->reg.call_id);
+    sipua_new_tag(ua, ua->reg.tag);
     *out = ua;
     return SIP_OK;
 }
@@ -1942,12 +1748,13 @@ void sip_ua_tick(sip_ua_t *ua, uint64_t now_ms)
     if (ua->destroy_pending) {
         return;
     }
-    enter(ua);
+    sipua_enter(ua);
     if (now_ms > ua->now) {
         ua->now = now_ms;
     }
     sip_txn_tick(&ua->txl, ua->now);
     reg_tick(ua);
+    sipua_sub_tick(ua);
     for (int i = 0; i < MAX_CALLS; i++) {
         call_t *c = &ua->calls[i];
         if (c->st == CS_ENDING && ua->now >= c->deadline) {
@@ -1957,7 +1764,7 @@ void sip_ua_tick(sip_ua_t *ua, uint64_t now_ms)
             call_free(c);
         }
     }
-    leave(ua);
+    sipua_leave(ua);
 }
 
 void sip_ua_on_packet(sip_ua_t *ua, const void *data, size_t len, const sip_addr_t *from)
@@ -1965,33 +1772,33 @@ void sip_ua_on_packet(sip_ua_t *ua, const void *data, size_t len, const sip_addr
     if (!ua || !data || !from || ua->destroy_pending) {
         return;
     }
-    enter(ua);
+    sipua_enter(ua);
     const char *p = data;
     size_t i = 0;
     while (i < len && (p[i] == '\r' || p[i] == '\n' || p[i] == ' ')) {
         i++;
     }
     if (i == len) {
-        leave(ua); /* keepalive ping/pong (RFC 5626 §4.4.1) */
+        sipua_leave(ua); /* keepalive ping/pong (RFC 5626 §4.4.1) */
         return;
     }
     if (!ua->any_source && from->ip != ua->server.ip) {
         LOGD("ignoring datagram from a non-server address");
-        leave(ua);
+        sipua_leave(ua);
         return;
     }
     if (len > SIP_MAX_MSG_IN) {
         LOGW("dropping oversized datagram (%u bytes)", (unsigned)len);
-        leave(ua);
+        sipua_leave(ua);
         return;
     }
     memcpy(ua->rx, data, len);
     ua->rx[len] = '\0';
-    log_msg(ua, "recv", ua->rx, len, from);
+    sipua_log_msg(ua, "recv", ua->rx, len, from);
     sip_msg_t *m = &ua->msg;
     if (sip_msg_parse(m, ua->rx, len) != SIP_PARSE_OK) {
         LOGW("dropping malformed message (%u bytes)", (unsigned)len);
-        leave(ua);
+        sipua_leave(ua);
         return;
     }
     if (m->is_request) {
@@ -1999,12 +1806,12 @@ void sip_ua_on_packet(sip_ua_t *ua, const void *data, size_t len, const sip_addr
     } else if (!sip_txn_on_response(&ua->txl, ua->now, m)) {
         LOGD("stray %d response dropped", m->status);
     }
-    leave(ua);
+    sipua_leave(ua);
 }
 
 sip_err_t sip_ua_register(sip_ua_t *ua)
 {
-    enter(ua);
+    sipua_enter(ua);
     ua->reg.active = true;
     ua->reg.unregistering = false;
     ua->reg.auth_tries = 0;
@@ -2017,24 +1824,25 @@ sip_err_t sip_ua_register(sip_ua_t *ua)
         }
         reg_start(ua);
     }
-    leave(ua);
+    sipua_leave(ua);
     return SIP_OK;
 }
 
 sip_err_t sip_ua_unregister(sip_ua_t *ua)
 {
-    enter(ua);
+    sipua_enter(ua);
     reg_t *r = &ua->reg;
     r->active = false;
     r->t_refresh = 0;
     r->t_retry = 0;
+    sipua_sub_terminate_all(ua);
     sip_txn_t *t = sip_txn_find(&ua->txl, r->txn);
     if (t) {
         sip_txn_terminate(t); /* abandon an in-flight REGISTER */
     }
     r->txn = 0;
     if (r->state == SIP_UA_REG_NONE) {
-        leave(ua);
+        sipua_leave(ua);
         return SIP_OK;
     }
     r->auth_tries = 0;
@@ -2043,7 +1851,7 @@ sip_err_t sip_ua_unregister(sip_ua_t *ua)
         r->unregistering = false;
         reg_set_state(ua, SIP_UA_REG_NONE, 0);
     }
-    leave(ua);
+    sipua_leave(ua);
     return SIP_OK;
 }
 
@@ -2057,17 +1865,18 @@ sip_err_t sip_ua_set_local_addr(sip_ua_t *ua, const sip_addr_t *local)
     if (!local) {
         return SIP_ERR_ARG;
     }
-    enter(ua);
+    sipua_enter(ua);
     ua->local = *local;
     ua->contact = *local;
     if (ua->reg.active && !ua->reg.txn) {
         reg_start(ua);
     }
-    leave(ua);
+    sipua_sub_contact_changed(ua);
+    sipua_leave(ua);
     return SIP_OK;
 }
 
-static int build_ruri(sip_ua_t *ua, const char *number, char *out, size_t cap)
+int sipua_build_ruri(sip_ua_t *ua, const char *number, char *out, size_t cap)
 {
     if (strncmp(number, "sip:", 4) == 0 || strncmp(number, "sips:", 5) == 0) {
         sip_uri_t u;
@@ -2103,7 +1912,7 @@ sip_err_t sip_call_dial(sip_ua_t *ua, const char *number, sip_call_handle_t *out
     if (!number || !out) {
         return SIP_ERR_ARG;
     }
-    enter(ua);
+    sipua_enter(ua);
     sip_err_t err = SIP_OK;
     call_t *c = NULL;
     if (have_visible_call(ua)) {
@@ -2115,7 +1924,7 @@ sip_err_t sip_call_dial(sip_ua_t *ua, const char *number, sip_call_handle_t *out
         err = SIP_ERR_NOMEM;
         goto done;
     }
-    if (build_ruri(ua, number, c->ruri, sizeof(c->ruri)) != 0) {
+    if (sipua_build_ruri(ua, number, c->ruri, sizeof(c->ruri)) != 0) {
         call_free(c);
         err = SIP_ERR_ARG;
         goto done;
@@ -2123,8 +1932,8 @@ sip_err_t sip_call_dial(sip_ua_t *ua, const char *number, sip_call_handle_t *out
     snprintf(c->to_na, sizeof(c->to_na), "<%s>", c->ruri);
     snprintf(c->number, sizeof(c->number), "%s", number);
     c->outgoing = true;
-    new_call_id(ua, c->call_id);
-    new_tag(ua, c->local_tag);
+    sipua_new_call_id(ua, c->call_id);
+    sipua_new_tag(ua, c->local_tag);
     c->invite_cseq = 1;
     c->st = CS_OUT_CALLING;
     err = (sip_err_t)invite_send(ua, c);
@@ -2136,13 +1945,13 @@ sip_err_t sip_call_dial(sip_ua_t *ua, const char *number, sip_call_handle_t *out
     emit_state(ua, c);
     *out = c->handle;
 done:
-    leave(ua);
+    sipua_leave(ua);
     return err;
 }
 
 sip_err_t sip_call_answer(sip_ua_t *ua, sip_call_handle_t call)
 {
-    enter(ua);
+    sipua_enter(ua);
     sip_err_t err = SIP_OK;
     call_t *c = find_call(ua, call);
     if (!c) {
@@ -2163,7 +1972,7 @@ sip_err_t sip_call_answer(sip_ua_t *ua, sip_call_handle_t call)
             emit_state(ua, c);
         }
     }
-    leave(ua);
+    sipua_leave(ua);
     return err;
 }
 
@@ -2172,7 +1981,7 @@ sip_err_t sip_call_reject(sip_ua_t *ua, sip_call_handle_t call, int code)
     if (code < 400 || code > 699) {
         return SIP_ERR_ARG;
     }
-    enter(ua);
+    sipua_enter(ua);
     sip_err_t err = SIP_OK;
     call_t *c = find_call(ua, call);
     if (!c) {
@@ -2183,13 +1992,13 @@ sip_err_t sip_call_reject(sip_ua_t *ua, sip_call_handle_t call, int code)
         call_respond(ua, c, code, 0, NULL, 0);
         end_call(ua, c, SIP_END_LOCAL, code, true);
     }
-    leave(ua);
+    sipua_leave(ua);
     return err;
 }
 
 sip_err_t sip_call_hangup(sip_ua_t *ua, sip_call_handle_t call)
 {
-    enter(ua);
+    sipua_enter(ua);
     sip_err_t err = SIP_OK;
     call_t *c = find_call(ua, call);
     if (!c) {
@@ -2224,13 +2033,13 @@ sip_err_t sip_call_hangup(sip_ua_t *ua, sip_call_handle_t call)
         break; /* already ending */
     }
 done:
-    leave(ua);
+    sipua_leave(ua);
     return err;
 }
 
 sip_err_t sip_call_hold(sip_ua_t *ua, sip_call_handle_t call, bool hold)
 {
-    enter(ua);
+    sipua_enter(ua);
     sip_err_t err = SIP_OK;
     call_t *c = find_call(ua, call);
     if (!c) {
@@ -2249,7 +2058,7 @@ sip_err_t sip_call_hold(sip_ua_t *ua, sip_call_handle_t call, bool hold)
             LOGI("call %d: %s", c->handle, hold ? "hold" : "resume");
         }
     }
-    leave(ua);
+    sipua_leave(ua);
     return err;
 }
 

@@ -156,6 +156,21 @@ static void media_cb(void *ctx, sip_call_handle_t call, const sip_media_info_t *
     e->media = *mi;
 }
 
+static void blf_cb(void *ctx, sip_sub_handle_t sub, const char *ext, sip_blf_state_t st)
+{
+    fx_ev_t *e = push_ev(ctx, FXE_BLF, sub);
+    e->state = st;
+    snprintf(e->number, sizeof(e->number), "%s", ext);
+}
+
+static void mwi_cb(void *ctx, bool waiting, int new_msgs, int old_msgs)
+{
+    fx_ev_t *e = push_ev(ctx, FXE_MWI, 0);
+    e->state = waiting;
+    e->reason = new_msgs;
+    e->code = old_msgs;
+}
+
 void fx_init(fx_t *f, void (*cfg_tweak)(sip_ua_config_t *cfg))
 {
     memset(f, 0, sizeof(*f));
@@ -182,6 +197,8 @@ void fx_init(fx_t *f, void (*cfg_tweak)(sip_ua_config_t *cfg))
             .incoming_call = incoming_cb,
             .call_state = call_cb,
             .media = media_cb,
+            .blf_state = blf_cb,
+            .mwi = mwi_cb,
             .ctx = f,
         },
     };
@@ -206,6 +223,11 @@ void fx_advance(fx_t *f, uint64_t ms)
     while (f->now < end && f->ua) {
         f->now += 10;
         sip_ua_tick(f->ua, f->now);
+        for (; f->auto_reg && f->reg_scan < f->n_sent; f->reg_scan++) {
+            if (strncmp(f->sent[f->reg_scan].buf, "REGISTER ", 9) == 0) {
+                fx_reply(f, f->reg_scan, 200, "s1", "Expires: 300\r\n", NULL);
+            }
+        }
     }
 }
 
@@ -233,6 +255,7 @@ int fx_count(const fx_t *f, const char *prefix)
 void fx_clear_sent(fx_t *f)
 {
     f->n_sent = 0;
+    f->reg_scan = 0;
 }
 
 static char parse_store[SIP_MAX_MSG_IN + 1];

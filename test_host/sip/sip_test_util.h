@@ -10,7 +10,7 @@
 #include "sip_ua.h"
 
 #define FX_MAX_SENT   256
-#define FX_MAX_EVENTS 64
+#define FX_MAX_EVENTS 128
 
 #define FX_SERVER_IP  0x0a000001u  /* 10.0.0.1 */
 #define FX_LOCAL_IP   0x0a000002u  /* 10.0.0.2 */
@@ -21,7 +21,9 @@ typedef struct {
     sip_addr_t to;
 } fx_sent_t;
 
-typedef enum { FXE_REG, FXE_INCOMING, FXE_CALL, FXE_MEDIA } fx_ev_kind_t;
+/* FXE_BLF: call = subscription handle, state = sip_blf_state_t, number = ext.
+ * FXE_MWI: state = waiting, reason = new, code = old. */
+typedef enum { FXE_REG, FXE_INCOMING, FXE_CALL, FXE_MEDIA, FXE_BLF, FXE_MWI } fx_ev_kind_t;
 
 typedef struct {
     fx_ev_kind_t kind;
@@ -46,6 +48,8 @@ typedef struct fx {
     bool auto_answer;
     bool hangup_in_callback;
     bool destroy_in_callback;
+    bool auto_reg;          /* fx_advance answers new REGISTERs with 200 */
+    int reg_scan;
     sip_addr_t server;
 } fx_t;
 

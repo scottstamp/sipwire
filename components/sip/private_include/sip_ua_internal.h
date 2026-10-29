@@ -10,3 +10,5 @@ int sip_ua_debug_txn_count(const sip_ua_t *ua);
 int sip_ua_debug_call_slots(const sip_ua_t *ua);
 /* Current Contact address (after NAT fix-up). */
 sip_addr_t sip_ua_debug_contact(const sip_ua_t *ua);
+/* Number of occupied subscription slots (incl. ones being un-SUBSCRIBEd). */
+int sip_ua_debug_sub_slots(const sip_ua_t *ua);

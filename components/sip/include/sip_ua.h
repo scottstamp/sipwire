@@ -23,6 +23,12 @@
  * Calls: at most one call is visible to the application at a time. A second
  * incoming INVITE while a call exists is answered 486 Busy Here internally.
  *
+ * Subscriptions (RFC 6665): up to SIP_UA_MAX_BLF "dialog" subscriptions (BLF,
+ * RFC 4235) and one "message-summary" subscription (MWI, RFC 3842). They are
+ * sent once the registration is up, refreshed, re-established with backoff
+ * and reported through the blf_state / mwi callbacks. Unsolicited
+ * message-summary NOTIFYs from the server are reported through mwi as well.
+ *
  * Functions return sip_err_t (0 = OK, negative = error); the phone component
  * maps these to esp_err_t. */
 
@@ -36,6 +42,9 @@ extern "C" {
 
 #define SIP_UA_USER_AGENT   "sipwire/0.1"
 #define SIP_UA_MAX_CODECS   4
+#define SIP_UA_MAX_BLF      8                   /* "dialog" subscriptions */
+#define SIP_UA_MAX_SUBS     (SIP_UA_MAX_BLF + 1) /* + one "message-summary" */
+#define SIP_UA_EXT_MAX      32                  /* BLF target incl. NUL */
 
 typedef enum {
     SIP_OK            = 0,
@@ -108,6 +117,15 @@ typedef enum {
 } sip_keepalive_mode_t;
 
 typedef int sip_call_handle_t; /* > 0 when valid */
+typedef int sip_sub_handle_t;  /* > 0 when valid */
+
+/* Busy lamp state of a watched extension (dialog package, RFC 4235). */
+typedef enum {
+    SIP_BLF_UNKNOWN,           /* not (yet) subscribed, rejected or failed */
+    SIP_BLF_IDLE,              /* no dialogs, or all terminated */
+    SIP_BLF_RINGING,           /* a dialog in "early" state (being called) */
+    SIP_BLF_BUSY,              /* a confirmed dialog (or placing a call) */
+} sip_blf_state_t;
 
 typedef struct {
     sip_ua_call_state_t state;
@@ -138,6 +156,12 @@ typedef struct {
     void (*call_state)(void *ctx, sip_call_handle_t call, const sip_call_info_t *info);
     /* Negotiated media became available or changed (answer, re-INVITE). */
     void (*media)(void *ctx, sip_call_handle_t call, const sip_media_info_t *media);
+    /* BLF state of a watched extension changed (also UNKNOWN when the
+     * subscription failed or ended and is being retried). */
+    void (*blf_state)(void *ctx, sip_sub_handle_t sub, const char *ext, sip_blf_state_t state);
+    /* Message waiting indication (subscription or unsolicited NOTIFY),
+     * reported when it changes. new_msgs / old_msgs: voice messages. */
+    void (*mwi)(void *ctx, bool waiting, int new_msgs, int old_msgs);
     void *ctx;
 } sip_ua_callbacks_t;
 
@@ -189,6 +213,9 @@ typedef struct {
      * are dropped (no rogue INVITEs from the LAN). */
     bool accept_any_source;
 
+    /* Subscriptions: requested Expires (s); 0 → 600. */
+    uint32_t sub_expires;
+
     /* Hooks (send and rand are mandatory) */
     sip_ua_send_fn send;
     void *send_ctx;
@@ -203,7 +230,7 @@ typedef struct {
 
 typedef struct sip_ua sip_ua_t;
 
-/* Allocates the UA once (fixed pools inside, ~40-45 KB; nothing else is
+/* Allocates the UA once (fixed pools inside, ~70 KB; nothing else is
  * allocated afterwards). Strings are copied. */
 sip_err_t sip_ua_create(const sip_ua_config_t *cfg, sip_ua_t **out);
 
@@ -223,7 +250,9 @@ void sip_ua_on_packet(sip_ua_t *ua, const void *data, size_t len, const sip_addr
  * backoff on failure) until sip_ua_unregister(). */
 sip_err_t sip_ua_register(sip_ua_t *ua);
 
-/* REGISTER with Expires: 0; state goes to NONE on response or timeout. */
+/* REGISTER with Expires: 0; state goes to NONE on response or timeout.
+ * Also ends every subscription (un-SUBSCRIBE with Expires: 0 where one is
+ * established); their handles become invalid, no further callbacks. */
 sip_err_t sip_ua_unregister(sip_ua_t *ua);
 
 sip_ua_reg_state_t sip_ua_reg_state(const sip_ua_t *ua);
@@ -251,6 +280,26 @@ sip_err_t sip_call_hold(sip_ua_t *ua, sip_call_handle_t call, bool hold);
 
 /* Current state of a call, SIP_UA_CALL_IDLE if unknown. */
 sip_ua_call_state_t sip_call_state(const sip_ua_t *ua, sip_call_handle_t call);
+
+/* ---- subscriptions ---- */
+
+/* Watch extension `ext` (user part, or a full "sip:" URI) with the "dialog"
+ * event package. The SUBSCRIBE goes out once registered (at most a few in
+ * flight at a time); state changes come through cb.blf_state, starting with
+ * UNKNOWN. SIP_ERR_NOMEM when SIP_UA_MAX_BLF are in use, SIP_ERR_ARG for an
+ * empty / too long / undialable ext. */
+sip_err_t sip_ua_subscribe_blf(sip_ua_t *ua, const char *ext, sip_sub_handle_t *out);
+
+/* Subscribe to our own mailbox ("message-summary" to our AOR). One at a
+ * time (SIP_ERR_BUSY if it exists). out may be NULL. */
+sip_err_t sip_ua_subscribe_mwi(sip_ua_t *ua, sip_sub_handle_t *out);
+
+/* End a subscription: un-SUBSCRIBE (Expires: 0) if established. The handle
+ * is invalid afterwards and reports nothing more. */
+sip_err_t sip_ua_unsubscribe(sip_ua_t *ua, sip_sub_handle_t sub);
+
+/* Last reported BLF state, SIP_BLF_UNKNOWN for an unknown handle. */
+sip_blf_state_t sip_ua_blf_state(const sip_ua_t *ua, sip_sub_handle_t sub);
 
 /* "a.b.c.d" helpers (host byte order). */
 bool sip_ip_parse(const char *s, uint32_t *ip);

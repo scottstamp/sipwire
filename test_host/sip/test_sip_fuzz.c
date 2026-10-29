@@ -1,6 +1,8 @@
 /* Deterministic mutation fuzzing of everything that touches network input:
- * the message parser, URI / name-addr / digest / SDP sub-parsers and the
- * full UA (fed through sip_ua_on_packet). Each mutated datagram lives in an
+ * the message parser, URI / name-addr / digest / SDP sub-parsers, the event
+ * package parsers (dialog-info XML, message-summary, Subscription-State) and
+ * the full UA (fed through sip_ua_on_packet, incl. NOTIFYs in live
+ * subscription dialogs). Each mutated datagram lives in an
  * exactly-sized heap block so ASan flags any out-of-bounds read. */
 
 #include <stdio.h>
@@ -9,6 +11,7 @@
 
 #include "sip_auth.h"
 #include "sip_dialog.h"
+#include "sip_event.h"
 #include "sip_msg.h"
 #include "sip_sdp.h"
 #include "sip_test_util.h"
@@ -88,6 +91,31 @@ static const char *seeds[] = {
     "Call-ID: fuzz1@10.0.0.1\r\n"
     "CSeq: 100 CANCEL\r\n"
     "Content-Length: 0\r\n\r\n",
+};
+
+/* event package bodies (fed to their parsers directly) */
+static const char *body_seeds[] = {
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n"
+    "<dialog-info xmlns=\"urn:ietf:params:xml:ns:dialog-info\" version=\"3\" state=\"full\" "
+    "entity=\"sip:1002@127.0.0.1:5080\">\r\n"
+    " <dialog id=\"1002\" direction=\"recipient\">\r\n"
+    "  <state>early</state>\r\n"
+    "  <local><target uri=\"sip:1002@x\"><param pname=\"+sip.rendering\" pvalue=\"no\"/></target></local>\r\n"
+    " </dialog>\r\n"
+    " <!-- c --><dialog id='b'><state>confirmed</state></dialog><dialog id=\"c\"/>\r\n"
+    "</dialog-info>\r\n",
+
+    "<d:dialog-info xmlns:d=\"urn:ietf:params:xml:ns:dialog-info\" version=\"9\" state=\"partial\">"
+    "<d:dialog id=\"1\"><d:state>terminated</d:state></d:dialog></d:dialog-info>",
+
+    "Messages-Waiting: yes\r\nMessage-Account: sip:1001@127.0.0.1\r\nVoice-Message: 2/8 (0/2)\r\n"
+    "Fax-Message: 1/1\r\n\r\nTo: <a@b>\r\n",
+};
+
+static const char *hdr_seeds[] = {
+    "active;expires=600",
+    "terminated;reason=noresource;retry-after=30",
+    "message-summary;id=12",
 };
 
 static const char interesting[] = ":;,\"<>\\\r\n \t%@=?/[]0z*\x7f\x80\xff";
@@ -217,6 +245,28 @@ static void test_fuzz_parser(void)
         sip_sdp_t s;
         sip_sdp_parse(&s, exact, len);
         free(exact);
+
+        /* event bodies and headers */
+        const char *bs = body_seeds[fx_rand(&rng) % (sizeof(body_seeds) / sizeof(body_seeds[0]))];
+        len = mutate(work, sizeof(work), bs, strlen(bs));
+        exact = malloc(len ? len : 1);
+        TEST_ASSERT_NOT_NULL(exact);
+        memcpy(exact, work, len);
+        sip_dlginfo_t di;
+        sip_msgsum_t ms;
+        sip_dlginfo_parse(exact, len, &di);
+        sip_msgsum_parse(exact, len, &ms);
+        free(exact);
+        const char *hs = hdr_seeds[fx_rand(&rng) % (sizeof(hdr_seeds) / sizeof(hdr_seeds[0]))];
+        len = mutate(work, sizeof(work), hs, strlen(hs));
+        exact = malloc(len ? len : 1);
+        TEST_ASSERT_NOT_NULL(exact);
+        memcpy(exact, work, len);
+        sip_sub_state_t ss;
+        sip_str_t pkg, id;
+        sip_sub_state_parse((sip_str_t){ exact, len }, &ss);
+        sip_event_parse((sip_str_t){ exact, len }, &pkg, &id);
+        free(exact);
     }
     printf("fuzz: %d/%d mutated messages still parsed\n", ok, FUZZ_ITERATIONS);
     TEST_ASSERT_TRUE(ok > 0);
@@ -259,10 +309,108 @@ static void test_fuzz_ua(void)
     fx_free(&f);
 }
 
+/* NOTIFY for the subscription whose SUBSCRIBE is f->sent[idx] */
+static void notify_seed(fx_t *f, int idx, const char *event, const char *ctype, const char *body, char *out,
+                        size_t cap)
+{
+    const sip_msg_t *m = fx_parse(f, idx);
+    snprintf(out, cap,
+             "NOTIFY sip:1001@10.0.0.2:5060 SIP/2.0\r\n"
+             "Via: SIP/2.0/UDP 10.0.0.1:5060;rport;branch=z9hG4bKnf1\r\n"
+             "Max-Forwards: 70\r\n"
+             "From: <sip:1002@10.0.0.1>;tag=srv\r\n"
+             "To: <sip:1001@10.0.0.1>;tag=%.*s\r\n"
+             "Contact: <sip:1002@10.0.0.1:5060>\r\n"
+             "Call-ID: %.*s\r\n"
+             "CSeq: 7 NOTIFY\r\n"
+             "Event: %s\r\n"
+             "Subscription-State: active;expires=600\r\n"
+             "Content-Type: %s\r\n"
+             "Content-Length: %u\r\n\r\n%s",
+             (int)m->from.tag.len, m->from.tag.p, (int)m->call_id.len, m->call_id.p, event, ctype,
+             (unsigned)strlen(body), body);
+}
+
+/* NOTIFYs (and their mutations) into live BLF / MWI subscriptions, plus
+ * unsolicited MWI, with subscribe / unsubscribe churn in between. */
+static void test_fuzz_notify(void)
+{
+    static fx_t f;
+    static char work[SIP_MAX_MSG_IN + 256];
+    static char seed[4][2048];
+    int n_blf = 0, n_mwi = 0;
+    fx_init(&f, quiet_cfg);
+    sip_ua_register(f.ua);
+    fx_reply(&f, 0, 200, "s1", "Expires: 300\r\n", NULL);
+    f.auto_reg = true;
+    for (int it = 0; it < FUZZ_ITERATIONS / 5; it++) {
+        if (it % 500 == 0) {
+            /* (re)start subscriptions and rebuild seeds for their dialogs */
+            fx_clear_sent(&f);
+            sip_ua_unregister(f.ua);
+            fx_advance(&f, 33000); /* un-SUBSCRIBEs (never answered) time out */
+            sip_ua_register(f.ua);
+            fx_advance(&f, 20);
+            TEST_ASSERT_EQUAL(SIP_UA_REG_REGISTERED, sip_ua_reg_state(f.ua));
+            fx_clear_sent(&f);
+            sip_sub_handle_t h;
+            TEST_ASSERT_EQUAL(SIP_OK, sip_ua_subscribe_blf(f.ua, "1002", &h));
+            TEST_ASSERT_EQUAL(SIP_OK, sip_ua_subscribe_mwi(f.ua, &h));
+            int b = -1, w = -1;
+            for (int i = 0; i < f.n_sent; i++) {
+                if (strncmp(f.sent[i].buf, "SUBSCRIBE", 9) == 0) {
+                    if (strstr(f.sent[i].buf, "Event: dialog")) {
+                        b = i;
+                    } else {
+                        w = i;
+                    }
+                }
+            }
+            TEST_ASSERT_TRUE(b >= 0 && w >= 0);
+            notify_seed(&f, b, "dialog", "application/dialog-info+xml", body_seeds[0], seed[0], sizeof(seed[0]));
+            notify_seed(&f, b, "dialog", "application/dialog-info+xml", body_seeds[1], seed[1], sizeof(seed[1]));
+            notify_seed(&f, w, "message-summary", "application/simple-message-summary", body_seeds[2], seed[2],
+                        sizeof(seed[2]));
+            snprintf(seed[3], sizeof(seed[3]),
+                     "NOTIFY sip:1001@10.0.0.2:5060 SIP/2.0\r\n"
+                     "Via: SIP/2.0/UDP 10.0.0.1:5060;rport;branch=z9hG4bKnf2\r\n"
+                     "From: <sip:1001@10.0.0.1>;tag=u\r\nTo: <sip:1001@10.0.0.2:5060>\r\n"
+                     "Call-ID: mwi@x\r\nCSeq: 1 NOTIFY\r\nEvent: message-summary\r\n"
+                     "Content-Type: application/simple-message-summary\r\n"
+                     "Content-Length: %u\r\n\r\n%s",
+                     (unsigned)strlen(body_seeds[2]), body_seeds[2]);
+            fx_reply(&f, b, 200, "srv", "Expires: 600\r\n", NULL);
+            fx_reply(&f, w, 200, "srv", "Expires: 600\r\n", NULL);
+        }
+        const char *sd = seed[fx_rand(&rng) % 4];
+        size_t len = it % 10 == 0 ? strlen(sd) : mutate(work, sizeof(work), sd, strlen(sd));
+        char *exact = malloc(len ? len : 1);
+        TEST_ASSERT_NOT_NULL(exact);
+        memcpy(exact, it % 10 == 0 ? sd : work, len);
+        sip_ua_on_packet(f.ua, exact, len, &f.server);
+        free(exact);
+        if (f.n_sent > FX_MAX_SENT / 2) {
+            fx_clear_sent(&f);
+        }
+        if (it % 13 == 0) {
+            fx_advance(&f, 50 + fx_rand(&rng) % 5000);
+        }
+        n_blf += fx_count_ev(&f, FXE_BLF);
+        n_mwi += fx_count_ev(&f, FXE_MWI);
+        f.n_ev = 0;
+    }
+    printf("fuzz: %d BLF and %d MWI reports from mutated NOTIFYs\n", n_blf, n_mwi);
+    TEST_ASSERT_TRUE(n_blf > 10 && n_mwi > 10);
+    fx_clear_sent(&f);
+    fx_advance(&f, 60000);
+    fx_free(&f);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_fuzz_parser);
     RUN_TEST(test_fuzz_ua);
+    RUN_TEST(test_fuzz_notify);
     return UNITY_END();
 }

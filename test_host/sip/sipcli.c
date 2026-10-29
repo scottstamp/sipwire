@@ -24,6 +24,13 @@
  *   expect-log:<text>              a log line contained <text>
  *   shell:<cmd>                    run cmd via /bin/sh, must exit 0
  *   echo:<text>                    print a scenario header
+ *   subscribe-blf:<ext>            BLF ("dialog") subscription to <ext>
+ *   unsubscribe-blf:<ext>
+ *   expect-blf:<ext>:<state>[:<sec>]  wait (10 s) until <ext> reports
+ *                                  unknown|idle|ringing|busy
+ *   subscribe-mwi                  "message-summary" subscription (our AOR)
+ *   expect-mwi:<yes|no>[:<min_new>[:<sec>]]  wait (10 s) for that MWI state
+ *                                  (subscription or unsolicited NOTIFY)
  */
 
 #include <errno.h>
@@ -40,7 +47,7 @@
 #include "rtp.h"
 #include "sip_ua.h"
 
-#define MAX_LOG 512
+#define MAX_LOG 20000
 
 static sip_ua_t *ua;
 static sip_udp_t udp;
@@ -55,6 +62,17 @@ static sip_media_info_t media;
 static bool got_incoming;
 static char *logs[MAX_LOG];
 static int n_logs;
+
+#define MAX_BLF 8
+static struct {
+    char ext[32];
+    sip_sub_handle_t h;
+    sip_blf_state_t st;
+} blf[MAX_BLF];
+static int n_blf;
+static bool mwi_seen, mwi_waiting;
+static int mwi_new, mwi_old;
+static const char *blf_names[] = { "unknown", "idle", "ringing", "busy" };
 
 static const char *state_names[] = { "idle", "dialing", "ringing_out", "ringing_in", "active", "held", "ended" };
 static const char *reason_names[] = { "none", "local", "remote", "rejected", "cancelled", "timeout", "error" };
@@ -73,7 +91,11 @@ static uint32_t rand_cb(void *ctx)
     (void)ctx;
     static uint32_t s;
     if (!s) {
-        s = (uint32_t)now_ms() ^ 0x9e3779b9u;
+        /* several sipcli run side by side (integration.sh): mix in the pid */
+        s = ((uint32_t)now_ms() ^ 0x9e3779b9u) + (uint32_t)getpid() * 2654435761u;
+        if (!s) {
+            s = 1;
+        }
     }
     s ^= s << 13;
     s ^= s >> 17;
@@ -127,6 +149,59 @@ static void media_cb(void *ctx, sip_call_handle_t call, const sip_media_info_t *
            (unsigned)m->ptime_ms, dir_names[m->direction], (unsigned)m->local_port, m->early ? " early" : "");
     media = *m;
     have_media = true;
+}
+
+static void blf_cb(void *ctx, sip_sub_handle_t sub, const char *ext, sip_blf_state_t st)
+{
+    (void)ctx;
+    printf("EVENT blf %s %s\n", ext, blf_names[st]);
+    for (int i = 0; i < n_blf; i++) {
+        if (blf[i].h == sub) {
+            blf[i].st = st;
+        }
+    }
+}
+
+static void mwi_cb(void *ctx, bool waiting, int new_msgs, int old_msgs)
+{
+    (void)ctx;
+    printf("EVENT mwi %s new=%d old=%d\n", waiting ? "yes" : "no", new_msgs, old_msgs);
+    mwi_seen = true;
+    mwi_waiting = waiting;
+    mwi_new = new_msgs;
+    mwi_old = old_msgs;
+}
+
+typedef struct {
+    int idx;
+    sip_blf_state_t st;
+} blf_want_t;
+
+static bool blf_is(const void *a)
+{
+    const blf_want_t *w = a;
+    return blf[w->idx].st == w->st;
+}
+
+typedef struct {
+    bool waiting;
+    int min_new;
+} mwi_want_t;
+
+static bool mwi_is(const void *a)
+{
+    const mwi_want_t *w = a;
+    return mwi_seen && mwi_waiting == w->waiting && mwi_new >= w->min_new;
+}
+
+static int blf_find(const char *ext)
+{
+    for (int i = 0; i < n_blf; i++) {
+        if (!strcmp(blf[i].ext, ext)) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 static void run_for(uint64_t ms)
@@ -374,6 +449,64 @@ static bool step(const char *st)
         printf("FAIL: no log line contains \"%s\"\n", arg);
         return false;
     }
+    if (!strcmp(cmd, "subscribe-blf") && arg) {
+        if (n_blf == MAX_BLF || strlen(arg) >= sizeof(blf[0].ext)) {
+            return false;
+        }
+        snprintf(blf[n_blf].ext, sizeof(blf[n_blf].ext), "%s", arg);
+        blf[n_blf].st = SIP_BLF_UNKNOWN;
+        return sip_ua_subscribe_blf(ua, arg, &blf[n_blf++].h) == SIP_OK;
+    }
+    if (!strcmp(cmd, "unsubscribe-blf") && arg) {
+        int i = blf_find(arg);
+        return i >= 0 && sip_ua_unsubscribe(ua, blf[i].h) == SIP_OK;
+    }
+    if (!strcmp(cmd, "expect-blf") && arg) {
+        char *st_name = strchr(arg, ':');
+        if (!st_name) {
+            return false;
+        }
+        *st_name++ = '\0';
+        char *secs = strchr(st_name, ':');
+        if (secs) {
+            *secs++ = '\0';
+        }
+        blf_want_t w = { blf_find(arg), SIP_BLF_UNKNOWN };
+        bool known = false;
+        for (int i = 0; i < 4; i++) {
+            if (!strcmp(st_name, blf_names[i])) {
+                w.st = (sip_blf_state_t)i;
+                known = true;
+            }
+        }
+        if (w.idx < 0 || !known) {
+            return false;
+        }
+        bool ok = blf_is(&w) || run_until(blf_is, &w, (uint64_t)parse_secs(secs, 10) * 1000u);
+        if (!ok) {
+            printf("FAIL blf %s: is %s, want %s\n", arg, blf_names[blf[w.idx].st], st_name);
+        }
+        return ok;
+    }
+    if (!strcmp(cmd, "subscribe-mwi")) {
+        return sip_ua_subscribe_mwi(ua, NULL) == SIP_OK;
+    }
+    if (!strcmp(cmd, "expect-mwi") && arg) {
+        char *rest = strchr(arg, ':');
+        if (rest) {
+            *rest++ = '\0';
+        }
+        char *secs = rest ? strchr(rest, ':') : NULL;
+        if (secs) {
+            *secs++ = '\0';
+        }
+        mwi_want_t w = { !strcmp(arg, "yes"), rest ? atoi(rest) : 0 };
+        bool ok = mwi_is(&w) || run_until(mwi_is, &w, (uint64_t)parse_secs(secs, 10) * 1000u);
+        if (!ok) {
+            printf("FAIL mwi: seen=%d waiting=%d new=%d old=%d\n", mwi_seen, mwi_waiting, mwi_new, mwi_old);
+        }
+        return ok;
+    }
     if (!strcmp(cmd, "shell") && arg) {
         int rc = system(st + 6);
         return rc == 0;
@@ -460,7 +593,8 @@ int main(int argc, char **argv)
         .rand = rand_cb,
         .log = log_cb,
         .log_level = SIP_LOG_VERBOSE,
-        .cb = { reg_cb, incoming_cb, call_cb, media_cb, NULL },
+        .cb = { .reg_state = reg_cb, .incoming_call = incoming_cb, .call_state = call_cb, .media = media_cb,
+                .blf_state = blf_cb, .mwi = mwi_cb },
     };
     memcpy(cfg.codecs, codecs, sizeof(cfg.codecs));
     cfg.n_codecs = (uint8_t)n_codecs;

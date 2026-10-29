@@ -113,6 +113,9 @@ typedef struct {
     sip_str_t supported;
     sip_str_t require;
     sip_str_t user_agent;
+    sip_str_t event;        /* Event (RFC 6665), whole value incl. params */
+    sip_str_t sub_state;    /* Subscription-State, whole value */
+    int retry_after;        /* Retry-After seconds, -1 absent */
     sip_str_t body;
 } sip_msg_t;
 

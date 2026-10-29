@@ -38,7 +38,7 @@ STATE="$(mktemp -d /tmp/sipwire-ast.XXXXXX)"
 mkdir -p "$STATE"/{etc,cache,varlib,db,keys,agi,spool,run,log}
 sed -e "s|@STATE@|$STATE|g" -e "s|@MODDIR@|$MODDIR|g" -e "s|@DATADIR@|$DATADIR|g" \
     "$HERE/asterisk/asterisk.conf.in" > "$STATE/etc/asterisk.conf"
-cp "$HERE"/asterisk/{modules,pjsip,extensions,rtp,logger}.conf "$STATE/etc/"
+cp "$HERE"/asterisk/{modules,pjsip,extensions,rtp,logger,voicemail}.conf "$STATE/etc/"
 REC="$STATE/rec"
 printf '[globals]\nSIPWIRE_REC=%s\n' "$REC" >> "$STATE/etc/extensions.conf"
 CONF="$STATE/etc/asterisk.conf"
@@ -149,6 +149,58 @@ if [ "$rc" -eq 0 ]; then
         register dial:600 wait:active expect-media:0 tone:1000:3 hangup sleep:1 unregister \
         2>&1 | tee -a "$STATE/sipcli.log" | grep -E "^(===|STEP|EVENT|RESULT|FAIL|TONE|LOG \[[EW]\])"
     rc=${PIPESTATUS[0]}
+    set -e
+fi
+
+if [ "$rc" -eq 0 ]; then
+    # BLF + MWI. 1002 runs in the background and answers the call Asterisk
+    # originates to it; 1001 watches 1002 (dialog package) and its own mailbox
+    # (message-summary); 1003 leaves the voicemails.
+    CLI=("$SIPCLI" "${V[@]}" --server "127.0.0.1:$PORT" --local-ip 127.0.0.1)
+    VMDIR="$STATE/spool/voicemail/default"
+    WAIT_1002="for i in \$(seq 50); do $ASTX 'pjsip show contacts' | grep -q '1002/sip:1002@' && exit 0; sleep 0.2; done; exit 1"
+    LEAVE_VM() { # LEAVE_VM <mailbox digit>: 1003 calls 700<d> and sends a tone for 3 s
+        echo "(${CLI[*]} --user 1003 --pass secret1003 --rtp 40008 register dial:700$1 wait:active send-tone:1000:3 hangup sleep:1 unregister >>'$STATE/sipcli-1003.log' 2>&1 &)"
+    }
+    set +e
+    "${CLI[@]}" --user 1002 --pass secret1002 --rtp 40004 \
+        register incoming:60 sleep:1 answer wait:active wait:ended:15 sleep:1 unregister \
+        >"$STATE/sipcli-1002.log" 2>&1 &
+    B_PID=$!
+    "${CLI[@]}" --user 1001 --pass secret1001 --rtp 40006 \
+        "echo:7 BLF: 1001 watches 1002; Asterisk calls 1002, it answers, Asterisk hangs up" \
+        register subscribe-blf:1002 subscribe-blf:1003 expect-blf:1002:idle:10 expect-blf:1003:idle:10 \
+        "shell:$WAIT_1002" \
+        "shell:$ASTX 'pjsip show subscriptions inbound' | tee /dev/stderr | grep -q '1001'" \
+        "shell:($ASTX 'channel originate PJSIP/1002 application Wait 3' >/dev/null 2>&1 &)" \
+        expect-blf:1002:ringing:10 expect-blf:1002:busy:10 expect-blf:1002:idle:15 expect-blf:1003:idle \
+        unsubscribe-blf:1003 sleep:1 \
+        \
+        "echo:8 MWI: 1001 subscribes to its mailbox; 1003 leaves a voicemail, then it is deleted" \
+        subscribe-mwi sleep:1 "expect-log:mwi 1001: subscribed" expect-mwi:no:0:10 \
+        "shell:$(LEAVE_VM 1)" \
+        expect-mwi:yes:1:30 \
+        "shell:ls $VMDIR/1001/INBOX/ && rm -f $VMDIR/1001/INBOX/*" \
+        expect-mwi:no:0:15 \
+        \
+        "echo:8b unregister ends the subscriptions (un-SUBSCRIBE, Expires: 0)" \
+        unregister sleep:1 \
+        "shell:! $ASTX 'pjsip show subscriptions inbound' | grep -q '1001'" \
+        2>&1 | tee -a "$STATE/sipcli.log" | grep -E "^(===|STEP|EVENT|RESULT|FAIL|LOG \[[EW]\])"
+    rc=${PIPESTATUS[0]}
+    wait "$B_PID"
+    b_rc=$?
+    if [ "$rc" -eq 0 ] && [ "$b_rc" -ne 0 ]; then
+        echo "--- the watched phone (1002) failed:"; tail -n 20 "$STATE/sipcli-1002.log"; rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        "${CLI[@]}" --user 1002 --pass secret1002 --rtp 40004 \
+            "echo:9 unsolicited MWI: 1002 has no subscription; 1003 leaves it a voicemail" \
+            register "shell:$(LEAVE_VM 2)" expect-mwi:yes:1:30 \
+            "shell:rm -f $VMDIR/1002/INBOX/*" expect-mwi:no:0:15 unregister \
+            2>&1 | tee -a "$STATE/sipcli.log" | grep -E "^(===|STEP|EVENT|RESULT|FAIL|LOG \[[EW]\])"
+        rc=${PIPESTATUS[0]}
+    fi
     set -e
 fi
 

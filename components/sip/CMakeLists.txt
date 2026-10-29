@@ -6,6 +6,8 @@ idf_component_register(
          "sip_txn.c"
          "sip_dialog.c"
          "sip_ua.c"
+         "sip_sub.c"
+         "sip_event.c"
          "sip_udp.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "private_include"

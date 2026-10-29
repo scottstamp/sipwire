@@ -674,6 +674,7 @@ typedef enum {
     H_VIA, H_FROM, H_TO, H_CALL_ID, H_CSEQ, H_CONTACT, H_ROUTE, H_RECORD_ROUTE,
     H_CONTENT_LENGTH, H_CONTENT_TYPE, H_WWW_AUTH, H_PROXY_AUTH, H_EXPIRES,
     H_MIN_EXPIRES, H_MAX_FORWARDS, H_ALLOW, H_SUPPORTED, H_REQUIRE, H_USER_AGENT,
+    H_EVENT, H_SUB_STATE, H_RETRY_AFTER,
 } hdr_id_t;
 
 static const struct {
@@ -700,7 +701,10 @@ static const struct {
     { "Supported", "k", H_SUPPORTED },
     { "Require", NULL, H_REQUIRE },
     { "User-Agent", NULL, H_USER_AGENT },
-    /* "s" (Subject), "e" (Content-Encoding), "o", "r", "u" compact forms map
+    { "Event", "o", H_EVENT },
+    { "Subscription-State", NULL, H_SUB_STATE },
+    { "Retry-After", NULL, H_RETRY_AFTER },
+    /* "s" (Subject), "e" (Content-Encoding), "r", "u" compact forms map
      * to headers we ignore. */
 };
 
@@ -856,6 +860,27 @@ static int header_apply(sip_msg_t *m, sip_str_t name, sip_str_t v)
     case H_USER_AGENT:
         m->user_agent = v;
         return 0;
+    case H_EVENT:
+        return set_single(&m->event, v) ? 0 : -1;
+    case H_SUB_STATE:
+        return set_single(&m->sub_state, v) ? 0 : -1;
+    case H_RETRY_AFTER: {
+        /* Retry-After: delta-seconds [comment] *(;param) -- only the number */
+        sip_str_t t = sip_str_trim(v);
+        size_t n = 0;
+        while (n < t.len && is_digit(t.p[n])) {
+            n++;
+        }
+        if (m->retry_after != -1) {
+            return -1;
+        }
+        uint32_t x;
+        if (n == 0 || !sip_str_to_u32((sip_str_t){ t.p, n }, 0x7fffffff, &x)) {
+            return 0; /* malformed: ignore, it is only a hint */
+        }
+        m->retry_after = (int)x;
+        return 0;
+    }
     case H_UNKNOWN:
         return 0;
     }
@@ -933,6 +958,7 @@ sip_parse_result_t sip_msg_parse(sip_msg_t *m, char *buf, size_t len)
     m->expires = -1;
     m->min_expires = -1;
     m->max_forwards = -1;
+    m->retry_after = -1;
     if (!buf || len == 0) {
         return SIP_PARSE_ERR;
     }

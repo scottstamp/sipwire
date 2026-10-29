@@ -1064,7 +1064,7 @@ static void test_out_of_dialog_requests(void)
                "Call-ID: q1@x\r\nCSeq: 1 OPTIONS\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n");
     int r = fx_find(f, "SIP/2.0 200", 0);
     TEST_ASSERT_TRUE(r >= 0);
-    TEST_ASSERT_EQUAL_STRING("INVITE, ACK, BYE, CANCEL, OPTIONS, INFO", fx_hdr(f, r, "Allow"));
+    TEST_ASSERT_EQUAL_STRING("INVITE, ACK, BYE, CANCEL, OPTIONS, INFO, NOTIFY", fx_hdr(f, r, "Allow"));
     TEST_ASSERT_TRUE(fx_parse(f, r)->to.tag.len > 0);
     TEST_ASSERT_EQUAL_HEX32(FX_SERVER_IP, f->sent[r].to.ip);
     inject_fmt("FOO sip:1001@10.0.0.2 SIP/2.0\r\nVia: SIP/2.0/UDP 10.0.0.1;branch=z9hG4bKf\r\n"
