@@ -50,6 +50,11 @@ Open development work (see `docs/PLAN.md` for the full list):
   use the 9.9 MB `storage` partition if storage is needed).
 - Review task priorities, DMA sizing, PSRAM placement (`[core]`).
 - SIP over TCP/TLS, SRTP, RTCP (optional).
+- QEMU smoke: 1 of 10 runs (2026-10-29, after the console read fix) froze
+  during OTA image verification (after `esp_image: segment 3`, no output for
+  60 s; run.py disables the QEMU watchdog so a hang never resets). Not seen
+  again; watch for it. Possibly related to PSRAM being enabled in QEMU since
+  6f5fb3f.
 - Known small gaps: no SIP INFO DTMF fallback; RTP timestamps jump after
   hold; speaker volume preset not persisted; re-INVITE glare (491) not
   retried; https OTA untested.
