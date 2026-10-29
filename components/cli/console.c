@@ -1,17 +1,21 @@
 #include "console.h"
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/select.h>
+#include <unistd.h>
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "linenoise/linenoise.h"
 #include "net.h"
 #include "sdkconfig.h"
 #include "settings.h"
@@ -362,6 +366,25 @@ static int cmd_reboot(int argc, char **argv)
     return 0;
 }
 
+/* linenoise ends the line on any read() <= 0, and the REPL's own reader does a
+ * non-blocking read after select(), which can come back EAGAIN: the line got
+ * split mid-command and both halves ran. Wait until a byte really arrives. */
+static ssize_t console_read(int fd, void *buf, size_t max_bytes)
+{
+    for (;;) {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        if (select(fd + 1, &rfds, NULL, NULL, NULL) < 0 && errno != EINTR) {
+            return -1;
+        }
+        ssize_t n = read(fd, buf, max_bytes);
+        if (n > 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+            return n;
+        }
+    }
+}
+
 /* ---- public API ---- */
 
 esp_err_t console_register_command(const esp_console_cmd_t *cmd)
@@ -401,6 +424,7 @@ esp_err_t console_start(void)
 
     /* Picks whichever console is configured (UART, USB-serial-JTAG, USB CDC). */
     ESP_RETURN_ON_ERROR(esp_console_new_repl_stdio(&repl_cfg, &repl), TAG, "create repl");
+    linenoiseSetReadFunction(console_read);     /* after the REPL installed its own */
     ESP_RETURN_ON_ERROR(esp_console_start_repl(repl), TAG, "start repl");
     return ESP_OK;
 }

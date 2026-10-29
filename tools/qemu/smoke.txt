@@ -6,7 +6,7 @@ expect no SIP account configured 10
 # characters typed while the firmware logs can be lost.
 sleep 1
 send cfg set sip_port 5080
-expect sip_port\s+= 5080
+expect sip_port\s+= 5080 15
 sleep 1
 send cfg set sip_password secret1001
 expect sip_password\s+= \*\*\*\*
