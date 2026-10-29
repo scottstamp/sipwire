@@ -134,39 +134,28 @@ menu "Sipwire board"
             default 14
     endmenu
 
-    menu "Echo cancellation (esp-sr AEC)"
+    menu "Echo cancellation"
         config SIPWIRE_AEC
             bool "Acoustic echo canceller on the mic path"
             default y
             help
-                Cancels the speaker-to-mic echo with esp-sr's AEC (linear
-                filter + residual suppression). Switched live by the `aec`
-                setting; off, the mic path is untouched.
-        choice SIPWIRE_AEC_MODE
-            prompt "AEC mode"
+                Cancels the speaker-to-mic echo with SpeexDSP's echo canceller
+                (vendored in components/aec: adaptive MDF filter + residual
+                echo suppressor). Switched live by the `aec` setting; off, the
+                mic path is untouched.
+        config SIPWIRE_AEC_TAIL
+            int "Echo tail (samples at 16 kHz)"
             depends on SIPWIRE_AEC
-            default SIPWIRE_AEC_MODE_FD_LOW_COST
+            range 320 5120
+            default 1280
             help
-                FD (full duplex) modes work on 32 ms blocks (+28 ms mic-path
-                latency), VoIP modes on 16 ms blocks (+12 ms) at about twice
-                the CPU. Low cost is what esp-sr recommends.
-            config SIPWIRE_AEC_MODE_FD_LOW_COST
-                bool "Full duplex, low cost"
-            config SIPWIRE_AEC_MODE_FD_HIGH_PERF
-                bool "Full duplex, high performance"
-            config SIPWIRE_AEC_MODE_VOIP_LOW_COST
-                bool "VoIP, low cost"
-            config SIPWIRE_AEC_MODE_VOIP_HIGH_PERF
-                bool "VoIP, high performance"
-        endchoice
-        config SIPWIRE_AEC_FILTER_LEN
-            int "Filter length (esp-sr filter_length)"
-            depends on SIPWIRE_AEC
-            range 1 8
-            default 4
-            help
-                Echo tail the adaptive filter covers, in esp-sr's units
-                (4 is its recommendation). Longer costs more CPU.
+                Echo path length the adaptive filter models, rounded up to
+                whole 20 ms frames (320 samples). The reference is read 160
+                samples (10 ms) ahead of the nominal speaker->mic delay, so
+                the default 1280 (80 ms) covers echo up to ~70 ms after it.
+                Each 320 samples costs ~7.7 KB of RAM and a little CPU; the
+                FFTs, which do not depend on the tail, dominate the cost.
+                Echo beyond the tail is left to the residual suppressor.
     endmenu
 
     menu "Keypad (3x4 matrix)"

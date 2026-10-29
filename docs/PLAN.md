@@ -74,14 +74,23 @@ inside a phase are parallel unless noted.
 - [cheap] Contacts + call log on SD (CSV/JSON), speed dial from keypad.
 
 ## Phase 5 — Hardening / nice-to-have
-- [x] [core] AEC: esp-sr AEC (`espressif/esp-sr` ~2.6, Espressif MIT licence,
-  AEC API only) between DC block and the encoder; fixed 640-sample reference delay
-  (shared I2S clock), 20 ms frames adapted to esp-sr's blocks; setting `aec`
-  (default on, live), console `aec` (on/off, frames, µs/frame, ERL/ERLE, delay /
-  NLP tuning); Kconfig mode/filter length. QEMU runs the plumbing with esp-sr
-  bypassed. Hardware: A/B with `cfg set aec false/true` on a call, read `aec`
-  (avg µs/frame, ERLE), `cpu` for core-1 headroom; if ERLE stays ~0 sweep
-  `aec delay` (e.g. 560..800). Noise suppression still open.
+- [x] [core] AEC: SpeexDSP 1.2.1 echo canceller + residual echo suppressor, vendored
+  unmodified (BSD-3) in the pure-C, host-tested `components/aec` (replaces esp-sr: no
+  Espressif closed-source audio libraries). One 20 ms frame per call (FFT 640), tail
+  Kconfig `SIPWIRE_AEC_TAIL` (1280), +20 ms latency while the suppressor is on; fixed
+  640-sample reference delay (shared I2S clock) read 160 samples early, xrun shift;
+  setting `aec` (default **off** until verified on hardware, live), `aec_suppress` /
+  `aec_suppress_act` (40 / 15 dB); console `aec` (on/off, frames, µs/frame avg/max, ref
+  late, xruns, resets, heap, ERL/ERLE), `aec delay`, `aec suppress`. Host tests: ERLE
+  ~25 dB linear / ~39 dB with the suppressor on a synthetic echo with speaker distortion
+  and ±40 samples of misalignment, double talk, far-end silence. QEMU runs the real code.
+  CPU estimate from QEMU instruction counts (ARCHITECTURE.md): ~5-6 ms per frame on
+  core 1 with the suppressor, ~3-3.6 ms linear only; above the 4 ms aim, and the tail
+  is not the lever (the FFTs and the suppressor's per-bin math are fixed costs). Hardware: `cfg set aec true`, a call with far-end speech, read
+  `aec` (avg/max µs/frame, ERLE, resets, heap split), `cpu` for core-1 headroom, `free`;
+  compare with `cfg set aec_suppress 0` + `cfg set aec_suppress_act 0` (linear only);
+  if ERLE stays ~0 sweep `aec delay` (480..960). Noise suppression available
+  (`aec suppress 40 15 <dB>`), off by default.
 - [x] [core] G.722 (wideband, 64 kbit/s): own `codec/g722.c` (SpanDSP/Asterisk
   public-domain code, bit-exact with Asterisk), 16 kHz audio path end to end,
   G.711 resampled 16↔8 kHz in `rtp`; SDP offers `9 0 8 101`; `codec_pref`
@@ -122,6 +131,7 @@ integration, and the QEMU smoke test (`tools/qemu/README.md`).
 - Set pins/flash size in `sdkconfig.defaults` for the real board; verify panel
   orientation/colors, touch axes, mic shift/slot, amp pops (see component notes).
 - Verify the touch calibration screen on hardware (done in sim + QEMU build only).
-- Tune AEC on the device (Phase 5): delay, NLP level, mode vs core-1 load.
+- Verify and tune AEC on the device (Phase 5): enable it (`cfg set aec true`), delay,
+  suppression levels, tail vs core-1 load and internal RAM.
 - Verify OTA on hardware (see Phase 5) and serve `build/sipwire.bin` as `ota.bin`
   at the default URL (`python -m http.server 8090`).

@@ -10,6 +10,8 @@ typedef enum {
     SIP_TRANSPORT_TCP = 1,
 } sip_transport_t;
 
+#define SETTINGS_AEC_SUPPRESS_MAX  90  /* dB, the canceller's limit (AEC_SUPPRESS_MIN_DB) */
+
 typedef struct {
     /* wifi */
     char wifi_ssid[33];
@@ -31,7 +33,9 @@ typedef struct {
     uint8_t ring_volume;       /* 0-100 */
     uint8_t call_volume;       /* 0-100 */
     uint8_t mic_gain;          /* 0-100 */
-    bool aec;                  /* acoustic echo canceller on the mic path, default true */
+    bool aec;                  /* acoustic echo canceller on the mic path, default false */
+    uint8_t aec_suppress;      /* residual echo attenuation, dB (0-90), far end alone; default 40 */
+    uint8_t aec_suppress_act;  /* same while both talk; default 15; both 0 = linear filter only */
     /* display */
     uint8_t backlight;         /* 0-100 */
     uint16_t backlight_timeout_s;

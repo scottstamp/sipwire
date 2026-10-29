@@ -2,5 +2,5 @@
 CONFIG_SIPWIRE_QEMU=y
 CONFIG_ETH_USE_OPENETH=y
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
-# QEMU emulates quad (not octal) PSRAM; esp-sr AEC needs PSRAM
+# PSRAM as on the device, but QEMU emulates quad (not octal) mode
 CONFIG_SPIRAM_MODE_QUAD=y

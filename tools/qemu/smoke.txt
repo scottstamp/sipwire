@@ -20,6 +20,13 @@ expect registration: registered 20
 send sip
 expect registration: registered
 shell $ASTX 'pjsip show contacts' | tee /dev/stderr | grep -q '1001/sip:1001@'
+# echo canceller: off by default; switch it on (allocates it) for the calls below.
+# The reply and the audio component's log line race: expect both, any order.
+sleep 1
+send cfg set aec true
+expect (aec\s+= true|audio: aec: SpeexDSP, tail 1280) 5
+expect (aec\s+= true|audio: aec: SpeexDSP, tail 1280) 5
+sleep 1
 
 # 1: echo test (G.722 negotiated), hold/resume, dtmf, local hangup
 send call 600
@@ -33,11 +40,12 @@ sleep 2
 send rtp
 expect ^active, pt 9 \(G722\), local 5
 expect ^rx [1-9]\d* lost 5
-# echo canceller on the call's mic path (esp-sr itself is pass-through under QEMU), toggled live
+# echo canceller running on the call's mic path (the real SpeexDSP code; the
+# QEMU mic is silent), toggled live
 send aec
 expect ^aec: on, running 5
-expect ^frames [1-9]\d*, blocks [1-9]\d*, avg \d+ us/frame 5
-expect ^ref late 0, i2s xruns tx 0 rx 0 5
+expect ^frames [1-9]\d*, avg \d+ us/frame, max \d+ us/frame, resets 0 5
+expect ^ref late 0, i2s xruns tx 0 rx 0, heap internal [1-9]\d* B 5
 send cfg set aec false
 expect aec\s+= false 5
 sleep 1

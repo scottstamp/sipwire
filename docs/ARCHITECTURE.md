@@ -7,7 +7,9 @@ components/
   board/             Kconfig pins, board_init(), bus bring-up (SPI, I2S, SDMMC)
   display/           ILI9341 + XPT2046 via esp_lcd + esp_lvgl_port
   keypad/            matrix scanner → key events (press/release/long/repeat)
-  audio/             I2S in/out tasks (16 kHz), gain, DC block, tone gen, echo canceller (esp-sr AEC)
+  audio/             I2S in/out tasks (16 kHz), gain, DC block, tone gen, echo canceller glue
+  aec/               echo canceller: vendored SpeexDSP (MDF + residual suppressor), reference
+                     ring. Pure C, host-testable
   codec/             G.722 (64k), G.711 µ/A-law, 2:1 half-band resampler. Pure C, host-testable
   rtp/               RTP tx/rx, RFC 3550, RFC 2833 DTMF, adaptive jitter buffer
   sip/               minimal SIP UA: parser, digest auth, transactions, dialogs,
@@ -85,26 +87,62 @@ mic → I2S RX (16 kHz) → DC block → AEC → mute → rtp: G.722 enc
 RTP rx → jitter buf → G.722 dec, or G.711 dec → ↑2 → mixer (+ tones, 16 kHz)
        → gain/soft clip → I2S TX → amp
 
-### Echo canceller (`audio_aec.c`, setting `aec`, console `aec`)
-esp-sr's AEC (`esp_aec.h` only: no AFE, models or model partition), mode from
-Kconfig `SIPWIRE_AEC_MODE` (default FD low cost: linear filter + residual
-suppression, 512-sample / 32 ms blocks). Speaker and mic share one I2S clock, so
-there is no drift: `tx_write` stores every sample it hands to I2S (after volume,
-tones mixed, soft clip, i.e. exactly what plays) in a 4096-sample ring indexed by
-its running TX sample count; for mic frame [n, n+320) the RX task reads ring
-indices [n−D, n+320−D). D = `I2S_DMA_DESC_NUM × I2S_CHUNK_SAMPLES` = 640 (40 ms):
-the TX queue starts empty, so the first buffer written plays after the whole DMA
-ring, while RX index 0 is captured as both channels start. Converter, I2S FIFO and
-acoustic delay (≤ ~2 ms) put the echo slightly *after* n−D, inside the adaptive
-filter. An I2S queue overflow (task > 30 ms late, driver drops a buffer) moves D
-by 160 (TX +, RX −); `aec delay <samples>` overrides it for tuning. 20 ms frames
-are adapted to esp-sr blocks by `dsp_blockfifo` (output pre-filled with
-block − gcd(320, block) zeros: +448 samples = 28 ms on the mic path for 512, +12 ms
-for the 256-sample VoIP modes). Off (or no mic consumer) = one branch, no copy.
-The instance is allocated on first enable and kept (~19 KB internal incl. our block
-buffers, ~117 KB PSRAM incl. the ring; esp-sr insists on PSRAM). Toggling on
-re-primes the FIFO, the filter keeps what it learned. QEMU: `aec_process` is
-replaced by a copy (Espressif's QEMU segfaults in it); the rest runs.
+### Echo canceller (`components/aec` + `audio_aec.c`, setting `aec`, console `aec`)
+SpeexDSP 1.2.1 (BSD-3, vendored unmodified in `components/aec/speexdsp`, see its
+README): the MDF echo canceller (partitioned frequency-domain adaptive filter,
+two-path for double-talk robustness) followed by the SpeexDSP preprocessor as
+residual echo suppressor (denoise gain stage on with noise suppression 0 dB, AGC,
+VAD and dereverb off). Single-precision float throughout (`-fsingle-precision-constant`
++ `<tgmath.h>`, no double helpers linked). `aec` is pure C with its own error codes,
+host-tested (`test_host/aec`: synthetic echo with a speaker nonlinearity and ±40
+samples of misalignment, double talk, far-end silence, determinism, allocation).
+
+Frames: the canceller runs one SpeexDSP frame per 20 ms audio frame (320 samples,
+FFT size 640), no block adaptation. The linear filter adds no latency; the
+suppressor's overlap-add adds one frame (20 ms) while it is on (esp-sr added 28 ms).
+Tail: Kconfig `SIPWIRE_AEC_TAIL` (default 1280 samples = 4 partitions, 80 ms).
+
+Reference: speaker and mic share one I2S clock, so there is no drift: `tx_write`
+stores every sample it hands to I2S (after volume, tones mixed, soft clip, i.e.
+exactly what plays) in a 4096-sample ring (`aec_ring_*`) indexed by its running TX
+sample count. The nominal speaker->mic delay D = `I2S_DMA_DESC_NUM ×
+I2S_CHUNK_SAMPLES` = 640 (40 ms): the TX queue starts empty, so the first buffer
+written plays after the whole DMA ring, while RX index 0 is captured as both
+channels start. For mic frame [n, n+320) the RX task reads ring indices
+[n−D+L, n+320−D+L) with a lead L = `AEC_REF_LEAD` = 160 (10 ms, one DMA buffer):
+the filter cannot model an echo that arrives before its reference, so the echo
+may come up to 10 ms earlier than D and still be cancelled; converter, I2S FIFO
+and acoustic delay (≤ ~2 ms) put it slightly after D, i.e. ~160 taps into the
+filter, leaving ~70 ms of tail. An I2S queue overflow (task > 30 ms late, driver
+drops a buffer) moves D by 160 (TX +, RX −); `aec delay <samples>` overrides D for
+tuning. Off (or no mic consumer) = one branch, no copy.
+
+Suppression: settings `aec_suppress` (dB of residual echo attenuation while only
+the far end talks, default 40) and `aec_suppress_act` (while both talk, default 15),
+SpeexDSP's ECHO_SUPPRESS / ECHO_SUPPRESS_ACTIVE defaults, applied live; both 0 =
+linear filter only, no suppressor latency. `aec suppress <echo> <active> [<noise>]`
+changes them until the next settings change (noise: stationary noise suppression,
+default 0 = off).
+
+Memory: allocated on first enable and kept; everything through `aec_set_allocator`
+(audio: internal RAM while more than 64 KB internal would stay free, PSRAM beyond).
+At the default tail ~124 KB (93 KB fixed: MDF scratch + FFT tables + preprocessor;
++7.7 KB per 320 samples of tail) + 8 KB ring; `aec` shows the internal/PSRAM split.
+SpeexDSP does not check its allocations, so `create` first checks that
+`aec_mem_estimate()` fits. Toggling on keeps what the filter learned; the stats
+restart.
+
+CPU (not yet measured on the device): QEMU with `-icount shift=0` (1 guest instruction
+= 1 ns, so `aec` avg µs = thousands of instructions) counts ~1.02 M Xtensa
+instructions per frame at the default settings: ~0.61 M for the linear filter (9 real
+FFTs of 640, the partitioned filter, the adaptation) and ~0.41 M for the suppressor
+(3 more FFTs and per-bin gain math with FPU-assisted divide/sqrt). The cost does
+not depend on the signal (host benchmark: silent and active input are the same) and
+barely on the tail (~2.5 % per 320 samples). At 240 MHz with an assumed 1.2-1.4
+cycles per instruction that is ~5-6 ms per 20 ms frame (25-30 % of core 1), linear
+only (`aec_suppress` = `aec_suppress_act` = 0) ~3-3.6 ms; frames never bunch, so the
+worst frame is close to the average (icount max ~1.3-1.7 M instructions, ~7-9 ms).
+QEMU runs the same code on a silent mic.
 Codec preference (settings `codec_pref`): G.722 > PCMU > PCMA. On the wire all
 three are 64 kbit/s with an 8000 Hz RTP clock (RFC 3551, G.722 included).
 
@@ -113,7 +151,8 @@ wifi ssid/pass, sip server/port/transport, user, auth user, password,
 display name, codec prefs, ring volume, call volume, touch calibration,
 `ntp_server` (default CONFIG_SIPWIRE_NTP_SERVER), `tz` (POSIX TZ, default
 CONFIG_SIPWIRE_TZ), `clock_24h` (default false = 12 h), `aec` (echo canceller,
-default true, applied live), `ota_url` (default
+default false until verified on hardware, applied live), `aec_suppress` /
+`aec_suppress_act` (dB, default 40 / 15), `ota_url` (default
 CONFIG_SIPWIRE_OTA_URL), `blf` (BLF keys, default none), `vm_number` (default `*97`).
 Set via UI settings, serial console (`sipwire>` REPL), or `config.json` on SD.
 

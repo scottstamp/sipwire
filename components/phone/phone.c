@@ -240,12 +240,19 @@ static uint8_t *current_volume_locked(void)
     }
 }
 
-/* Setting `aec`, live: the audio component allocates the canceller on first use. */
-static void apply_aec(bool on)
+/* Settings `aec`, `aec_suppress`, `aec_suppress_act`, live: the audio
+ * component allocates the canceller on first use. */
+static void apply_aec(const settings_t *st)
 {
-    esp_err_t err = audio_set_aec(on);
+    esp_err_t err = ESP_OK;
+    if (st->aec) {
+        err = audio_set_aec_suppress(st->aec_suppress, st->aec_suppress_act, 0);
+    }
+    if (err == ESP_OK) {
+        err = audio_set_aec(st->aec);
+    }
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "aec %s: %s", on ? "on" : "off", esp_err_to_name(err));
+        ESP_LOGW(TAG, "aec %s: %s", st->aec ? "on" : "off", esp_err_to_name(err));
     }
 }
 
@@ -801,7 +808,7 @@ static void on_settings(uint64_t now)
     }
     st_unlock();
     apply_volume();
-    apply_aec(ns.aec);
+    apply_aec(&ns);
 
     if (account_changed(&ns, &s.acc)) {
         ESP_LOGI(TAG, "SIP account changed, re-registering");
@@ -1026,7 +1033,7 @@ esp_err_t phone_init(void)
     s.st.volume = s.ring_vol;
     s.need_ua = true;
     audio_set_volume(s.st.volume);
-    apply_aec(s.acc.aec);
+    apply_aec(&s.acc);
 
     BaseType_t ok = xTaskCreatePinnedToCore(sip_task, "sip", SIP_TASK_STACK, NULL, SIP_TASK_PRIO, &s.task,
                                             SIP_TASK_CORE);

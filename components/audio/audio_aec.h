@@ -1,6 +1,6 @@
 #pragma once
 
-/* Echo canceller glue between the audio tasks and esp-sr (audio_aec.c).
+/* Echo canceller glue between the audio tasks and components/aec (audio_aec.c).
  * Private to the audio component; the public half is in audio.h.
  *
  * Speaker and mic share one I2S clock, so a speaker sample's index (count of
@@ -8,7 +8,9 @@
  * advance in lockstep: the echo of speaker sample i always lands at mic index
  * i + delay, with delay fixed by the TX DMA depth (plus a few samples of
  * converter + acoustic delay the adaptive filter absorbs). The TX task stores
- * what it writes in a ring by index; the RX task reads index - delay. */
+ * what it writes in a ring by index; the RX task reads index - delay + a 10 ms
+ * lead (aec_ref_offset), so an echo slightly earlier than expected is still
+ * inside the filter. */
 
 #include <stdbool.h>
 #include <stddef.h>

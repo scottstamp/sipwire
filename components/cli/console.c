@@ -64,6 +64,8 @@ static const field_t s_fields[] = {
     FIELD(call_volume, F_U8, 0, 100),
     FIELD(mic_gain, F_U8, 0, 100),
     FIELD(aec, F_BOOL, 0, 1),
+    FIELD(aec_suppress, F_U8, 0, SETTINGS_AEC_SUPPRESS_MAX),
+    FIELD(aec_suppress_act, F_U8, 0, SETTINGS_AEC_SUPPRESS_MAX),
     FIELD(backlight, F_U8, 0, 100),
     FIELD(backlight_timeout_s, F_U16, 0, UINT16_MAX),
     STR_FIELD(ntp_server, F_STR),

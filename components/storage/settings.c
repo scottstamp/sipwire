@@ -47,6 +47,8 @@ static const char *TAG = "storage";
 #define K_CALL_VOL    "call_vol"
 #define K_MIC_GAIN    "mic_gain"
 #define K_AEC         "aec"
+#define K_AEC_SUPP    "aec_supp"
+#define K_AEC_SUPP_A  "aec_supp_act"
 #define K_BACKLIGHT   "backlight"
 #define K_BL_TIMEOUT  "bl_timeout"
 #define K_NTP_SERVER  "ntp_server"
@@ -73,7 +75,9 @@ static void settings_defaults(settings_t *s)
     s->ring_volume = 70;
     s->call_volume = 60;
     s->mic_gain = 50;
-    s->aec = true;
+    s->aec = false;             /* until verified on the hardware */
+    s->aec_suppress = 40;       /* SpeexDSP's defaults */
+    s->aec_suppress_act = 15;
     s->backlight = 80;
     s->backlight_timeout_s = 30;
     strcpy(s->ntp_server, CONFIG_SIPWIRE_NTP_SERVER);
@@ -159,6 +163,12 @@ static void load_all(nvs_handle_t h, settings_t *s)
     if (nvs_get_u8(h, K_AEC, &u8) == ESP_OK) {
         s->aec = u8 != 0;
     }
+    if (nvs_get_u8(h, K_AEC_SUPP, &u8) == ESP_OK && u8 <= SETTINGS_AEC_SUPPRESS_MAX) {
+        s->aec_suppress = u8;
+    }
+    if (nvs_get_u8(h, K_AEC_SUPP_A, &u8) == ESP_OK && u8 <= SETTINGS_AEC_SUPPRESS_MAX) {
+        s->aec_suppress_act = u8;
+    }
     load_u8_max100(h, K_BACKLIGHT, &s->backlight);
     nvs_get_u16(h, K_BL_TIMEOUT, &s->backlight_timeout_s);
 
@@ -203,6 +213,8 @@ static esp_err_t validate(const settings_t *s)
                         "bad sip_transport");
     ESP_RETURN_ON_FALSE(s->ring_volume <= 100 && s->call_volume <= 100 && s->mic_gain <= 100 &&
                         s->backlight <= 100, ESP_ERR_INVALID_ARG, TAG, "value out of range 0-100");
+    ESP_RETURN_ON_FALSE(s->aec_suppress <= SETTINGS_AEC_SUPPRESS_MAX && s->aec_suppress_act <= SETTINGS_AEC_SUPPRESS_MAX,
+                        ESP_ERR_INVALID_ARG, TAG, "aec_suppress: 0-%d dB", SETTINGS_AEC_SUPPRESS_MAX);
     return ESP_OK;
 }
 
@@ -252,6 +264,8 @@ static esp_err_t store_changed(nvs_handle_t h, const settings_t *in)
     if (in->aec != s_cur.aec) {
         ESP_RETURN_ON_ERROR(nvs_set_u8(h, K_AEC, in->aec ? 1 : 0), TAG, K_AEC);
     }
+    STORE_NUM(nvs_set_u8, K_AEC_SUPP, aec_suppress);
+    STORE_NUM(nvs_set_u8, K_AEC_SUPP_A, aec_suppress_act);
     STORE_NUM(nvs_set_u8, K_BACKLIGHT, backlight);
     STORE_NUM(nvs_set_u16, K_BL_TIMEOUT, backlight_timeout_s);
     if (in->touch_cal.valid != s_cur.touch_cal.valid) {
