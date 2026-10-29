@@ -63,6 +63,30 @@ sim/web/             Emscripten build of components/ui + mock model → browser
   tiles (tap = `dial(ext)`), a voicemail button that dials `vm_number`; status bar:
   envelope with the count. Status LED: amber/blue double pulse while idle with
   voicemail waiting.
+- Call features (`phone.h`, no UI yet): two call lines. `phone_status_t` top-level call
+  fields = the foreground call (the only one with media), `line` (1/2, stays with a call
+  across swaps), `second` {call, outgoing, number, name, call_start_us, line} = the
+  background call: waiting (RINGING_IN, call-waiting beep `AUDIO_TONE_CALL_WAITING` in the
+  foreground call) or held. When the foreground call ends the background one moves up at
+  once (held stays held, waiting rings). API: `phone_answer_waiting` (hold current, answer),
+  `phone_reject_waiting` (486), `phone_swap`, `phone_transfer_blind(target)`,
+  `phone_transfer_attended_start(target)` / `_complete()` / `_cancel()`, `phone_set_dnd`.
+  Events on `SIPWIRE_CALL_EVENT`: `CALL_EVENT_SECOND` (call_event_state_t of the background
+  line; CALL_ENDED + end_code when it goes, CALL_IDLE when promoted), `CALL_EVENT_TRANSFER`
+  {state XFER_CONSULT/TRYING/ACCEPTED/PROGRESS/DONE/FAILED, attended, code, target} (also in
+  `phone_status_t.xfer`, reset at idle), `CALL_EVENT_MISSED` {number, name, code, dnd} for
+  calls refused without ringing (DND, busy). Blind transfer: REFER; DONE (2xx sipfrag) → we
+  hang up; FAILED → call kept (resumed if held). Attended: start holds + dials the target
+  (consultation), complete = REFER with Replaces on the original, both hung up on DONE;
+  cancel hangs up the consultation call. Settings `call_waiting` (default on), `dnd`
+  (default off; every INVITE → 486, no ring; console `dnd on|off`), `auto_answer` (default
+  on: Call-Info `answer-after=N` / Alert-Info auto answer, e.g. Asterisk Page() with
+  PJSIP_HEADER, answered on the loudspeaker without ringing when no other call exists;
+  during a call it waits like any call; DND wins, a page is refused). DTMF falls back to SIP
+  INFO (application/dtmf-relay) when the peer has no telephone-event. Hold/resume re-INVITEs
+  are queued per call and retried after 491 (RFC 3261 §14.1 delay). Console: `answer2`,
+  `reject2`, `swap`, `xfer <n>`, `axfer <n>|complete|cancel`, `dnd [on|off]`; `sip` shows
+  the second call, transfer and features.
 - Touch calibration: `ui_actions_t.touch_cal_begin/end` + `ui_touch_raw()`. The
   bridge installs `display_touch_raw_hook()` (raw samples to the UI, none to LVGL)
   between begin and end and stores the result in `settings.touch_cal`.
@@ -153,7 +177,8 @@ display name, codec prefs, ring volume, call volume, touch calibration,
 CONFIG_SIPWIRE_TZ), `clock_24h` (default false = 12 h), `aec` (echo canceller,
 default false until verified on hardware, applied live), `aec_suppress` /
 `aec_suppress_act` (dB, default 40 / 15), `ota_url` (default
-CONFIG_SIPWIRE_OTA_URL), `blf` (BLF keys, default none), `vm_number` (default `*97`).
+CONFIG_SIPWIRE_OTA_URL), `blf` (BLF keys, default none), `vm_number` (default `*97`),
+`call_waiting` (default true), `dnd` (default false), `auto_answer` (default true).
 Set via UI settings, serial console (`sipwire>` REPL), or `config.json` on SD.
 
 ## OTA update (`components/ota`)

@@ -19,12 +19,30 @@ typedef enum {
     PHONE_TONE_RINGBACK,
     PHONE_TONE_RING,
     PHONE_TONE_BUSY,
+    PHONE_TONE_CALL_WAITING,            /* beep in the foreground call while a call waits */
 } phone_tone_t;
 
 /** Tone to play locally in `state`. `early_media`: a 183 delivered media for
  *  this call (then the RTP stream is played instead of the ringback tone).
  *  ENDED plays busy for outgoing calls refused as busy (see phone_end_is_busy). */
 phone_tone_t phone_tone_for(sip_ua_call_state_t state, bool outgoing, bool early_media, int end_code);
+
+/** Tone with a background call taken into account: the call-waiting beep
+ *  while the foreground call is established (ACTIVE / HELD) and the
+ *  background call rings (`bg` = its state, IDLE if none). Otherwise `base`. */
+phone_tone_t phone_tone_waiting(phone_tone_t base, sip_ua_call_state_t fg, sip_ua_call_state_t bg);
+
+/* ---- call features ---------------------------------------------------------- */
+
+/** Answer an incoming call automatically (page / intercom)? Only when the
+ *  caller asked for it (answer_after >= 0, from Call-Info / Alert-Info), the
+ *  `auto_answer` setting is on and no other call exists (a page during a call
+ *  is offered as a normal waiting call). DND never gets here: the UA refuses
+ *  every call with 486 first (a page under DND is ignored). */
+bool phone_auto_answer(int answer_after, bool setting_on, bool other_call);
+
+/** Event-level transfer state for a UA transfer report. */
+xfer_state_t phone_xfer_map(sip_xfer_state_t st);
 
 /* ---- call end ------------------------------------------------------------ */
 

@@ -23,6 +23,32 @@ phone_tone_t phone_tone_for(sip_ua_call_state_t state, bool outgoing, bool early
     }
 }
 
+phone_tone_t phone_tone_waiting(phone_tone_t base, sip_ua_call_state_t fg, sip_ua_call_state_t bg)
+{
+    if (base == PHONE_TONE_NONE && bg == SIP_UA_CALL_RINGING_IN &&
+        (fg == SIP_UA_CALL_ACTIVE || fg == SIP_UA_CALL_HELD)) {
+        return PHONE_TONE_CALL_WAITING;
+    }
+    return base;
+}
+
+bool phone_auto_answer(int answer_after, bool setting_on, bool other_call)
+{
+    return answer_after >= 0 && setting_on && !other_call;
+}
+
+xfer_state_t phone_xfer_map(sip_xfer_state_t st)
+{
+    switch (st) {
+    case SIP_XFER_TRYING:   return XFER_TRYING;
+    case SIP_XFER_ACCEPTED: return XFER_ACCEPTED;
+    case SIP_XFER_PROGRESS: return XFER_PROGRESS;
+    case SIP_XFER_SUCCESS:  return XFER_DONE;
+    case SIP_XFER_FAILED:
+    default:                return XFER_FAILED;
+    }
+}
+
 int phone_end_code(sip_ua_end_reason_t reason, int status_code)
 {
     switch (reason) {

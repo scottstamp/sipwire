@@ -23,6 +23,7 @@ typedef enum {
     AUDIO_TONE_BUSY,                /* 480+620 Hz, 0.5/0.5 */
     AUDIO_TONE_RING,                /* local ringer pattern */
     AUDIO_TONE_KEYCLICK,            /* short, one-shot */
+    AUDIO_TONE_CALL_WAITING,        /* 440 Hz, 300 ms beep every 10 s (mixed into a call) */
 } audio_tone_t;
 
 /** Configure I2S from board_cfg(); amp off until audio_start(). */

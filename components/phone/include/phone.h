@@ -27,6 +27,34 @@
  * our call), then CALL_IDLE is posted. phone_hangup() in ENDED, a new dial or
  * an incoming call skip the rest of the wait. UIs just mirror the state.
  *
+ * Two call lines (see CALL_EVENT_SECOND in sipwire_events.h): the top-level
+ * call fields below describe the foreground call (the one with audio;
+ * `line` 1 or 2 stays with a call across swaps), `second` the background
+ * call: a waiting incoming call (RINGING_IN, call-waiting beep in the
+ * foreground call; setting `call_waiting`) or a held call. Only the
+ * foreground call has media. When the foreground call ends the background
+ * call moves to the foreground at once (a held call stays held until
+ * resumed, a waiting call rings normally); its ENDED is still posted.
+ *
+ * Do not disturb (setting `dnd`): every incoming call gets 486 without
+ * ringing and is reported as CALL_EVENT_MISSED (so is a call refused as
+ * busy). Auto answer (setting `auto_answer`): an incoming call asking for it
+ * (Call-Info answer-after / Alert-Info auto answer, e.g. Asterisk Page())
+ * is answered on the loudspeaker without ringing when no other call
+ * exists; during a call it is a normal waiting call; under DND it is refused
+ * like any other call (DND wins).
+ *
+ * Transfers report through CALL_EVENT_TRANSFER and `xfer`. Blind: REFER of
+ * the foreground call; on success (2xx sipfrag) the call is hung up, on
+ * failure it is kept (resumed if it was on hold). Attended: start holds the
+ * foreground call (it becomes the background call) and dials the target;
+ * complete sends REFER with Replaces to the original party and hangs up both
+ * calls on success; cancel hangs up the consultation call (the original
+ * stays held in the foreground).
+ *
+ * DTMF: RFC 4733 when the peer offered telephone-event, SIP INFO
+ * (application/dtmf-relay) otherwise.
+ *
  * The SIP account comes from settings (sip_server, sip_user...). The UA is
  * (re)created on every NET_EVENT_GOT_IP and when SIP settings change; with
  * an empty server or user the phone stays unregistered. */
@@ -46,13 +74,39 @@ typedef struct {
     char server[64];                /* "host:port" of the active account, "" if none */
     char local_addr[24];            /* "ip:port" the UA uses, "" if none */
 
-    /* call */
+    /* call (the foreground call) */
     call_state_t call;
     bool outgoing;
     char number[64];
     char name[64];
     int end_code;                   /* valid in CALL_ENDED; 0 = normal hangup */
     int64_t call_start_us;          /* esp_timer time the call was answered, 0 = not yet */
+    uint8_t line;                   /* line of the foreground call: 1 or 2, 0 = none */
+    bool auto_answered;             /* answered automatically (page / intercom) */
+
+    /* background call: waiting (CALL_RINGING_IN) or on hold (CALL_HELD,
+     * CALL_ACTIVE until the hold is confirmed); call == CALL_IDLE: none */
+    struct {
+        call_state_t call;
+        bool outgoing;
+        char number[64];
+        char name[64];
+        int64_t call_start_us;
+        uint8_t line;
+    } second;
+
+    /* transfer in progress or last result (reset when the phone goes idle) */
+    struct {
+        xfer_state_t state;
+        bool attended;
+        int code;
+        char target[64];
+    } xfer;
+
+    /* call features (settings) */
+    bool dnd;
+    bool call_waiting;
+    bool auto_answer;
 
     /* audio */
     bool muted;
@@ -79,7 +133,8 @@ typedef struct {
 
 /** Start the sip and rtp_rx tasks, register event handlers and the console
  *  commands (call, answer, hangup, reject, dtmf, hold, resume, mute, unmute,
- *  vol, sip, rtp, blf, mwi). Call after settings_init, net_init and audio_init. */
+ *  vol, sip, rtp, blf, mwi, answer2, reject2, swap, xfer, axfer, dnd). Call
+ *  after settings_init, net_init and audio_init. */
 esp_err_t phone_init(void);
 
 /** Dial a number / user part or full "sip:" URI. ESP_ERR_INVALID_ARG for an
@@ -90,9 +145,40 @@ esp_err_t phone_dial(const char *number);
 /** Answer the ringing incoming call. */
 esp_err_t phone_answer(void);
 
-/** End the call in whatever state (cancel, reject with 486 or BYE); in ENDED
- *  return to IDLE immediately. */
+/** End the foreground call in whatever state (cancel, reject with 486 or
+ *  BYE); in ENDED return to IDLE immediately. A background call moves to
+ *  the foreground (still held / still ringing). */
 esp_err_t phone_hangup(void);
+
+/** Answer the waiting call: hold the foreground call (it becomes the
+ *  background call), answer the waiting one in the foreground. */
+esp_err_t phone_answer_waiting(void);
+
+/** Refuse the waiting call (486). */
+esp_err_t phone_reject_waiting(void);
+
+/** Swap the two calls: hold the foreground call, resume the background one
+ *  (a waiting call is answered, as phone_answer_waiting). */
+esp_err_t phone_swap(void);
+
+/** Blind transfer of the foreground call (established) to `target` (number
+ *  or sip: URI). Progress: CALL_EVENT_TRANSFER. */
+esp_err_t phone_transfer_blind(const char *target);
+
+/** Attended transfer, step 1: hold the foreground call and call `target`
+ *  (consultation call). Needs one established call and no second one. */
+esp_err_t phone_transfer_attended_start(const char *target);
+
+/** Step 2: connect the original party with the consultation call's party
+ *  (REFER with Replaces); both calls are hung up on success. The
+ *  consultation call must be answered. */
+esp_err_t phone_transfer_attended_complete(void);
+
+/** Abort: hang up the consultation call; the original stays on hold. */
+esp_err_t phone_transfer_attended_cancel(void);
+
+/** Do not disturb on/off (persists setting `dnd`). */
+esp_err_t phone_set_dnd(bool on);
 
 /** Reject the ringing incoming call with `code` (4xx-6xx; 0 → 603 Decline). */
 esp_err_t phone_reject(int code);

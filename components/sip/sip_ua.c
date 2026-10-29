@@ -245,6 +245,7 @@ void sipua_leave(sip_ua_t *ua)
                         .outgoing = e.outgoing,
                         .number = e.number,
                         .display_name = e.display,
+                        .answer_after = e.answer_after,
                     };
                     cb->call_state(cb->ctx, e.call, &info);
                 }
@@ -262,6 +263,16 @@ void sipua_leave(sip_ua_t *ua)
             case EV_MWI:
                 if (cb->mwi) {
                     cb->mwi(cb->ctx, e.state != 0, e.reason, e.code);
+                }
+                break;
+            case EV_XFER:
+                if (cb->transfer) {
+                    cb->transfer(cb->ctx, e.call, (sip_xfer_state_t)e.state, e.code);
+                }
+                break;
+            case EV_REJECTED:
+                if (cb->call_rejected) {
+                    cb->call_rejected(cb->ctx, e.number, e.display, e.code);
                 }
                 break;
             }
@@ -301,14 +312,23 @@ static call_t *find_call_by_dialog(sip_ua_t *ua, const sip_msg_t *m)
     return NULL;
 }
 
-static bool have_visible_call(sip_ua_t *ua)
+/* Calls the application sees (not free, not cleaning up). *other: one of
+ * them (the last found), NULL if none. */
+static int visible_calls(sip_ua_t *ua, call_t **other)
 {
+    int n = 0;
+    if (other) {
+        *other = NULL;
+    }
     for (int i = 0; i < MAX_CALLS; i++) {
         if (ua->calls[i].st != CS_FREE && ua->calls[i].st != CS_ENDING) {
-            return true;
+            n++;
+            if (other) {
+                *other = &ua->calls[i];
+            }
         }
     }
-    return false;
+    return n;
 }
 
 static call_t *call_alloc(sip_ua_t *ua)
@@ -324,6 +344,7 @@ static call_t *call_alloc(sip_ua_t *ua)
             c->sdp_id = ua->rand(ua->rand_ctx) & 0x7fffffff;
             c->sdp_ver = 1;
             c->rtp_port = ua->rtp_alloc ? ua->rtp_alloc(ua->rtp_ctx) : ua->rtp_port;
+            c->answer_after = -1;
             return c;
         }
     }
@@ -358,8 +379,27 @@ static void emit_call(sip_ua_t *ua, call_t *c, sip_ua_call_state_t st, sip_ua_en
     e->reason = reason;
     e->code = code;
     e->outgoing = c->outgoing;
+    e->answer_after = c->answer_after;
     strcpy(e->number, c->number);
     strcpy(e->display, c->display);
+}
+
+static void emit_xfer(sip_ua_t *ua, call_t *c, sip_xfer_state_t st, int code)
+{
+    if (st == SIP_XFER_SUCCESS || st == SIP_XFER_FAILED) {
+        if (!c->refer_active) {
+            return; /* final result already reported */
+        }
+        c->refer_active = false;
+    }
+    LOGI("call %d: transfer %s (%d)", c->handle,
+         st == SIP_XFER_TRYING ? "trying" : st == SIP_XFER_ACCEPTED ? "accepted" :
+         st == SIP_XFER_PROGRESS ? "progress" : st == SIP_XFER_SUCCESS ? "succeeded" : "failed", code);
+    ev_t *e = sipua_ev_push(ua, EV_XFER, c->handle);
+    if (e) {
+        e->state = st;
+        e->code = code;
+    }
 }
 
 static void emit_state(sip_ua_t *ua, call_t *c)
@@ -930,8 +970,9 @@ static void send_ack_2xx(sip_ua_t *ua, call_t *c, uint32_t cseq, const char *bod
     sipua_send_raw(ua, &ua->server, c->ack, c->ack_len);
 }
 
-static void send_in_dialog(sip_ua_t *ua, call_t *c, const char *method, sip_method_t mid, owner_t owner,
-                           const char *body, size_t body_len, bool contact)
+static void send_in_dialog_x(sip_ua_t *ua, call_t *c, const char *method, sip_method_t mid, owner_t owner,
+                             const char *ctype, const char *body, size_t body_len, bool contact,
+                             const char *extra)
 {
     char branch[32], sb[24];
     sip_wbuf_t w;
@@ -945,11 +986,14 @@ static void send_in_dialog(sip_ua_t *ua, call_t *c, const char *method, sip_meth
         sip_w_cstr(&w, ALLOW_HDR);
     }
     sip_w_cstr(&w, UA_HDR);
-    if (mid == SIP_METHOD_INVITE) {
+    if (extra) {
+        sip_w_cstr(&w, extra);
+    }
+    if (mid == SIP_METHOD_INVITE || mid == SIP_METHOD_REFER) {
         sipua_w_auth(ua, &w, method, c->dlg.remote_target);
     }
     if (body && body_len) {
-        sip_w_fmt(&w, "Content-Type: application/sdp\r\nContent-Length: %u\r\n\r\n", (unsigned)body_len);
+        sip_w_fmt(&w, "Content-Type: %s\r\nContent-Length: %u\r\n\r\n", ctype, (unsigned)body_len);
         sip_w_mem(&w, body, body_len);
     } else {
         sip_w_cstr(&w, "Content-Length: 0\r\n\r\n");
@@ -968,7 +1012,54 @@ static void send_in_dialog(sip_ua_t *ua, call_t *c, const char *method, sip_meth
     t->owner_ref = c->handle;
     if (owner == OWN_REINVITE) {
         c->reinv_txn = t->id;
+    } else if (owner == OWN_REFER) {
+        c->refer_txn = t->id;
     }
+}
+
+static void send_in_dialog(sip_ua_t *ua, call_t *c, const char *method, sip_method_t mid, owner_t owner,
+                           const char *body, size_t body_len, bool contact)
+{
+    send_in_dialog_x(ua, c, method, mid, owner, "application/sdp", body, body_len, contact, NULL);
+}
+
+/* re-INVITE with our offer for c->reinv_hold */
+static void send_reinvite(sip_ua_t *ua, call_t *c)
+{
+    int n = make_sdp(ua, c, NULL, NULL, c->reinv_hold ? SIP_DIR_SENDONLY : SIP_DIR_SENDRECV);
+    if (n < 0) {
+        LOGE("call %d: re-INVITE SDP does not fit", c->handle);
+        c->hold_want = c->local_hold;
+        return;
+    }
+    send_in_dialog(ua, c, "INVITE", SIP_METHOD_INVITE, OWN_REINVITE, ua->sdp, (size_t)n, true);
+}
+
+/* Send the hold/resume re-INVITE the app asked for once nothing else is in
+ * flight (our re-INVITE, the ACK of a 2xx we sent, a 491 back-off). */
+static void reinv_kick(sip_ua_t *ua, call_t *c)
+{
+    if (c->st != CS_CONFIRMED || c->reinv_txn || c->awaiting_ack || c->hold_want == c->local_hold ||
+        ua->now < c->reinv_retry_at) {
+        return;
+    }
+    c->reinv_retry_at = 0;
+    c->reinv_hold = c->hold_want;
+    c->reinv_auth_tries = 0;
+    LOGI("call %d: %s", c->handle, c->reinv_hold ? "hold" : "resume");
+    send_reinvite(ua, c);
+    if (!c->reinv_txn) {
+        c->hold_want = c->local_hold; /* could not send: give up */
+    }
+}
+
+static void send_refer(sip_ua_t *ua, call_t *c)
+{
+    char extra[REFER_TO_MAX + 2 * STR_MAX + 64];
+    snprintf(extra, sizeof(extra), "Refer-To: %s\r\nReferred-By: <sip:%s@%s>\r\n", c->refer_to, ua->user,
+             ua->domain);
+    c->refer_txn = 0;
+    send_in_dialog_x(ua, c, "REFER", SIP_METHOD_REFER, OWN_REFER, NULL, NULL, 0, true, extra);
 }
 
 static void send_bye(sip_ua_t *ua, call_t *c)
@@ -1139,13 +1230,18 @@ static void on_reinvite_response(sip_ua_t *ua, call_t *c, sip_txn_t *t, const si
     }
     c->reinv_txn = 0;
     if ((code == 401 || code == 407) && sipua_auth_retry(ua, &c->reinv_auth_tries, m)) {
-        int n = make_sdp(ua, c, NULL, NULL, c->reinv_hold ? SIP_DIR_SENDONLY : SIP_DIR_SENDRECV);
-        if (n > 0) {
-            send_in_dialog(ua, c, "INVITE", SIP_METHOD_INVITE, OWN_REINVITE, ua->sdp, (size_t)n, true);
-        }
+        send_reinvite(ua, c);
+        return;
+    }
+    if (code == 491 && c->st == CS_CONFIRMED) {
+        /* §14.1 glare: try again after a random delay (reinv_kick) */
+        uint32_t d = sipua_glare_delay_ms(ua, c->outgoing);
+        c->reinv_retry_at = ua->now + d;
+        LOGI("call %d: re-INVITE glare (491), retry in %u ms", c->handle, (unsigned)d);
         return;
     }
     LOGW("call %d: re-INVITE rejected (%d)", c->handle, code);
+    c->hold_want = c->local_hold;
     if (code == 481 || code == 408) {
         /* §14.1: the dialog is gone */
         send_bye(ua, c);
@@ -1198,6 +1294,29 @@ static void tu_on_response(void *ctx, sip_txn_t *t, const sip_msg_t *m)
     case OWN_SUBSCRIBE:
         sipua_sub_on_response(ua, t, m);
         break;
+    case OWN_REFER:
+        if (c && c->refer_txn == t->id && m->status >= 200) {
+            c->refer_txn = 0;
+            if ((m->status == 401 || m->status == 407) && sipua_auth_retry(ua, &c->refer_auth_tries, m)) {
+                send_refer(ua, c);
+                if (c->refer_txn) {
+                    return;
+                }
+            }
+            if (m->status < 300) {
+                c->refer_accepted = true;
+                c->refer_deadline = ua->now + REFER_TIMEOUT_MS;
+                emit_xfer(ua, c, SIP_XFER_ACCEPTED, m->status);
+            } else {
+                emit_xfer(ua, c, SIP_XFER_FAILED, m->status);
+            }
+        }
+        break;
+    case OWN_INFO:
+        if (m->status >= 300) {
+            LOGW("call %d: INFO answered %d", t->owner_ref, m->status);
+        }
+        break;
     default:
         break;
     }
@@ -1237,6 +1356,7 @@ static void tu_on_timeout(void *ctx, sip_txn_t *t)
     case OWN_REINVITE:
         if (c && c->reinv_txn == t->id) {
             c->reinv_txn = 0;
+            c->hold_want = c->local_hold;
             send_bye(ua, c);
             end_call(ua, c, SIP_END_TIMEOUT, 408, true);
         }
@@ -1246,6 +1366,12 @@ static void tu_on_timeout(void *ctx, sip_txn_t *t)
         break;
     case OWN_SUBSCRIBE:
         sipua_sub_on_timeout(ua, t);
+        break;
+    case OWN_REFER:
+        if (c && c->refer_txn == t->id) {
+            c->refer_txn = 0;
+            emit_xfer(ua, c, SIP_XFER_FAILED, 408);
+        }
         break;
     case OWN_SERVER_INVITE:
         if (c && t->state == SIP_TS_ACCEPTED && c->awaiting_ack && c->uas_inv_txn == t->id) {
@@ -1284,17 +1410,30 @@ static void copy_display(char *dst, size_t cap, sip_str_t d)
     dst[o] = '\0';
 }
 
-static void caller_identity(call_t *c, const sip_nameaddr_t *from)
+static void caller_identity(char number[STR_MAX], char display[STR_MAX], const sip_nameaddr_t *from)
 {
     sip_uri_t u;
-    c->number[0] = '\0';
+    number[0] = '\0';
     if (sip_uri_parse(from->uri, &u) == 0) {
         sip_str_t who = u.user.len ? u.user : u.host;
-        if (sip_unescape(c->number, sizeof(c->number), who) < 0) {
-            sip_str_copy(c->number, sizeof(c->number), (sip_str_t){ who.p, who.len < STR_MAX ? who.len : STR_MAX - 1 });
+        if (sip_unescape(number, STR_MAX, who) < 0) {
+            sip_str_copy(number, STR_MAX, (sip_str_t){ who.p, who.len < STR_MAX ? who.len : STR_MAX - 1 });
         }
     }
-    copy_display(c->display, sizeof(c->display), from->display);
+    copy_display(display, STR_MAX, from->display);
+}
+
+/* Refuse a new INVITE with `code` and tell the app (missed call). */
+static void refuse_invite(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const sip_addr_t *from, int code,
+                          const char *why)
+{
+    sipua_respond_msg(ua, t, m, from, code, 0, NULL);
+    ev_t *e = sipua_ev_push(ua, EV_REJECTED, 0);
+    if (e) {
+        caller_identity(e->number, e->display, &m->from);
+        e->code = code;
+        LOGI("%s: rejected incoming INVITE from %s with %d", why, e->number, code);
+    }
 }
 
 static void on_invite_new(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const sip_addr_t *from)
@@ -1304,10 +1443,19 @@ static void on_invite_new(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const 
         sipua_respond_msg(ua, t, m, from, 415, 0, "Accept: application/sdp\r\n");
         return;
     }
-    call_t *c = have_visible_call(ua) ? NULL : call_alloc(ua);
+    if (ua->dnd) {
+        refuse_invite(ua, t, m, from, 486, "do not disturb");
+        return;
+    }
+    call_t *other;
+    int n = visible_calls(ua, &other);
+    if (n >= MAX_VISIBLE || (n == 1 && (!ua->call_waiting || other->st != CS_CONFIRMED))) {
+        refuse_invite(ua, t, m, from, 486, "busy");
+        return;
+    }
+    call_t *c = call_alloc(ua);
     if (!c) {
-        LOGI("busy: rejecting incoming INVITE with 486");
-        sipua_respond_msg(ua, t, m, from, 486, 0, NULL);
+        refuse_invite(ua, t, m, from, 486, "no call slot");
         return;
     }
     char tag[TAG_LEN + 1];
@@ -1323,7 +1471,8 @@ static void on_invite_new(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const 
     c->uas_inv_txn = t->id;
     t->owner = OWN_SERVER_INVITE;
     t->owner_ref = c->handle;
-    caller_identity(c, &m->from);
+    caller_identity(c->number, c->display, &m->from);
+    c->answer_after = sipua_answer_after(m);
     if (is_sdp(m)) {
         sip_sdp_neg_t neg;
         if (sip_sdp_parse(&c->offer, m->body.p, m->body.len) != 0 ||
@@ -1337,7 +1486,8 @@ static void on_invite_new(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const 
     }
     call_respond(ua, c, 180, RF_CONTACT | RF_RR, NULL, 0);
     c->last_code = 180;
-    LOGI("incoming call %d from %s \"%s\"", c->handle, c->number, c->display);
+    LOGI("incoming call %d from %s \"%s\"%s%s", c->handle, c->number, c->display, n ? " (waiting)" : "",
+         c->answer_after >= 0 ? " (auto answer)" : "");
     ev_t *e = sipua_ev_push(ua, EV_INCOMING, c->handle);
     if (e) {
         strcpy(e->number, c->number);
@@ -1472,6 +1622,111 @@ static void on_cancel(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const sip_
     }
 }
 
+static sip_str_t content_type_base(const sip_msg_t *m)
+{
+    sip_str_t ct = m->content_type;
+    if (!ct.p) {
+        return SIP_STR_NULL;
+    }
+    const char *semi = memchr(ct.p, ';', ct.len);
+    if (semi) {
+        ct.len = (size_t)(semi - ct.p);
+    }
+    return sip_str_trim(ct);
+}
+
+/* Value of "Name=value" line in a dtmf-relay body (case-insensitive name). */
+static bool body_field(sip_str_t body, const char *name, sip_str_t *val)
+{
+    const char *p = body.p;
+    const char *e = body.p + body.len;
+    while (p < e) {
+        const char *le = memchr(p, '\n', (size_t)(e - p));
+        if (!le) {
+            le = e;
+        }
+        sip_str_t line = sip_str_trim((sip_str_t){ p, (size_t)(le - p) });
+        const char *eq = memchr(line.p, '=', line.len);
+        if (eq && sip_str_ieq_c(sip_str_trim((sip_str_t){ line.p, (size_t)(eq - line.p) }), name)) {
+            *val = sip_str_trim((sip_str_t){ eq + 1, (size_t)(line.p + line.len - eq - 1) });
+            return true;
+        }
+        p = le + 1;
+    }
+    return false;
+}
+
+/* Incoming INFO (already answered 200): log DTMF. */
+static void on_info(sip_ua_t *ua, const sip_msg_t *m, call_t *c)
+{
+    sip_str_t ct = content_type_base(m);
+    sip_str_t sig = SIP_STR_NULL;
+    if (sip_str_ieq_c(ct, "application/dtmf-relay")) {
+        if (!body_field(m->body, "Signal", &sig)) {
+            sig = SIP_STR_NULL;
+        }
+    } else if (sip_str_ieq_c(ct, "application/dtmf")) {
+        sig = sip_str_trim(m->body);
+    }
+    if (sig.len >= 1 && sig.len <= 2) {
+        LOGI("call %d: INFO DTMF '%.*s'", c->handle, (int)sig.len, sig.p);
+    }
+}
+
+/* In-dialog NOTIFY: the implicit subscription of our REFER (RFC 3515 §2.4.4). */
+static void on_refer_notify(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const sip_addr_t *from, call_t *c)
+{
+    sip_str_t ev = m->event;
+    if (ev.p) {
+        const char *semi = memchr(ev.p, ';', ev.len);
+        if (semi) {
+            ev.len = (size_t)(semi - ev.p);
+        }
+        ev = sip_str_trim(ev);
+    }
+    if (!ev.p || !sip_str_ieq_c(ev, "refer")) {
+        sipua_respond_msg(ua, t, m, from, 489, 0, "Allow-Events: refer\r\n");
+        return;
+    }
+    if (!c->refer_active && !c->refer_accepted) {
+        sipua_respond_msg(ua, t, m, from, 481, 0, NULL);
+        return;
+    }
+    sipua_respond_msg(ua, t, m, from, 200, 0, NULL);
+    /* message/sipfrag: "SIP/2.0 200 OK" */
+    int code = 0;
+    sip_str_t b = sip_str_trim(m->body);
+    if (sip_str_ieq_c(content_type_base(m), "message/sipfrag") && b.len >= 11 &&
+        sip_str_ieq_c((sip_str_t){ b.p, 8 }, "SIP/2.0 ")) {
+        uint32_t x;
+        if (sip_str_to_u32((sip_str_t){ b.p + 8, 3 }, 699, &x) && x >= 100) {
+            code = (int)x;
+        }
+    }
+    bool terminated = false;
+    if (m->sub_state.p) {
+        sip_str_t ss = m->sub_state;
+        const char *semi = memchr(ss.p, ';', ss.len);
+        if (semi) {
+            ss.len = (size_t)(semi - ss.p);
+        }
+        terminated = sip_str_ieq_c(sip_str_trim(ss), "terminated");
+    }
+    c->refer_deadline = ua->now + REFER_TIMEOUT_MS;
+    if (code >= 200 && code < 300) {
+        emit_xfer(ua, c, SIP_XFER_SUCCESS, code);
+    } else if (code >= 300) {
+        emit_xfer(ua, c, SIP_XFER_FAILED, code);
+    } else if (terminated) {
+        emit_xfer(ua, c, SIP_XFER_FAILED, code);
+    } else if (code > 0 && c->refer_active) {
+        emit_xfer(ua, c, SIP_XFER_PROGRESS, code);
+    }
+    if (terminated || code >= 200) {
+        c->refer_accepted = false; /* subscription over */
+    }
+}
+
 static void on_in_dialog(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const sip_addr_t *from, call_t *c)
 {
     /* §12.2.2: CSeq must increase */
@@ -1502,6 +1757,14 @@ static void on_in_dialog(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const s
         break;
     case SIP_METHOD_INFO:
         sipua_respond_msg(ua, t, m, from, 200, 0, NULL);
+        on_info(ua, m, c);
+        break;
+    case SIP_METHOD_NOTIFY:
+        on_refer_notify(ua, t, m, from, c);
+        break;
+    case SIP_METHOD_REFER:
+        LOGI("call %d: declining incoming REFER", c->handle);
+        sipua_respond_msg(ua, t, m, from, 603, 0, NULL);
         break;
     default:
         sipua_respond_msg(ua, t, m, from, 501, RF_ALLOW, NULL);
@@ -1712,6 +1975,7 @@ sip_err_t sip_ua_create(const sip_ua_config_t *cfg, sip_ua_t **out)
     ua->log_ctx = cfg->log_ctx;
     ua->log_level = cfg->log_level ? cfg->log_level : SIP_LOG_INFO;
     ua->cb = cfg->cb;
+    ua->call_waiting = true;
     ua->next_handle = 1;
     update_derived(ua);
 
@@ -1762,6 +2026,12 @@ void sip_ua_tick(sip_ua_t *ua, uint64_t now_ms)
                 send_bye(ua, c);
             }
             call_free(c);
+        } else if (c->st == CS_CONFIRMED) {
+            reinv_kick(ua, c);
+            if (c->refer_accepted && ua->now >= c->refer_deadline) {
+                c->refer_accepted = false;
+                emit_xfer(ua, c, SIP_XFER_FAILED, 408); /* no final NOTIFY */
+            }
         }
     }
     sipua_leave(ua);
@@ -1915,7 +2185,9 @@ sip_err_t sip_call_dial(sip_ua_t *ua, const char *number, sip_call_handle_t *out
     sipua_enter(ua);
     sip_err_t err = SIP_OK;
     call_t *c = NULL;
-    if (have_visible_call(ua)) {
+    call_t *other;
+    int n = visible_calls(ua, &other);
+    if (n >= MAX_VISIBLE || (n == 1 && other->st != CS_CONFIRMED)) {
         err = SIP_ERR_BUSY;
         goto done;
     }
@@ -2044,22 +2316,246 @@ sip_err_t sip_call_hold(sip_ua_t *ua, sip_call_handle_t call, bool hold)
     call_t *c = find_call(ua, call);
     if (!c) {
         err = SIP_ERR_NOT_FOUND;
-    } else if (c->st != CS_CONFIRMED || c->awaiting_ack || c->reinv_txn) {
+    } else if (c->st != CS_CONFIRMED) {
         err = SIP_ERR_STATE;
-    } else if (c->local_hold != hold) {
-        c->reinv_hold = hold;
-        c->reinv_auth_tries = 0;
-        int n = make_sdp(ua, c, NULL, NULL, hold ? SIP_DIR_SENDONLY : SIP_DIR_SENDRECV);
-        if (n < 0) {
-            err = SIP_ERR_OVERFLOW;
-        } else {
-            send_in_dialog(ua, c, "INVITE", SIP_METHOD_INVITE, OWN_REINVITE, ua->sdp, (size_t)n, true);
+    } else {
+        c->hold_want = hold;
+        if (!c->reinv_txn && !c->awaiting_ack && c->reinv_retry_at == 0 && c->local_hold != hold) {
+            reinv_kick(ua, c);
             err = c->reinv_txn ? SIP_OK : SIP_ERR_NOMEM;
-            LOGI("call %d: %s", c->handle, hold ? "hold" : "resume");
+        } else if (c->local_hold != hold || c->reinv_txn) {
+            LOGI("call %d: %s queued", c->handle, hold ? "hold" : "resume");
         }
     }
     sipua_leave(ua);
     return err;
+}
+
+static sip_err_t start_refer(sip_ua_t *ua, call_t *c)
+{
+    c->refer_auth_tries = 0;
+    c->refer_accepted = false;
+    send_refer(ua, c);
+    if (!c->refer_txn) {
+        return SIP_ERR_NOMEM;
+    }
+    c->refer_active = true;
+    LOGI("call %d: REFER to %s", c->handle, c->refer_to);
+    emit_xfer(ua, c, SIP_XFER_TRYING, 0);
+    return SIP_OK;
+}
+
+static sip_err_t refer_check(const call_t *c)
+{
+    if (!c) {
+        return SIP_ERR_NOT_FOUND;
+    }
+    if (c->st != CS_CONFIRMED || !c->dlg_valid) {
+        return SIP_ERR_STATE;
+    }
+    if (c->refer_active || c->refer_txn) {
+        return SIP_ERR_BUSY;
+    }
+    return SIP_OK;
+}
+
+sip_err_t sip_call_transfer(sip_ua_t *ua, sip_call_handle_t call, const char *target)
+{
+    if (!target || !target[0]) {
+        return SIP_ERR_ARG;
+    }
+    sipua_enter(ua);
+    call_t *c = find_call(ua, call);
+    sip_err_t err = refer_check(c);
+    char uri[SIP_URI_MAX];
+    if (err == SIP_OK && sipua_build_ruri(ua, target, uri, sizeof(uri)) != 0) {
+        err = SIP_ERR_ARG;
+    }
+    if (err == SIP_OK) {
+        snprintf(c->refer_to, sizeof(c->refer_to), "<%s>", uri);
+        err = start_refer(ua, c);
+    }
+    sipua_leave(ua);
+    return err;
+}
+
+sip_err_t sip_call_transfer_replace(sip_ua_t *ua, sip_call_handle_t call, sip_call_handle_t consult)
+{
+    sipua_enter(ua);
+    call_t *c = find_call(ua, call);
+    call_t *k = find_call(ua, consult);
+    sip_err_t err = refer_check(c);
+    if (err == SIP_OK && (!k || k == c)) {
+        err = SIP_ERR_NOT_FOUND;
+    }
+    if (err == SIP_OK && (k->st != CS_CONFIRMED || !k->dlg_valid)) {
+        err = SIP_ERR_STATE;
+    }
+    if (err == SIP_OK) {
+        /* the target as we know it: the remote URI of the consultation dialog */
+        char uri[SIP_URI_MAX];
+        sip_nameaddr_t na;
+        if (k->outgoing) {
+            snprintf(uri, sizeof(uri), "%s", k->ruri);
+        } else if (sip_nameaddr_parse(sip_str_c(k->dlg.remote_na), &na, false) != 0 ||
+                   sip_str_copy(uri, sizeof(uri), na.uri) < 0) {
+            err = SIP_ERR_STATE;
+        }
+        if (err == SIP_OK && sipua_refer_to_replaces(c->refer_to, sizeof(c->refer_to), uri, k->dlg.call_id,
+                                                      k->dlg.remote_tag, k->dlg.local_tag) != 0) {
+            err = SIP_ERR_OVERFLOW;
+        }
+        if (err == SIP_OK) {
+            err = start_refer(ua, c);
+        }
+    }
+    sipua_leave(ua);
+    return err;
+}
+
+sip_err_t sip_call_send_info_dtmf(sip_ua_t *ua, sip_call_handle_t call, char digit, unsigned duration_ms)
+{
+    if (!((digit >= '0' && digit <= '9') || digit == '*' || digit == '#' || (digit >= 'A' && digit <= 'D'))) {
+        return SIP_ERR_ARG;
+    }
+    sipua_enter(ua);
+    sip_err_t err = SIP_OK;
+    call_t *c = find_call(ua, call);
+    if (!c) {
+        err = SIP_ERR_NOT_FOUND;
+    } else if (c->st != CS_CONFIRMED || !c->dlg_valid) {
+        err = SIP_ERR_STATE;
+    } else {
+        char body[48];
+        int n = snprintf(body, sizeof(body), "Signal=%c\r\nDuration=%u\r\n", digit,
+                         duration_ms ? duration_ms : 160u);
+        send_in_dialog_x(ua, c, "INFO", SIP_METHOD_INFO, OWN_INFO, "application/dtmf-relay", body, (size_t)n,
+                         false, NULL);
+        LOGI("call %d: INFO DTMF '%c'", c->handle, digit);
+    }
+    sipua_leave(ua);
+    return err;
+}
+
+void sip_ua_set_call_waiting(sip_ua_t *ua, bool on)
+{
+    ua->call_waiting = on;
+}
+
+void sip_ua_set_dnd(sip_ua_t *ua, bool on)
+{
+    ua->dnd = on;
+}
+
+uint32_t sipua_glare_delay_ms(sip_ua_t *ua, bool own_call_id)
+{
+    uint32_t r = ua->rand(ua->rand_ctx);
+    return own_call_id ? 2100u + (r % 191u) * 10u : (r % 201u) * 10u;
+}
+
+/* RFC 3261 §25.1 hvalue: unreserved / hnv-unreserved / escaped */
+static void w_hvalue(sip_wbuf_t *w, const char *s)
+{
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+            strchr("-_.!~*'()[]/?:+$", *p)) {
+            sip_w_mem(w, p, 1);
+        } else {
+            sip_w_fmt(w, "%%%02X", *p);
+        }
+    }
+}
+
+int sipua_refer_to_replaces(char *out, size_t cap, const char *uri, const char *call_id, const char *to_tag,
+                            const char *from_tag)
+{
+    /* Replaces=<call-id>;to-tag=<t>;from-tag=<f>, the whole value escaped */
+    char rv[SIP_CALLID_MAX + 2 * SIP_TAG_MAX + 32];
+    int n = snprintf(rv, sizeof(rv), "%s;to-tag=%s;from-tag=%s", call_id, to_tag, from_tag);
+    if (n < 0 || (size_t)n >= sizeof(rv) || strchr(uri, '?') || strchr(uri, '>')) {
+        return -1;
+    }
+    sip_wbuf_t w;
+    sip_w_init(&w, out, cap);
+    sip_w_fmt(&w, "<%s?Replaces=", uri);
+    w_hvalue(&w, rv);
+    sip_w_cstr(&w, ">");
+    return w.overflow ? -1 : 0;
+}
+
+/* "name=N" parameter as seconds (0-3600), -1 if absent / malformed. */
+static int param_secs(sip_str_t params, const char *name)
+{
+    sip_str_t v;
+    uint32_t x;
+    if (params.p && sip_param_find(params, name, &v) && sip_str_to_u32(sip_str_trim(v), 3600, &x)) {
+        return (int)x;
+    }
+    return -1;
+}
+
+/* case-insensitive substring */
+static bool str_icontains(sip_str_t s, const char *needle)
+{
+    size_t n = strlen(needle);
+    for (size_t i = 0; i + n <= s.len; i++) {
+        if (sip_str_ieq_c((sip_str_t){ s.p + i, n }, needle)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Part of a Call-Info / Alert-Info item after its "<URI>" (all of it if none). */
+static sip_str_t after_uri(sip_str_t item)
+{
+    const char *gt = memchr(item.p, '>', item.len);
+    return gt ? (sip_str_t){ gt + 1, (size_t)(item.p + item.len - gt - 1) } : item;
+}
+
+/* Header params of an item: from the first ';' after the URI. */
+static sip_str_t info_params(sip_str_t item)
+{
+    sip_str_t t = after_uri(item);
+    const char *semi = t.len ? memchr(t.p, ';', t.len) : NULL;
+    return semi ? (sip_str_t){ semi, (size_t)(t.p + t.len - semi) } : SIP_STR_NULL;
+}
+
+int sipua_answer_after(const sip_msg_t *m)
+{
+    for (int i = 0; i < m->n_call_info; i++) {
+        sip_str_t rest = m->call_info[i], item;
+        bool err = false;
+        while (sip_list_next(&rest, &item, &err)) {
+            int d = param_secs(info_params(item), "answer-after");
+            if (d >= 0) {
+                return d;
+            }
+        }
+    }
+    static const char *const k_auto[] = {
+        "alert-autoanswer", "autoanswer", "auto-answer", "auto answer", "ring answer", "intercom",
+    };
+    for (int i = 0; i < m->n_alert_info; i++) {
+        sip_str_t rest = m->alert_info[i], item;
+        bool err = false;
+        while (sip_list_next(&rest, &item, &err)) {
+            sip_str_t params = info_params(item);
+            int d = param_secs(params, "answer-after");
+            if (d >= 0) {
+                return d;
+            }
+            /* only outside the <URI>: a ringtone URL may contain anything */
+            sip_str_t txt = after_uri(item);
+            for (size_t k = 0; k < sizeof(k_auto) / sizeof(k_auto[0]); k++) {
+                if (str_icontains(txt, k_auto[k])) {
+                    d = param_secs(params, "delay");
+                    return d >= 0 ? d : 0;
+                }
+            }
+        }
+    }
+    return -1;
 }
 
 sip_ua_call_state_t sip_call_state(const sip_ua_t *ua, sip_call_handle_t call)

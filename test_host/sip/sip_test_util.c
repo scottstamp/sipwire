@@ -139,6 +139,7 @@ static void call_cb(void *ctx, sip_call_handle_t call, const sip_call_info_t *in
     e->state = info->state;
     e->reason = info->end_reason;
     e->code = info->status_code;
+    e->answer_after = info->answer_after;
     snprintf(e->number, sizeof(e->number), "%s", info->number);
     snprintf(e->display, sizeof(e->display), "%s", info->display_name);
     if (f->hangup_in_callback && info->state == SIP_UA_CALL_ACTIVE) {
@@ -171,6 +172,21 @@ static void mwi_cb(void *ctx, bool waiting, int new_msgs, int old_msgs)
     e->code = old_msgs;
 }
 
+static void xfer_cb(void *ctx, sip_call_handle_t call, sip_xfer_state_t st, int code)
+{
+    fx_ev_t *e = push_ev(ctx, FXE_XFER, call);
+    e->state = st;
+    e->code = code;
+}
+
+static void rejected_cb(void *ctx, const char *number, const char *display, int code)
+{
+    fx_ev_t *e = push_ev(ctx, FXE_REJECTED, 0);
+    e->code = code;
+    snprintf(e->number, sizeof(e->number), "%s", number);
+    snprintf(e->display, sizeof(e->display), "%s", display);
+}
+
 void fx_init(fx_t *f, void (*cfg_tweak)(sip_ua_config_t *cfg))
 {
     memset(f, 0, sizeof(*f));
@@ -199,6 +215,8 @@ void fx_init(fx_t *f, void (*cfg_tweak)(sip_ua_config_t *cfg))
             .media = media_cb,
             .blf_state = blf_cb,
             .mwi = mwi_cb,
+            .transfer = xfer_cb,
+            .call_rejected = rejected_cb,
             .ctx = f,
         },
     };

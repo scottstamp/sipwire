@@ -389,7 +389,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         }
         return;
     }
-    if (base == SIPWIRE_CALL_EVENT && data &&
+    if (base == SIPWIRE_CALL_EVENT && data && (id == CALL_EVENT_STATE || id == CALL_EVENT_SECOND) &&
         ((const call_event_state_t *)data)->state == CALL_RINGING_IN) {
         display_wake();
     }

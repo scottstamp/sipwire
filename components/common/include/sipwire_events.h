@@ -57,9 +57,18 @@ typedef struct {
     uint16_t old_msgs;
 } sip_event_mwi_t;
 
-/* SIPWIRE_CALL_EVENT — call lifecycle (emitted by phone) */
+/* SIPWIRE_CALL_EVENT — call lifecycle (emitted by phone). The phone has two
+ * call lines: the foreground call (the one with audio, CALL_EVENT_STATE) and
+ * a background call (CALL_EVENT_SECOND): a waiting incoming call
+ * (CALL_RINGING_IN), or a call on hold behind the foreground one (CALL_HELD;
+ * briefly CALL_ACTIVE until its hold is confirmed). Swapping exchanges them
+ * (both events are posted). */
 typedef enum {
-    CALL_EVENT_STATE,          /* call_event_state_t */
+    CALL_EVENT_STATE,          /* call_event_state_t: foreground call */
+    CALL_EVENT_SECOND,         /* call_event_state_t: background call; CALL_ENDED (end_code) when it
+                                  goes away, CALL_IDLE when it was promoted to the foreground */
+    CALL_EVENT_TRANSFER,       /* call_event_transfer_t: transfer progress / result */
+    CALL_EVENT_MISSED,         /* call_event_missed_t: incoming call refused without ringing */
 } call_event_id_t;
 
 typedef enum {
@@ -78,6 +87,30 @@ typedef struct {
     char name[64];
     int end_code;              /* SIP status for CALL_ENDED, 0 = normal hangup */
 } call_event_state_t;
+
+typedef enum {
+    XFER_IDLE,                 /* no transfer */
+    XFER_CONSULT,              /* attended: consultation call placed, original on hold */
+    XFER_TRYING,               /* REFER sent */
+    XFER_ACCEPTED,             /* REFER accepted (202) */
+    XFER_PROGRESS,             /* target is being called (code: 1xx from the NOTIFY) */
+    XFER_DONE,                 /* transferred (code: 2xx, 0 if the far end just hung up); calls hung up */
+    XFER_FAILED,               /* code: SIP status (REFER or NOTIFY), 408 timeout; the call is kept */
+} xfer_state_t;
+
+typedef struct {
+    xfer_state_t state;
+    bool attended;
+    int code;
+    char target[64];           /* number / URI the call is transferred to */
+} call_event_transfer_t;
+
+typedef struct {
+    char number[64];
+    char name[64];
+    int code;                  /* what the caller got (486) */
+    bool dnd;                  /* refused because of do-not-disturb (else: busy) */
+} call_event_missed_t;
 
 /* SIPWIRE_KEY_EVENT — physical keypad */
 typedef enum {

@@ -14,7 +14,10 @@
 #include "sip_txn.h"
 #include "sip_ua.h"
 
-#define MAX_CALLS        2
+#define MAX_CALLS        4      /* 2 visible + slots still cleaning up */
+#define MAX_VISIBLE      2      /* call waiting / consultation */
+#define REFER_TO_MAX     640
+#define REFER_TIMEOUT_MS 60000u /* accepted REFER without a final NOTIFY */
 #define EVQ_LEN          24
 #define STR_MAX          64
 #define TAG_LEN          16
@@ -33,6 +36,8 @@ typedef enum {
     OWN_BYE,
     OWN_SERVER_INVITE, /* incoming INVITE / re-INVITE */
     OWN_SUBSCRIBE,     /* SUBSCRIBE (initial, refresh, un-SUBSCRIBE); owner_ref = sub handle */
+    OWN_REFER,         /* our REFER (transfer) */
+    OWN_INFO,          /* our INFO (DTMF) */
 } owner_t;
 
 typedef enum {
@@ -115,6 +120,19 @@ typedef struct {
     uint32_t reinv_txn;
     bool reinv_hold;
     uint8_t reinv_auth_tries;
+    bool hold_want;            /* hold state the app asked for (sent when possible) */
+    uint64_t reinv_retry_at;   /* 491: not before this time */
+
+    /* auto answer requested by the caller (Call-Info / Alert-Info), -1 none */
+    int answer_after;
+
+    /* our REFER (transfer) and its implicit subscription */
+    uint32_t refer_txn;
+    uint8_t refer_auth_tries;
+    bool refer_active;         /* REFER sent, no final result reported yet */
+    bool refer_accepted;       /* 2xx to the REFER */
+    uint64_t refer_deadline;
+    char refer_to[REFER_TO_MAX];
 
     uint64_t deadline;         /* CS_ENDING cleanup */
 } call_t;
@@ -196,14 +214,15 @@ typedef struct {
     sub_dlg_t dlg_state[SUB_DLG_MAX];
 } sub_t;
 
-typedef enum { EV_REG, EV_INCOMING, EV_CALL, EV_MEDIA, EV_BLF, EV_MWI } ev_kind_t;
+typedef enum { EV_REG, EV_INCOMING, EV_CALL, EV_MEDIA, EV_BLF, EV_MWI, EV_XFER, EV_REJECTED } ev_kind_t;
 
 typedef struct {
     ev_kind_t kind;
     sip_call_handle_t call;    /* EV_BLF: subscription handle */
-    int state;                 /* EV_BLF: sip_blf_state_t; EV_MWI: waiting */
+    int state;                 /* EV_BLF: sip_blf_state_t; EV_MWI: waiting; EV_XFER: sip_xfer_state_t */
     int reason;                /* EV_MWI: new messages */
     int code;                  /* EV_MWI: old messages */
+    int answer_after;          /* EV_CALL */
     bool outgoing;
     char number[STR_MAX];      /* EV_BLF: extension */
     char display[STR_MAX];
@@ -255,6 +274,8 @@ struct sip_ua {
     sip_auth_t auth;                 /* cached credentials */
     call_t calls[MAX_CALLS];
     sip_call_handle_t next_handle;
+    bool call_waiting;               /* offer a second incoming call */
+    bool dnd;                        /* refuse every incoming call (486) */
     sub_t subs[SIP_UA_MAX_SUBS];
     sip_sub_handle_t next_sub;
     uint32_t sub_expires;
@@ -310,6 +331,15 @@ bool sipua_auth_retry(sip_ua_t *ua, uint8_t *tries, const sip_msg_t *m);
 uint32_t sipua_refresh_delay_s(uint32_t expires);
 /* "sip:" URI for a number / user part (escaped) or a full sip: URI. */
 int sipua_build_ruri(sip_ua_t *ua, const char *number, char *out, size_t cap);
+/* Refer-To value "<uri?Replaces=...>" for an attended transfer (RFC 3891 /
+ * RFC 3261 §19.1.1 header escaping). Returns -1 on overflow. */
+int sipua_refer_to_replaces(char *out, size_t cap, const char *uri, const char *call_id, const char *to_tag,
+                            const char *from_tag);
+/* Auto answer delay requested by an INVITE (Call-Info answer-after, Alert-Info
+ * auto answer variants): seconds, or -1 for none. */
+int sipua_answer_after(const sip_msg_t *m);
+/* §14.1 retry delay after a 491 (ms): 2100-4000 if we own the Call-ID, else 0-2000. */
+uint32_t sipua_glare_delay_ms(sip_ua_t *ua, bool own_call_id);
 void sipua_enter(sip_ua_t *ua);
 void sipua_leave(sip_ua_t *ua);
 

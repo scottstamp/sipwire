@@ -20,8 +20,39 @@
  * the outermost entry point returns; the handle must not be used afterwards).
  * String pointers passed to callbacks are valid only during the callback.
  *
- * Calls: at most one call is visible to the application at a time. A second
- * incoming INVITE while a call exists is answered 486 Busy Here internally.
+ * Calls: at most two calls are visible to the application at a time (call
+ * waiting, attended transfer). A second incoming INVITE is offered (normal
+ * incoming_call + RINGING_IN) only while exactly one call exists, that call
+ * is established (ACTIVE or HELD) and call waiting is on
+ * (sip_ua_set_call_waiting, default on); otherwise it is answered 486 Busy
+ * Here internally and reported through cb.call_rejected. With DND on
+ * (sip_ua_set_dnd) every new INVITE gets 486 without ringing (also reported
+ * through call_rejected). A second outgoing call (sip_call_dial) is allowed
+ * while the only other call is established (consultation call).
+ *
+ * Hold: sip_call_hold() records the wanted state and sends the re-INVITE as
+ * soon as no other INVITE transaction of the call is in flight. A 491
+ * (glare) is retried after the RFC 3261 §14.1 random delay: 2.1-4 s if we
+ * own the Call-ID (we placed the call), else 0-2 s.
+ *
+ * Transfer (RFC 3515): sip_call_transfer() (blind) and
+ * sip_call_transfer_replace() (attended, Refer-To with Replaces, RFC 3891)
+ * send a REFER and report progress through cb.transfer: TRYING, ACCEPTED on
+ * 202, PROGRESS for 1xx sipfrag NOTIFYs of the implicit subscription,
+ * SUCCESS for a 2xx sipfrag, FAILED for a REFER error / timeout, a >= 300
+ * sipfrag, or a subscription that terminated without a final status. The
+ * call itself is left alone (the application hangs it up on SUCCESS).
+ * Incoming REFER is declined (603).
+ *
+ * DTMF via SIP INFO: sip_call_send_info_dtmf() (application/dtmf-relay) for
+ * peers without telephone-event. Incoming INFO DTMF (application/dtmf-relay
+ * or application/dtmf) is answered 200 and logged.
+ *
+ * Auto answer (paging / intercom): an incoming INVITE with
+ * "Call-Info: <...>;answer-after=N" or an Alert-Info asking for auto answer
+ * ("info=alert-autoanswer", "Ring Answer", "intercom", "auto answer",
+ * optional ";delay=N") reports answer_after = N (seconds, else -1) in
+ * sip_call_info_t. The UA does not answer by itself.
  *
  * Subscriptions (RFC 6665): up to SIP_UA_MAX_BLF "dialog" subscriptions (BLF,
  * RFC 4235) and one "message-summary" subscription (MWI, RFC 3842). They are
@@ -134,7 +165,17 @@ typedef struct {
     bool outgoing;
     const char *number;               /* remote user part, unescaped */
     const char *display_name;         /* may be "" */
+    int answer_after;                 /* incoming: auto answer requested after N s, -1 = no */
 } sip_call_info_t;
+
+/* Transfer progress (cb.transfer). */
+typedef enum {
+    SIP_XFER_TRYING,                  /* REFER sent */
+    SIP_XFER_ACCEPTED,                /* 202 Accepted */
+    SIP_XFER_PROGRESS,                /* NOTIFY sipfrag 1xx (code) */
+    SIP_XFER_SUCCESS,                 /* NOTIFY sipfrag 2xx (code) */
+    SIP_XFER_FAILED,                  /* code: REFER status, sipfrag status, 408, 0 = unknown */
+} sip_xfer_state_t;
 
 typedef struct {
     uint32_t remote_ip;               /* host byte order */
@@ -162,6 +203,10 @@ typedef struct {
     /* Message waiting indication (subscription or unsolicited NOTIFY),
      * reported when it changes. new_msgs / old_msgs: voice messages. */
     void (*mwi)(void *ctx, bool waiting, int new_msgs, int old_msgs);
+    /* Transfer (REFER) of `call` progressed. */
+    void (*transfer)(void *ctx, sip_call_handle_t call, sip_xfer_state_t state, int code);
+    /* An incoming INVITE was refused without being offered (busy, DND). */
+    void (*call_rejected)(void *ctx, const char *number, const char *display_name, int code);
     void *ctx;
 } sip_ua_callbacks_t;
 
@@ -261,7 +306,8 @@ sip_ua_reg_state_t sip_ua_reg_state(const sip_ua_t *ua);
 sip_err_t sip_ua_set_local_addr(sip_ua_t *ua, const sip_addr_t *local);
 
 /* Place a call. number: dialable digits/user part (escaped as needed), or a
- * full "sip:" URI. Returns SIP_ERR_BUSY if a call already exists. */
+ * full "sip:" URI. Returns SIP_ERR_BUSY if two calls exist, or one that is
+ * not established. */
 sip_err_t sip_call_dial(sip_ua_t *ua, const char *number, sip_call_handle_t *out);
 
 /* Answer an incoming ringing call (200 OK with SDP answer). */
@@ -275,8 +321,26 @@ sip_err_t sip_call_reject(sip_ua_t *ua, sip_call_handle_t call, int code);
  * cleanup (waiting for 487, 200/CANCEL race → ACK+BYE) continues internally. */
 sip_err_t sip_call_hangup(sip_ua_t *ua, sip_call_handle_t call);
 
-/* Local hold/resume via re-INVITE (a=sendonly / a=sendrecv). */
+/* Local hold/resume via re-INVITE (a=sendonly / a=sendrecv). Queued while
+ * another INVITE transaction of the call is in flight; the state changes to
+ * HELD / ACTIVE on the 2xx. SIP_ERR_STATE if the call is not established. */
 sip_err_t sip_call_hold(sip_ua_t *ua, sip_call_handle_t call, bool hold);
+
+/* Blind transfer: REFER with Refer-To: <sip:target@domain> (or a full sip:
+ * URI). One transfer per call at a time (SIP_ERR_BUSY). */
+sip_err_t sip_call_transfer(sip_ua_t *ua, sip_call_handle_t call, const char *target);
+
+/* Attended transfer: REFER on `call` with Refer-To: <consult remote URI
+ * ?Replaces=call-id;to-tag=..;from-tag=..> naming the established `consult`
+ * dialog. */
+sip_err_t sip_call_transfer_replace(sip_ua_t *ua, sip_call_handle_t call, sip_call_handle_t consult);
+
+/* One DTMF digit as SIP INFO (application/dtmf-relay, Signal= / Duration=). */
+sip_err_t sip_call_send_info_dtmf(sip_ua_t *ua, sip_call_handle_t call, char digit, unsigned duration_ms);
+
+/* Incoming call policy (default: call waiting on, DND off). */
+void sip_ua_set_call_waiting(sip_ua_t *ua, bool on);
+void sip_ua_set_dnd(sip_ua_t *ua, bool on);
 
 /* Current state of a call, SIP_UA_CALL_IDLE if unknown. */
 sip_ua_call_state_t sip_call_state(const sip_ua_t *ua, sip_call_handle_t call);

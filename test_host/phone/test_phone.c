@@ -621,9 +621,47 @@ static void test_build_model_blf_mwi(void)
     TEST_ASSERT_EQUAL_STRING("", loc.vm_number);
 }
 
+static void test_tone_call_waiting(void)
+{
+    /* beep only while the foreground call is established and the other rings */
+    TEST_ASSERT_EQUAL(PHONE_TONE_CALL_WAITING,
+                      phone_tone_waiting(PHONE_TONE_NONE, SIP_UA_CALL_ACTIVE, SIP_UA_CALL_RINGING_IN));
+    TEST_ASSERT_EQUAL(PHONE_TONE_CALL_WAITING,
+                      phone_tone_waiting(PHONE_TONE_NONE, SIP_UA_CALL_HELD, SIP_UA_CALL_RINGING_IN));
+    TEST_ASSERT_EQUAL(PHONE_TONE_NONE, phone_tone_waiting(PHONE_TONE_NONE, SIP_UA_CALL_ACTIVE, SIP_UA_CALL_IDLE));
+    TEST_ASSERT_EQUAL(PHONE_TONE_NONE, phone_tone_waiting(PHONE_TONE_NONE, SIP_UA_CALL_ACTIVE, SIP_UA_CALL_HELD));
+    TEST_ASSERT_EQUAL(PHONE_TONE_RINGBACK,
+                      phone_tone_waiting(PHONE_TONE_RINGBACK, SIP_UA_CALL_RINGING_OUT, SIP_UA_CALL_RINGING_IN));
+    TEST_ASSERT_EQUAL(PHONE_TONE_RING,
+                      phone_tone_waiting(PHONE_TONE_RING, SIP_UA_CALL_RINGING_IN, SIP_UA_CALL_IDLE));
+    TEST_ASSERT_EQUAL(PHONE_TONE_NONE,
+                      phone_tone_waiting(PHONE_TONE_NONE, SIP_UA_CALL_ENDED, SIP_UA_CALL_RINGING_IN));
+}
+
+static void test_auto_answer_policy(void)
+{
+    TEST_ASSERT_TRUE(phone_auto_answer(0, true, false));
+    TEST_ASSERT_TRUE(phone_auto_answer(3, true, false));
+    TEST_ASSERT_FALSE(phone_auto_answer(-1, true, false));   /* not a page */
+    TEST_ASSERT_FALSE(phone_auto_answer(0, false, false));   /* setting off */
+    TEST_ASSERT_FALSE(phone_auto_answer(0, true, true));     /* in a call: waits like any call */
+}
+
+static void test_xfer_map(void)
+{
+    TEST_ASSERT_EQUAL(XFER_TRYING, phone_xfer_map(SIP_XFER_TRYING));
+    TEST_ASSERT_EQUAL(XFER_ACCEPTED, phone_xfer_map(SIP_XFER_ACCEPTED));
+    TEST_ASSERT_EQUAL(XFER_PROGRESS, phone_xfer_map(SIP_XFER_PROGRESS));
+    TEST_ASSERT_EQUAL(XFER_DONE, phone_xfer_map(SIP_XFER_SUCCESS));
+    TEST_ASSERT_EQUAL(XFER_FAILED, phone_xfer_map(SIP_XFER_FAILED));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_tone_call_waiting);
+    RUN_TEST(test_auto_answer_policy);
+    RUN_TEST(test_xfer_map);
     RUN_TEST(test_tone_per_state);
     RUN_TEST(test_early_media_replaces_ringback);
     RUN_TEST(test_busy_tone_only_for_refused_outgoing);

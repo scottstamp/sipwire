@@ -45,6 +45,8 @@ include `_boot.inc` / `_account.inc` (boot, account config, registration) as com
 | `20-call-inbound` | OTA refusals (wrong/junk/missing image), inbound answer/reject, unknown number, account change, account removal, `tasks`/`cpu` | 13 s |
 | `30-blf-mwi` | BLF ringing/busy/idle, MWI voicemail left and deleted, live BLF list change | 13 s |
 | `40-ota` | live time settings, the real OTA update, reboot, boot from `ota_1`, marked valid | 18 s |
+| `50-call-waiting` | DND (486 + missed call event), page auto answer (Asterisk ext 650: Dial with a `Call-Info: answer-after=0` pre-dial header), call waiting answer2/swap/hangup → held call promoted, reject2 | 12 s |
+| `60-transfer` | blind transfer of a bridged inbound call (REFER → ext 603, sipfrag 200, we hang up), failed transfer (404) keeps the call, attended transfer (consultation call to 600, REFER with Replaces) | 8 s |
 
 Add a shard by dropping a file in `smoke.d/`; keep the slowest one near the others (the run
 takes as long as the slowest shard).

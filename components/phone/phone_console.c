@@ -126,11 +126,25 @@ static int cmd_vol(int argc, char **argv)
     return 0;
 }
 
+static const char *xfer_name(xfer_state_t x)
+{
+    switch (x) {
+    case XFER_IDLE:     return "idle";
+    case XFER_CONSULT:  return "consulting";
+    case XFER_TRYING:   return "trying";
+    case XFER_ACCEPTED: return "accepted";
+    case XFER_PROGRESS: return "in progress";
+    case XFER_DONE:     return "done";
+    case XFER_FAILED:   return "failed";
+    default:            return "?";
+    }
+}
+
 static int cmd_sip(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    phone_status_t st;
+    static phone_status_t st;           /* console task only */
     phone_get_status(&st);
     printf("registration: %s (last code %d)\n", reg_name(st.reg), st.reg_code);
     printf("server:       %s\n", st.server[0] ? st.server : "(none)");
@@ -145,9 +159,89 @@ static int cmd_sip(int argc, char **argv)
     if ((st.call == CALL_ACTIVE || st.call == CALL_HELD) && st.call_start_us) {
         printf(" %" PRId64 " s", (esp_timer_get_time() - st.call_start_us) / 1000000);
     }
+    if (st.line) {
+        printf(" [line %u%s]", st.line, st.auto_answered ? ", auto answered" : "");
+    }
     printf("\n");
+    if (st.second.call != CALL_IDLE) {
+        printf("second call:  %s %s %s%s%s [line %u]\n",
+               st.second.call == CALL_RINGING_IN ? "waiting" : call_name(st.second.call),
+               st.second.outgoing ? "to" : "from", st.second.number, st.second.name[0] ? " " : "",
+               st.second.name, st.second.line);
+    }
+    if (st.xfer.state != XFER_IDLE) {
+        printf("transfer:     %s%s to %s (code %d)\n", st.xfer.attended ? "attended, " : "", xfer_name(st.xfer.state),
+               st.xfer.target, st.xfer.code);
+    }
     printf("audio:        volume %u, %s, %s\n", st.volume, st.speaker ? "speaker" : "handset",
            st.muted ? "muted" : "mic on");
+    printf("features:     dnd %s, call waiting %s, auto answer %s\n", st.dnd ? "on" : "off",
+           st.call_waiting ? "on" : "off", st.auto_answer ? "on" : "off");
+    return 0;
+}
+
+static int cmd_answer2(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return report(phone_answer_waiting(), "answer2");
+}
+
+static int cmd_reject2(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return report(phone_reject_waiting(), "reject2");
+}
+
+static int cmd_swap(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return report(phone_swap(), "swap");
+}
+
+static int cmd_xfer(int argc, char **argv)
+{
+    if (argc != 2) {
+        printf("usage: xfer <number|sip:uri>\n");
+        return 1;
+    }
+    return report(phone_transfer_blind(argv[1]), "xfer");
+}
+
+static int cmd_axfer(int argc, char **argv)
+{
+    if (argc != 2) {
+        printf("usage: axfer <number|sip:uri> | axfer complete | axfer cancel\n");
+        return 1;
+    }
+    if (strcmp(argv[1], "complete") == 0) {
+        return report(phone_transfer_attended_complete(), "axfer complete");
+    }
+    if (strcmp(argv[1], "cancel") == 0) {
+        return report(phone_transfer_attended_cancel(), "axfer cancel");
+    }
+    return report(phone_transfer_attended_start(argv[1]), "axfer");
+}
+
+static int cmd_dnd(int argc, char **argv)
+{
+    if (argc == 2 && (strcmp(argv[1], "on") == 0 || strcmp(argv[1], "off") == 0)) {
+        bool on = strcmp(argv[1], "on") == 0;
+        if (report(phone_set_dnd(on), "dnd")) {
+            return 1;
+        }
+        printf("do not disturb %s\n", on ? "on" : "off");
+        return 0;
+    }
+    if (argc != 1) {
+        printf("usage: dnd [on|off]\n");
+        return 1;
+    }
+    static phone_status_t st;           /* console task only */
+    phone_get_status(&st);
+    printf("do not disturb %s\n", st.dnd ? "on" : "off");
     return 0;
 }
 
@@ -265,6 +359,18 @@ esp_err_t phone_console_register(void)
           .hint = "[delay <samples>|default | suppress <echo> <active> [<noise>]]", .func = cmd_aec },
         { .command = "blf", .help = "BLF keys (setting blf) and their state", .func = cmd_blf },
         { .command = "mwi", .help = "Message waiting (voicemail) state", .func = cmd_mwi },
+        { .command = "answer2", .help = "Answer the waiting call (the current call is put on hold)",
+          .func = cmd_answer2 },
+        { .command = "reject2", .help = "Reject the waiting call (486)", .func = cmd_reject2 },
+        { .command = "swap", .help = "Swap the current and the held call (answers a waiting call)",
+          .func = cmd_swap },
+        { .command = "xfer", .help = "Blind transfer of the current call (REFER)", .hint = "<number>",
+          .func = cmd_xfer },
+        { .command = "axfer", .help = "Attended transfer: hold + call <number>, then 'axfer complete' "
+                                      "(connect them) or 'axfer cancel'",
+          .hint = "<number>|complete|cancel", .func = cmd_axfer },
+        { .command = "dnd", .help = "Do not disturb: refuse incoming calls with 486 (setting dnd)",
+          .hint = "[on|off]", .func = cmd_dnd },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         ESP_RETURN_ON_ERROR(console_register_command(&cmds[i]), TAG, "register %s", cmds[i].command);

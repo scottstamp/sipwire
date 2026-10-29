@@ -40,6 +40,7 @@ typedef enum {
     DSP_TONE_BUSY,
     DSP_TONE_RING,
     DSP_TONE_KEYCLICK,
+    DSP_TONE_CALL_WAITING,
 } dsp_tone_kind_t;
 
 typedef struct {

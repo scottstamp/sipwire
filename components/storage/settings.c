@@ -43,6 +43,10 @@ static const char *TAG = "storage";
 #define K_CODEC_PREF  "codec_pref"
 #define K_BLF         "blf"
 #define K_VM_NUMBER   "vm_number"
+/* call features */
+#define K_CALL_WAIT   "call_waiting"
+#define K_DND         "dnd"
+#define K_AUTO_ANSWER "auto_answer"
 #define K_RING_VOL    "ring_vol"
 #define K_CALL_VOL    "call_vol"
 #define K_MIC_GAIN    "mic_gain"
@@ -72,6 +76,10 @@ static void settings_defaults(settings_t *s)
     s->sip_reg_expires = 300;
     strcpy(s->codec_pref, CODEC_PREF_DEFAULT);
     strcpy(s->vm_number, VM_NUMBER_DEFAULT);
+    /* call features */
+    s->call_waiting = true;
+    s->dnd = false;
+    s->auto_answer = true;
     s->ring_volume = 70;
     s->call_volume = 60;
     s->mic_gain = 50;
@@ -147,6 +155,16 @@ static void load_all(nvs_handle_t h, settings_t *s)
     }
     if (nvs_get_u8(h, K_CLOCK_24H, &u8) == ESP_OK) {
         s->clock_24h = u8 != 0;
+    }
+    /* call features */
+    if (nvs_get_u8(h, K_CALL_WAIT, &u8) == ESP_OK) {
+        s->call_waiting = u8 != 0;
+    }
+    if (nvs_get_u8(h, K_DND, &u8) == ESP_OK) {
+        s->dnd = u8 != 0;
+    }
+    if (nvs_get_u8(h, K_AUTO_ANSWER, &u8) == ESP_OK) {
+        s->auto_answer = u8 != 0;
     }
 
     if (nvs_get_u16(h, K_SIP_PORT, &u16) == ESP_OK && u16 != 0) {
@@ -251,6 +269,16 @@ static esp_err_t store_changed(nvs_handle_t h, const settings_t *in)
     STORE_STR(K_OTA_URL, ota_url);
     if (in->clock_24h != s_cur.clock_24h) {
         ESP_RETURN_ON_ERROR(nvs_set_u8(h, K_CLOCK_24H, in->clock_24h ? 1 : 0), TAG, K_CLOCK_24H);
+    }
+    /* call features */
+    if (in->call_waiting != s_cur.call_waiting) {
+        ESP_RETURN_ON_ERROR(nvs_set_u8(h, K_CALL_WAIT, in->call_waiting ? 1 : 0), TAG, K_CALL_WAIT);
+    }
+    if (in->dnd != s_cur.dnd) {
+        ESP_RETURN_ON_ERROR(nvs_set_u8(h, K_DND, in->dnd ? 1 : 0), TAG, K_DND);
+    }
+    if (in->auto_answer != s_cur.auto_answer) {
+        ESP_RETURN_ON_ERROR(nvs_set_u8(h, K_AUTO_ANSWER, in->auto_answer ? 1 : 0), TAG, K_AUTO_ANSWER);
     }
 
     STORE_NUM(nvs_set_u16, K_SIP_PORT, sip_port);

@@ -172,6 +172,21 @@ static void mwi_cb(void *ctx, bool waiting, int new_msgs, int old_msgs)
     mwi_old = old_msgs;
 }
 
+static const char *xfer_names[] = { "trying", "accepted", "progress", "success", "failed" };
+static int xfer_state = -1;     /* last sip_xfer_state_t, -1 = none */
+
+static void xfer_cb(void *ctx, sip_call_handle_t call, sip_xfer_state_t st, int code)
+{
+    (void)ctx;
+    printf("EVENT transfer call=%d %s code=%d\n", call, xfer_names[st], code);
+    xfer_state = (int)st;
+}
+
+static bool xfer_is(const void *a)
+{
+    return xfer_state == *(const int *)a;
+}
+
 typedef struct {
     int idx;
     sip_blf_state_t st;
@@ -415,6 +430,22 @@ static bool step(const char *st)
         sip_ua_call_state_t want = hold ? SIP_UA_CALL_HELD : SIP_UA_CALL_ACTIVE;
         return sip_call_hold(ua, cur_call, hold) == SIP_OK && run_until(call_is, &want, 5000);
     }
+    if (!strcmp(cmd, "xfer") && arg) {
+        xfer_state = -1;
+        return sip_call_transfer(ua, cur_call, arg) == SIP_OK;
+    }
+    if (!strcmp(cmd, "expect-xfer") && arg) {
+        char *secs = strchr(arg, ':');
+        if (secs) {
+            *secs++ = '\0';
+        }
+        for (int i = 0; i < 5; i++) {
+            if (!strcmp(arg, xfer_names[i])) {
+                return xfer_is(&i) || run_until(xfer_is, &i, (uint64_t)parse_secs(secs, 10) * 1000u);
+            }
+        }
+        return false;
+    }
     if (!strcmp(cmd, "sleep")) {
         run_for((uint64_t)parse_secs(arg, 1) * 1000u);
         return true;
@@ -594,7 +625,7 @@ int main(int argc, char **argv)
         .log = log_cb,
         .log_level = SIP_LOG_VERBOSE,
         .cb = { .reg_state = reg_cb, .incoming_call = incoming_cb, .call_state = call_cb, .media = media_cb,
-                .blf_state = blf_cb, .mwi = mwi_cb },
+                .blf_state = blf_cb, .mwi = mwi_cb, .transfer = xfer_cb },
     };
     memcpy(cfg.codecs, codecs, sizeof(cfg.codecs));
     cfg.n_codecs = (uint8_t)n_codecs;

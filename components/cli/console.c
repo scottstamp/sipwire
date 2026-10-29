@@ -64,6 +64,10 @@ static const field_t s_fields[] = {
     STR_FIELD(codec_pref, F_STR),
     STR_FIELD(blf, F_STR),
     STR_FIELD(vm_number, F_STR),
+    /* call features */
+    FIELD(call_waiting, F_BOOL, 0, 1),
+    FIELD(dnd, F_BOOL, 0, 1),
+    FIELD(auto_answer, F_BOOL, 0, 1),
     FIELD(ring_volume, F_U8, 0, 100),
     FIELD(call_volume, F_U8, 0, 100),
     FIELD(mic_gain, F_U8, 0, 100),

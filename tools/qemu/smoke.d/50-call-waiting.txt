@@ -1,0 +1,65 @@
+# Shard: do-not-disturb, call waiting (answer / swap / reject), page auto answer.
+include _account.inc
+
+# DND: refused with 486 without ringing, reported as a missed call
+do dnd on
+expect ^do not disturb on 5
+# the setting reaches the SIP task a moment after the reply
+expect phone: do not disturb on 5
+shell ($ASTX 'channel originate PJSIP/1001 application Wait 1' >/dev/null 2>&1 &)
+expect missed call from .*\(do not disturb, 486\) 10
+absent call: ringing-in 1
+do dnd off
+expect ^do not disturb off 5
+expect phone: do not disturb off 5
+
+# page (Call-Info: <...>;answer-after=0 on the INVITE, extension 650): answered at once on
+# the loudspeaker, never rings; Asterisk hangs up 2 s later
+shell ($ASTX 'channel originate Local/650@sipwire-test/n application Wait 2' >/dev/null 2>&1 &)
+expect auto answered 10
+expect call: active 5
+do sip
+expect ^call:\s+active .*auto answered
+expect ^audio: .*speaker
+expect call: ended .*\(code 0\) 10
+expect call: idle 5
+
+# call waiting: in a call to 600 (echo) a second inbound call waits (beep), is answered
+# (600 goes on hold), the calls are swapped, 600 is hung up: the other call comes to the
+# foreground still held, is resumed and hung up (Asterisk would end it 12 s after our answer)
+do call 600
+expect call: active 600 15
+shell ($ASTX 'channel originate PJSIP/1001 application Wait 12' >/dev/null 2>&1 &)
+expect call waiting: 10
+expect second call: ringing-in 5
+do sip
+expect ^second call:\s+waiting
+do answer2
+expect second call: held 600 10
+do swap
+# the resume of 600 and the hold of the other call complete in either order
+expect (call: active 600|second call: held) 10
+expect (call: active 600|second call: held) 10
+do hangup
+expect call: ended 600 \(code 0\) 10
+expect second call: to foreground 5
+expect call: held 5
+do resume
+expect call: active 10
+do hangup
+expect call: ended .*\(code 0\) 5
+# hangup in ENDED: idle at once
+do hangup
+expect call: idle 5
+
+# a waiting call rejected (486 to the caller); the current call goes on
+do call 600
+expect call: active 600 15
+shell ($ASTX 'channel originate PJSIP/1001 application Wait 1' >/dev/null 2>&1 &)
+expect second call: ringing-in 10
+do reject2
+expect second call: ended 5
+do sip
+expect ^call:\s+active
+do hangup
+expect call: idle 5

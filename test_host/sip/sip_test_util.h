@@ -23,7 +23,9 @@ typedef struct {
 
 /* FXE_BLF: call = subscription handle, state = sip_blf_state_t, number = ext.
  * FXE_MWI: state = waiting, reason = new, code = old. */
-typedef enum { FXE_REG, FXE_INCOMING, FXE_CALL, FXE_MEDIA, FXE_BLF, FXE_MWI } fx_ev_kind_t;
+/* FXE_XFER: state = sip_xfer_state_t, code. FXE_REJECTED: number, display, code.
+ * FXE_CALL: answer_after as reported. */
+typedef enum { FXE_REG, FXE_INCOMING, FXE_CALL, FXE_MEDIA, FXE_BLF, FXE_MWI, FXE_XFER, FXE_REJECTED } fx_ev_kind_t;
 
 typedef struct {
     fx_ev_kind_t kind;
@@ -31,6 +33,7 @@ typedef struct {
     int state;
     int reason;
     int code;
+    int answer_after;
     char number[64];
     char display[64];
     sip_media_info_t media;

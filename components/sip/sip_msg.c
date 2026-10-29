@@ -674,7 +674,7 @@ typedef enum {
     H_VIA, H_FROM, H_TO, H_CALL_ID, H_CSEQ, H_CONTACT, H_ROUTE, H_RECORD_ROUTE,
     H_CONTENT_LENGTH, H_CONTENT_TYPE, H_WWW_AUTH, H_PROXY_AUTH, H_EXPIRES,
     H_MIN_EXPIRES, H_MAX_FORWARDS, H_ALLOW, H_SUPPORTED, H_REQUIRE, H_USER_AGENT,
-    H_EVENT, H_SUB_STATE, H_RETRY_AFTER,
+    H_EVENT, H_SUB_STATE, H_RETRY_AFTER, H_CALL_INFO, H_ALERT_INFO,
 } hdr_id_t;
 
 static const struct {
@@ -704,6 +704,8 @@ static const struct {
     { "Event", "o", H_EVENT },
     { "Subscription-State", NULL, H_SUB_STATE },
     { "Retry-After", NULL, H_RETRY_AFTER },
+    { "Call-Info", NULL, H_CALL_INFO },
+    { "Alert-Info", NULL, H_ALERT_INFO },
     /* "s" (Subject), "e" (Content-Encoding), "r", "u" compact forms map
      * to headers we ignore. */
 };
@@ -881,6 +883,16 @@ static int header_apply(sip_msg_t *m, sip_str_t name, sip_str_t v)
         m->retry_after = (int)x;
         return 0;
     }
+    case H_CALL_INFO:
+        if (m->n_call_info < SIP_MAX_INFO_HDR) {
+            m->call_info[m->n_call_info++] = v;
+        }
+        return 0;
+    case H_ALERT_INFO:
+        if (m->n_alert_info < SIP_MAX_INFO_HDR) {
+            m->alert_info[m->n_alert_info++] = v;
+        }
+        return 0;
     case H_UNKNOWN:
         return 0;
     }

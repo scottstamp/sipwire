@@ -132,6 +132,12 @@ set +e
     "shell:($ASTX 'channel originate PJSIP/1001 application Wait 3' >/dev/null 2>&1 &)" \
     incoming:10 answer wait:active expect-media wait:ended:10 expect-end:remote \
     \
+    "echo:4b blind transfer (REFER) of a bridged inbound call to 603, NOTIFY sipfrag 200" \
+    "shell:($ASTX 'channel originate Local/1001@sipwire-test/n application Echo' >/dev/null 2>&1 &)" \
+    incoming:10 answer wait:active sleep:1 xfer:603 expect-xfer:success:10 \
+    "shell:$ASTX 'core show channels concise' | grep -q '^Local/1001@sipwire-test-.*;2!sipwire-test!603!'" \
+    hangup sleep:1 "expect-log:BYE answered 200" \
+    \
     "echo:5 unregister" \
     unregister \
     "shell:! $ASTX 'pjsip show contacts' | grep -q '1001/sip:1001@'" \

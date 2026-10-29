@@ -1,0 +1,41 @@
+# Shard: blind and attended transfer (REFER) of an inbound call. The caller is an Asterisk
+# Local channel bridged to us (Echo on its far side), so it is the transferee.
+include _account.inc
+
+# blind: REFER to 603 (dials the echo test); NOTIFY sipfrag 200 -> we hang up
+shell ($ASTX 'channel originate Local/1001@sipwire-test/n application Echo' >/dev/null 2>&1 &)
+expect call: ringing-in 10
+do answer
+expect call: active 5
+# Asterisk refuses (400) to transfer a channel that is not bridged yet: wait until our
+# channel has a bridge id (column 13 of the concise list)
+shell for i in $(seq 50); do $ASTX 'core show channels concise' | awk -F'!' '/^PJSIP\/1001-/ && $13 != "" {f=1} END {exit !f}' && exit 0; sleep 0.1; done; exit 1
+do xfer 603
+expect transfer to 603: trying 5
+expect transfer to 603: done \(2\d\d\) 10
+expect call: ended .*\(code 0\) 10
+expect call: idle 5
+do sip
+expect ^call:\s+idle
+
+# blind transfer to a number that does not exist: the call is kept
+shell ($ASTX 'channel originate Local/1001@sipwire-test/n application Echo' >/dev/null 2>&1 &)
+expect call: ringing-in 10
+do answer
+expect call: active 5
+shell for i in $(seq 50); do $ASTX 'core show channels concise' | awk -F'!' '/^PJSIP\/1001-/ && $13 != "" {f=1} END {exit !f}' && exit 0; sleep 0.1; done; exit 1
+do xfer 777
+expect transfer to 777: failed 10
+do sip
+expect ^call:\s+active
+expect ^transfer:\s+failed to 777
+
+# attended: hold + consultation call to 600 (echo), then connect the caller with it
+do axfer 600
+expect transfer \(attended\) to 600: consulting 5
+expect call: active 600 15
+do sip
+expect ^second call:\s+held
+do axfer complete
+expect transfer \(attended\) to 600: done \(2\d\d\) 10
+expect call: idle 10
