@@ -3,6 +3,8 @@
 usage: python -I run.py <build_dir> <script-file> [log-file]
 script lines:  do <text>                  type a console line, wait for the next `sipwire> ` prompt
                send <text>                type a console line, do not wait for the reply
+               feed <text>                type a line into a command that reads console input itself
+                                          (no prompt wait, no prompt expected; e.g. `contact import`)
                prompt [timeout_s]         wait until the console is idle (a prompt is out)
                expect <regex> [timeout_s]
                absent <regex> [seconds]   fails if a matching line shows up in the window
@@ -162,10 +164,10 @@ def wait_prompt(n_needed, tmo):
     return False
 
 
-def type_line(text):
+def type_line(text, counts=True):
     global sent
     with lock:
-        sent += 1
+        sent += 1 if counts else 0
     out(f'>>> {text}')
     data = (text + '\r').encode()
     if CHAR_DELAY <= 0:
@@ -203,7 +205,7 @@ timing = []
 try:
     for loc, ln in steps(script):
         cmd, _, arg = ln.partition(' ')
-        if cmd in ('do', 'send', 'expect', 'absent', 'poll'):
+        if cmd in ('do', 'send', 'feed', 'expect', 'absent', 'poll'):
             arg = expand(arg)
         t_step = time.monotonic()
         if cmd in ('do', 'send'):
@@ -222,6 +224,8 @@ try:
                 if not ok:
                     rc = 1
                     break
+        elif cmd == 'feed':
+            type_line(arg, counts=False)
         elif cmd == 'prompt':
             tmo = float(arg) if arg else CMD_TMO
             with lock:

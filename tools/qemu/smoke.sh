@@ -8,9 +8,10 @@
 #   20-call-inbound  inbound answer/reject, unknown number (404), re-register on account
 #                    change, unregister, OTA refusals (wrong/junk/missing image)
 #   30-blf-mwi       BLF (ringing/busy/idle of an originated call), MWI (voicemail left
-#                    and deleted)
+#                    and deleted), directory (contacts, speed dial, CSV import, history)
 #   40-ota           time settings, OTA update from a local HTTP server (installs the
-#                    build into ota_1, reboots, checks it boots from ota_1 and is valid)
+#                    build into ota_1, reboots, checks it boots from ota_1 and is valid;
+#                    contacts/history written before the update must survive it)
 #
 #   tools/qemu/build.sh && tools/qemu/smoke.sh            all shards in parallel
 #   tools/qemu/smoke.sh smoke.d/30-blf-mwi.txt [log]      one scenario file, output streamed

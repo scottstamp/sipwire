@@ -17,7 +17,12 @@ components/
                      SUBSCRIBE/NOTIFY for BLF (dialog) and MWI (message-summary)
   cli/               serial REPL (esp_console): cfg/wifi/ip/free/tasks; console_register_command()
   net/               wifi manager, reconnect, SNTP, mDNS (optional)
-  storage/           NVS config (settings), SD card: contacts, call log, ringtones
+  storage/           NVS config (settings)
+  directory/         contacts (200), speed dial (keys 2-9), call history (100) on the `storage`
+                     FAT partition (wear-levelled, /data; contacts.csv, speed.csv, history.bin,
+                     atomic tmp+rename writes); `dir_*` API, thread-safe; console: contact,
+                     speed, history. dir_core.c is pure C (host-tested in test_host/directory).
+                     Call-event hookup (phone -> dir_history_add) and UI are separate work.
   ota/               firmware update (esp_https_ota, http or https), rollback health watch
   phone/             call state machine, ties sip+rtp+audio; emits UI events
   ui/                LVGL screens: home, dialer, incoming, in-call, settings, contacts

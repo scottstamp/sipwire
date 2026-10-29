@@ -8,6 +8,7 @@
 #include "audio.h"
 #include "board.h"
 #include "console.h"
+#include "directory.h"
 #include "display.h"
 #include "keypad.h"
 #include "net.h"
@@ -39,6 +40,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(board_init());
     ESP_ERROR_CHECK(settings_init());
+    ESP_ERROR_CHECK(dir_init());    /* contacts / speed dial / call history on the FAT partition */
     ESP_ERROR_CHECK(net_init());
     ESP_ERROR_CHECK(ota_init());    /* starts the rollback health watch; see ota.h */
     esp_err_t err = audio_init();
