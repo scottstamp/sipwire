@@ -30,22 +30,13 @@ Built so far (all merged, host-tested, QEMU-smoke-tested):
 ## Action items
 
 Needs the user / hardware:
-1. **Verify on device** (built + tested in QEMU/sim only):
-   - BLF tiles and MWI against the user's own Asterisk. The PBX needs hints,
-     `allow_subscribe=yes`, voicemail mailboxes, `mailboxes=` on AOR and
-     endpoint, `mwi_subscribe_replaces_unsolicited=yes`, and the pubsub/MWI
-     modules loaded. Full list: `tools/asterisk/README.md` "BLF and MWI".
-   - Touch calibration screen (Settings → Calibrate; keypad `#` save,
-     `0` retry, `*` cancel).
-   - Audio stutter: Wi-Fi power save is now off during calls. If it still
-     stutters, get `rtp` console output during a call (lost/late/plc/jb).
-   - G.722 call quality, mic hiss level (`MIC_SHIFT` for the MS3625),
-     echo, core-1 load (`tasks` during a call).
-   - OTA rollback: pull power mid-download; flash an image that crashes at
-     boot and confirm it rolls back.
-2. **Push the `v0.1.0` tag** — the cloud session's git proxy refused tag
-   pushes (HTTP 403). It exists only in the old container. Recreate it:
-   `git tag -a v0.1.0 -m "sipwire 0.1.0" 90445c0 && git push origin v0.1.0`.
+1. **Verified on device (2026-10-29)**: BLF tiles + MWI against the user's
+   Asterisk, touch calibration, call audio (no stutter with power save off,
+   G.722 quality good, mic fine), one successful OTA.
+   Still open: OTA rollback (pull power mid-download; flash an image that
+   crashes at boot and confirm it rolls back); echo and core-1 load
+   (`tasks` during a call) not reported yet.
+2. `v0.1.0` tag pushed from the local box (2026-10-29).
 3. **Unknown hardware facts**: MS3625 data format/clock range, backlight
    drive (active high assumed), battery divider (not wired yet), dock-detect
    design (not wired yet; dock only has power + USB data).
