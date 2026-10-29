@@ -61,6 +61,43 @@ expect call: ringing-in 10
 send reject 486
 expect call: ended .*\(code 0\) 5
 
+# 4b: BLF + MWI. Watch our own extension (Asterisk hint PJSIP/1001) and 1002
+# (not registered: idle). Only BLF lines are awaited around the inbound call:
+# its NOTIFY and INVITE may arrive in either order.
+sleep 3
+send cfg set blf 1001:Me,1002:Bob
+expect blf: 2 keys 10
+expect blf 1001 \(Me\): idle 15
+sleep 1
+send blf
+expect ^blf 1: 1001\s+Me\s+idle
+expect ^blf 2: 1002\s+Bob\s+idle
+shell ($ASTX 'channel originate PJSIP/1001 application Wait 3' >/dev/null 2>&1 &)
+expect blf 1001 \(Me\): ringing 10
+sleep 1
+send answer
+expect blf 1001 \(Me\): busy 10
+expect blf 1001 \(Me\): idle 15
+sleep 3
+send sip
+expect ^call:\s+idle
+send mwi
+expect ^mwi: none, 0 new, 0 old
+# a voicemail for 1001 (empty message: the caller hangs up at once), then delete it
+shell $ASTX 'channel originate Local/7001@sipwire-test application Wait 2' >/dev/null
+expect mwi: waiting, 1 new / 0 old voice messages 20
+send mwi
+expect ^mwi: waiting, 1 new, 0 old
+shell ls $AST_SPOOL/voicemail/default/1001/INBOX/msg0000.txt && rm -f $AST_SPOOL/voicemail/default/1001/INBOX/*
+expect mwi: none, 0 new / 0 old voice messages 15
+# the list follows the setting live: 1001 is unsubscribed, 1002 kept
+send cfg set blf 1002:Bob
+expect blf: 1 key 10
+sleep 1
+send blf
+expect ^blf 1: 1002\s+Bob\s+idle
+absent ^blf 2:
+
 # 5: unknown number → rejected
 send call 777
 expect call: ended 777 \(code [45]\d\d\) 15

@@ -42,6 +42,35 @@ Host networking, so no port mapping. Linux only.
 | `602` | 1 kHz Milliwatt tone, for audio level checks |
 | `603` | DTMF test: reads up to 4 digits (RFC 4733), reads them back |
 | `604` | Music on hold |
+| `*97` | Voicemail menu for the caller's own mailbox (`VoiceMailMain`) |
+
+`100X` that is not answered within 30 s (or busy) goes to voicemail `100X@default`.
+
+## BLF and MWI
+
+The handsets show busy lamps for the extensions in their `blf` setting and a
+message-waiting envelope; this PBX provides both (mirror this on another PBX):
+
+- **BLF**: `exten => 100X,hint,PJSIP/100X` in `[sipwire]` (the endpoint
+  `context`; `allow_subscribe=yes`). An exact extension beats the `_100X`
+  pattern, so each hinted one also has priority 1. The phone SUBSCRIBEs with
+  `Event: dialog` to `sip:100X@<pbx>`; Asterisk answers with
+  `application/dialog-info+xml` (early = ringing, confirmed = busy).
+- **MWI**: `voicemail.conf` mailboxes `1001-1003@default` (PIN = extension);
+  `mailboxes=100X@default` on the AOR (the phone SUBSCRIBEs to its own AOR with
+  `Event: message-summary`) and on the endpoint (unsolicited NOTIFYs before it
+  has; `mwi_subscribe_replaces_unsolicited=yes` stops them afterwards).
+  `pollmailboxes=yes` also notices messages added or deleted on disk.
+- **Modules**: `res_pjsip_pubsub`, `res_pjsip_exten_state` (needs
+  `res_pjsip_outbound_publish` loaded for its symbols),
+  `res_pjsip_dialog_info_body_generator`, `res_pjsip_mwi`,
+  `res_pjsip_mwi_body_generator`, `app_voicemail` (+ `res_adsi`, `res_smdi`).
+  `modules.conf` autoloads them; do not `noload` any of these.
+
+Check: `cli.sh "core show hints"` (Watchers > 0 once a phone subscribed),
+`cli.sh "pjsip show subscriptions inbound"`, `cli.sh "voicemail show users"`.
+Leave a test message: `cli.sh "channel originate Local/1001@dial application Wait 5"`
+(rings 30 s, then voicemail) or call `1001` from `1003` and let it ring.
 
 ## Endpoints
 

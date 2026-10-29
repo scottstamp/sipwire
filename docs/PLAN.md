@@ -87,6 +87,12 @@ inside a phase are parallel unless noted.
   keep booting the old slot), flash a crashing image (must roll back).
 - [x] [cheap] 12/24 h clock (`clock_24h`, default 12 h), Settings > Time (NTP server,
   time zone list + custom POSIX TZ, applied live).
+- [x] [core] BLF + MWI: RFC 6665 subscriptions in `sip` (dialog / message-summary,
+  bounded dialog-info scanner, unsolicited MWI), settings `blf` / `vm_number`, home
+  screen tiles + voicemail button, status bar envelope, Settings > BLF keys, LED
+  pattern; unit + fuzz tests, Asterisk integration (ringing/busy/idle, voicemail
+  deposit/delete), QEMU smoke. Hardware: tile touch targets and blink, LED pattern,
+  a real PBX's hints / mailboxes.
 - [cheap] Power: light sleep when idle, backlight timeout, battery ADC.
 - [core] SIP over TCP/TLS, SRTP (mbedtls) — optional.
 - [cheap] Docs, CLAUDE.md upkeep, CI.

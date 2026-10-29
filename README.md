@@ -18,6 +18,9 @@ components/display/  ILI9341 + XPT2046 + PWM backlight via esp_lcd / esp_lvgl_po
                      (which pulls espressif/esp_lcd_touch)
 components/ota/      firmware update over HTTP(S) (`ota <url>`, Settings > Update), rollback safety;
                      uses ESP-IDF's own esp_https_ota (no managed component added)
+components/sip/      own SIP UA incl. BLF (dialog) / MWI (message-summary) subscriptions;
+                     setting `blf` (e.g. `cfg set blf "1002:Bob,1003"`), `vm_number`
+                     (no managed component added)
 sdkconfig.defaults   FreeRTOS + LVGL Kconfig defaults
 ```
 
@@ -35,3 +38,5 @@ idf.py build flash monitor
   (see `components/display/include/display.h`).
 - Run Settings -> Touch calibration on the real board and check the result
   (`display_touch_raw_hook()`, `components/ui/scr_calibrate.c`).
+- BLF / MWI on the real PBX: mirror the hints, `mailboxes=` and voicemail setup
+  of `tools/asterisk/conf/` (see `tools/asterisk/README.md`).

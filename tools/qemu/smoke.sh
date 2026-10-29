@@ -2,7 +2,8 @@
 # QEMU smoke test: boots the real firmware (CONFIG_SIPWIRE_QEMU) and drives it
 # over its serial console against a private Asterisk on the host (5080/udp):
 # register, G.722 echo call with hold/DTMF/RTP both ways, remote hangup, inbound
-# answer/reject, 404, re-register on account change, unregister; then an OTA update
+# answer/reject, BLF (ringing/busy/idle of an originated call) and MWI (voicemail
+# left and deleted), 404, re-register on account change, unregister; then an OTA update
 # from a local HTTP server (rejects wrong images, installs the build into ota_1,
 # reboots, checks it boots from ota_1 and is marked valid).
 #
@@ -75,6 +76,7 @@ done
     || { echo "Asterisk failed to start" >&2; tail -n 30 "$STATE/console.log" >&2; exit 1; }
 
 export ASTX="$ASTERISK -C $CONF -rx"
+export AST_SPOOL="$STATE/spool"   # voicemail lives here (smoke.txt deletes a message)
 
 # OTA update server for the scenario's `ota <url>` steps (the guest reaches the host at 10.0.2.2):
 #   sipwire.bin  the firmware just built (installing it must boot from ota_1)

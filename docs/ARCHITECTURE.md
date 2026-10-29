@@ -11,7 +11,8 @@ components/
   codec/             G.722 (64k), G.711 µ/A-law, 2:1 half-band resampler. Pure C, host-testable
   rtp/               RTP tx/rx, RFC 3550, RFC 2833 DTMF, adaptive jitter buffer
   sip/               minimal SIP UA: parser, digest auth, transactions, dialogs,
-                     REGISTER / INVITE / ACK / BYE / CANCEL / OPTIONS, SDP
+                     REGISTER / INVITE / ACK / BYE / CANCEL / OPTIONS, SDP,
+                     SUBSCRIBE/NOTIFY for BLF (dialog) and MWI (message-summary)
   cli/               serial REPL (esp_console): cfg/wifi/ip/free/tasks; console_register_command()
   net/               wifi manager, reconnect, SNTP, mDNS (optional)
   storage/           NVS config (settings), SD card: contacts, call log, ringtones
@@ -48,6 +49,18 @@ sim/web/             Emscripten build of components/ui + mock model → browser
 - Settings actions: `save_time(ntp, tz_posix, clock_24h)` and `ota_start(url)`.
   The bridge task persists (NVS) and calls `ota_start()`; the UI only sees
   the model change.
+- BLF / MWI: setting `blf` = "ext[:label],..." (≤ 8, `components/common/sipwire_blf.h`,
+  validated by `settings_set`) and `vm_number` (default `*97`). The phone subscribes
+  each extension (`dialog` event package) and our mailbox (`message-summary`) once
+  registered, follows a changed list live (unsubscribe removed, subscribe new) and
+  posts `SIPWIRE_BLF_EVENT`/`BLF_EVENT_STATE` {index, ext, state} and
+  `SIPWIRE_SIP_EVENT`/`SIP_EVENT_MWI` {known, waiting, new, old}; `phone_status_t`
+  carries the list + states and MWI. Console: `blf`, `mwi`. The model has `blf[8]`
+  (ext, label, state) + `blf_count`, `mwi_waiting/new/old`, `vm_number`; actions
+  `save_blf(list)` and `save_vm_number(number)` (Settings > BLF keys). Home screen:
+  tiles (tap = `dial(ext)`), a voicemail button that dials `vm_number`; status bar:
+  envelope with the count. Status LED: amber/blue double pulse while idle with
+  voicemail waiting.
 - Touch calibration: `ui_actions_t.touch_cal_begin/end` + `ui_touch_raw()`. The
   bridge installs `display_touch_raw_hook()` (raw samples to the UI, none to LVGL)
   between begin and end and stores the result in `settings.touch_cal`.
@@ -77,7 +90,7 @@ wifi ssid/pass, sip server/port/transport, user, auth user, password,
 display name, codec prefs, ring volume, call volume, touch calibration,
 `ntp_server` (default CONFIG_SIPWIRE_NTP_SERVER), `tz` (POSIX TZ, default
 CONFIG_SIPWIRE_TZ), `clock_24h` (default false = 12 h), `ota_url` (default
-CONFIG_SIPWIRE_OTA_URL).
+CONFIG_SIPWIRE_OTA_URL), `blf` (BLF keys, default none), `vm_number` (default `*97`).
 Set via UI settings, serial console (`sipwire>` REPL), or `config.json` on SD.
 
 ## OTA update (`components/ota`)
