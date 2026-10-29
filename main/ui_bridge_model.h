@@ -38,6 +38,7 @@ typedef struct {
     uint8_t ota_percent;
     char ota_message[64];
     char vm_number[32];             /* settings vm_number */
+    bool dnd;                       /* settings dnd (the phone follows it a moment later) */
 } ui_bridge_local_t;
 
 /** Fill the time/update settings of `loc` (Settings > Time and > Update prefill).
@@ -63,10 +64,20 @@ void ui_bridge_fill_settings(ui_bridge_local_t *loc, const char *wifi_ssid, cons
 /** Voicemail number (settings `vm_number`); NULL counts as empty. */
 void ui_bridge_fill_vm(ui_bridge_local_t *loc, const char *vm_number);
 
+/** Do-not-disturb setting (read from settings so a tap shows at once, before the phone applies it). */
+void ui_bridge_fill_dnd(ui_bridge_local_t *loc, bool dnd);
+
 ui_blf_state_t ui_bridge_map_blf(blf_state_t st);
 
 ui_reg_state_t ui_bridge_map_reg(sip_reg_state_t st);
 ui_call_state_t ui_bridge_map_call(call_state_t st);
+
+/** Transfer progress (call features). */
+ui_xfer_state_t ui_bridge_map_xfer(xfer_state_t st);
+
+/** Background call: a call still CALL_ACTIVE there only awaits its hold confirmation, so it
+ *  is shown as held; everything else maps like ui_bridge_map_call. */
+ui_call_state_t ui_bridge_map_second(call_state_t st);
 
 /** "Name <user@server>", "user@server", "user" or "" (no user). */
 void ui_bridge_format_account(char *out, size_t size, const char *display_name, const char *user,

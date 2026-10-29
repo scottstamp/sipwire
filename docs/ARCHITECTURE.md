@@ -68,7 +68,7 @@ sim/web/             Emscripten build of components/ui + mock model → browser
   tiles (tap = `dial(ext)`), a voicemail button that dials `vm_number`; status bar:
   envelope with the count. Status LED: amber/blue double pulse while idle with
   voicemail waiting.
-- Call features (`phone.h`, no UI yet): two call lines. `phone_status_t` top-level call
+- Call features (`phone.h`, UI below): two call lines. `phone_status_t` top-level call
   fields = the foreground call (the only one with media), `line` (1/2, stays with a call
   across swaps), `second` {call, outgoing, number, name, call_start_us, line} = the
   background call: waiting (RINGING_IN, call-waiting beep `AUDIO_TONE_CALL_WAITING` in the
@@ -92,6 +92,19 @@ sim/web/             Emscripten build of components/ui + mock model → browser
   are queued per call and retried after 491 (RFC 3261 §14.1 delay). Console: `answer2`,
   `reject2`, `swap`, `xfer <n>`, `axfer <n>|complete|cancel`, `dnd [on|off]`; `sip` shows
   the second call, transfer and features.
+- Call feature UI (`ui_model_t` "call features" block, `ui_actions_t` answer_waiting / reject_waiting /
+  swap / transfer_blind / transfer_attended_start|complete|cancel / set_dnd; the bridge maps
+  `phone_status_t.second/xfer/auto_answered` and the `dnd` setting). Call screen: Transfer button opens
+  `scr_transfer.c` (BLF targets with live lamps, "Other number..." entry, then "Transfer now" blind or
+  "Talk first" attended); a waiting call raises an overlay (Hold + answer / Reject); a held background
+  call shows a strip with Swap (Hold / Transfer are not offered then); an attended consultation (xfer
+  CONSULT) stays on the call screen with Complete / Cancel and the original on hold; transfer progress or
+  failure is the status line under the timer, success ends on the ended screen ("Transferred"); an
+  auto-answered call shows "Page / Intercom - speaker on|off". DND: bell (off) / red "DND" badge (on) in
+  the status bar, tap toggles (written to settings by the bridge task, the phone follows). The router
+  keeps the transfer picker up over the plain call and pulls back to the call screen for a waiting call
+  or a consultation call. Physical keys on the call screen are DTMF only (long `*` = hang up, or cancel
+  during a consultation).
 - Touch calibration: `ui_actions_t.touch_cal_begin/end` + `ui_touch_raw()`. The
   bridge installs `display_touch_raw_hook()` (raw samples to the UI, none to LVGL)
   between begin and end and stores the result in `settings.touch_cal`.

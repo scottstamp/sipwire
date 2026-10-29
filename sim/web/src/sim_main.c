@@ -80,6 +80,31 @@ static void push_model(void)
     js_model_changed();
 }
 
+/* ---- call features mock: second call, transfer, page ---------------------- */
+
+static lv_timer_t *s_xfer_timer;    /* fake transfer progress */
+
+static void clear_call_features(void)
+{
+    s_model.auto_answered = false;
+    s_model.second_call = UI_CALL_IDLE;
+    s_model.second_number[0] = '\0';
+    s_model.second_name[0] = '\0';
+    s_model.second_seconds = 0;
+    s_model.xfer = UI_XFER_IDLE;
+    s_model.xfer_attended = false;
+    s_model.xfer_code = 0;
+    s_model.xfer_target[0] = '\0';
+}
+
+static void cancel_xfer_timer(void)
+{
+    if (s_xfer_timer) {
+        lv_timer_delete(s_xfer_timer);
+        s_xfer_timer = NULL;
+    }
+}
+
 static void cancel_phase(void)
 {
     if (s_phase_timer) {
@@ -111,6 +136,7 @@ static void phase_cb(lv_timer_t *t)
         s_model.call_seconds = 0;
         s_model.end_code = 0;
         s_model.muted = false;
+        clear_call_features();
         break;
     default:
         break;
@@ -132,8 +158,33 @@ static void schedule(ui_call_state_t next, uint32_t ms)
     lv_timer_set_repeat_count(s_phase_timer, 1);
 }
 
+/* The foreground call goes away. Like the phone: a background call (held or waiting)
+ * moves up at once instead of showing the ended screen. */
+static void promote_second(void)
+{
+    snprintf(s_model.remote_number, sizeof(s_model.remote_number), "%s", s_model.second_number);
+    snprintf(s_model.remote_name, sizeof(s_model.remote_name), "%s", s_model.second_name);
+    s_model.call = s_model.second_call;
+    s_model.call_seconds = s_model.second_seconds;
+    s_model.second_call = UI_CALL_IDLE;
+    s_model.second_number[0] = '\0';
+    s_model.second_name[0] = '\0';
+    s_model.second_seconds = 0;
+    s_model.auto_answered = false;
+    s_model.end_code = 0;
+    s_model.xfer = UI_XFER_IDLE;
+    cancel_xfer_timer();
+    push_model();
+}
+
 static void end_call(int code)
 {
+    cancel_xfer_timer();
+    if (s_model.second_call != UI_CALL_IDLE && s_model.xfer != UI_XFER_DONE) {
+        cancel_phase();
+        promote_second();
+        return;
+    }
     s_model.call = UI_CALL_ENDED;
     s_model.end_code = code;
     schedule(UI_CALL_IDLE, T_ENDED_TO_IDLE_MS);
@@ -145,6 +196,9 @@ static void call_second_cb(lv_timer_t *t)
     (void)t;
     if (s_model.call == UI_CALL_ACTIVE || s_model.call == UI_CALL_HELD) {
         s_model.call_seconds++;
+        if (s_model.second_call == UI_CALL_HELD) {
+            s_model.second_seconds++;
+        }
         push_model();
     }
 }
@@ -361,6 +415,173 @@ static void act_save_vm_number(void *ctx, const char *number)
     push_model();
 }
 
+/* ---- call features: waiting, swap, transfer, DND ---- */
+
+static void swap_calls(void)
+{
+    char num[64], name[64];
+    uint32_t secs = s_model.call_seconds;
+    snprintf(num, sizeof(num), "%s", s_model.remote_number);
+    snprintf(name, sizeof(name), "%s", s_model.remote_name);
+    snprintf(s_model.remote_number, sizeof(s_model.remote_number), "%s", s_model.second_number);
+    snprintf(s_model.remote_name, sizeof(s_model.remote_name), "%s", s_model.second_name);
+    s_model.call_seconds = s_model.second_call == UI_CALL_RINGING_IN ? 0 : s_model.second_seconds;
+    snprintf(s_model.second_number, sizeof(s_model.second_number), "%s", num);
+    snprintf(s_model.second_name, sizeof(s_model.second_name), "%s", name);
+    s_model.second_seconds = secs;
+    s_model.second_call = UI_CALL_HELD;
+    s_model.call = UI_CALL_ACTIVE;
+    s_model.auto_answered = false;
+}
+
+static void act_answer_waiting(void *ctx)
+{
+    (void)ctx;
+    sim_log("action answer_waiting()");
+    if (s_model.second_call == UI_CALL_RINGING_IN &&
+        (s_model.call == UI_CALL_ACTIVE || s_model.call == UI_CALL_HELD)) {
+        swap_calls();
+        push_model();
+    }
+}
+
+static void act_reject_waiting(void *ctx)
+{
+    (void)ctx;
+    sim_log("action reject_waiting()");
+    if (s_model.second_call == UI_CALL_RINGING_IN) {
+        s_model.second_call = UI_CALL_IDLE;
+        s_model.second_number[0] = '\0';
+        s_model.second_name[0] = '\0';
+        push_model();
+    }
+}
+
+static void act_swap(void *ctx)
+{
+    (void)ctx;
+    sim_log("action swap()");
+    if (s_model.second_call != UI_CALL_IDLE && s_model.call != UI_CALL_IDLE) {
+        swap_calls();
+        push_model();
+    }
+}
+
+/* Fake REFER progress. Targets starting with '9' are "busy": the transfer fails with 486 and the call is kept. */
+static void xfer_step_cb(lv_timer_t *t)
+{
+    switch (s_model.xfer) {
+    case UI_XFER_TRYING:
+        s_model.xfer = UI_XFER_ACCEPTED;
+        break;
+    case UI_XFER_ACCEPTED:
+        if (s_model.xfer_target[0] == '9') {
+            s_model.xfer = UI_XFER_FAILED;
+            s_model.xfer_code = 486;
+            lv_timer_delete(t);
+            s_xfer_timer = NULL;
+        } else {
+            s_model.xfer = UI_XFER_PROGRESS;
+        }
+        break;
+    case UI_XFER_PROGRESS:
+        s_model.xfer = UI_XFER_DONE;
+        s_model.xfer_code = 200;
+        lv_timer_delete(t);
+        s_xfer_timer = NULL;
+        sim_log("mock: transferred, hanging up");
+        s_model.second_call = UI_CALL_IDLE;
+        s_model.call = UI_CALL_ENDED;
+        s_model.end_code = 0;
+        schedule(UI_CALL_IDLE, T_ENDED_TO_IDLE_MS);
+        break;
+    default:
+        lv_timer_delete(t);
+        s_xfer_timer = NULL;
+        break;
+    }
+    push_model();
+}
+
+static void xfer_begin(bool attended, const char *target)
+{
+    cancel_xfer_timer();
+    s_model.xfer_attended = attended;
+    s_model.xfer_code = 0;
+    snprintf(s_model.xfer_target, sizeof(s_model.xfer_target), "%s", target ? target : "");
+}
+
+static void xfer_refer(void)
+{
+    s_model.xfer = UI_XFER_TRYING;
+    s_xfer_timer = lv_timer_create(xfer_step_cb, 900, NULL);
+}
+
+static void act_transfer_blind(void *ctx, const char *target)
+{
+    (void)ctx;
+    sim_log("action transfer_blind(\"%s\")", target ? target : "");
+    if (s_model.call != UI_CALL_ACTIVE && s_model.call != UI_CALL_HELD) {
+        return;
+    }
+    xfer_begin(false, target);
+    xfer_refer();
+    push_model();
+}
+
+static void act_transfer_attended_start(void *ctx, const char *target)
+{
+    (void)ctx;
+    sim_log("action transfer_attended_start(\"%s\")", target ? target : "");
+    if (s_model.call != UI_CALL_ACTIVE || s_model.second_call != UI_CALL_IDLE) {
+        return;
+    }
+    xfer_begin(true, target);
+    /* original goes to the background (held), the consultation call is dialled */
+    snprintf(s_model.second_number, sizeof(s_model.second_number), "%s", s_model.remote_number);
+    snprintf(s_model.second_name, sizeof(s_model.second_name), "%s", s_model.remote_name);
+    s_model.second_seconds = s_model.call_seconds;
+    s_model.second_call = UI_CALL_HELD;
+    snprintf(s_model.remote_number, sizeof(s_model.remote_number), "%s", s_model.xfer_target);
+    s_model.remote_name[0] = '\0';
+    s_model.call_seconds = 0;
+    s_model.call = UI_CALL_DIALING;
+    s_model.xfer = UI_XFER_CONSULT;
+    schedule(UI_CALL_RINGING_OUT, T_DIAL_TO_RINGING_MS);
+    push_model();
+}
+
+static void act_transfer_attended_complete(void *ctx)
+{
+    (void)ctx;
+    sim_log("action transfer_attended_complete()");
+    if (s_model.xfer != UI_XFER_CONSULT || s_model.call != UI_CALL_ACTIVE) {
+        return;
+    }
+    xfer_refer();
+    push_model();
+}
+
+static void act_transfer_attended_cancel(void *ctx)
+{
+    (void)ctx;
+    sim_log("action transfer_attended_cancel()");
+    if (s_model.xfer != UI_XFER_CONSULT) {
+        return;
+    }
+    cancel_phase();
+    s_model.xfer = UI_XFER_IDLE;
+    promote_second();   /* the original stays held in the foreground */
+}
+
+static void act_set_dnd(void *ctx, bool on)
+{
+    (void)ctx;
+    sim_log("action set_dnd(%d)", on);
+    s_model.dnd = on;
+    push_model();
+}
+
 static void act_touch_cal_begin(void *ctx)
 {
     (void)ctx;
@@ -482,6 +703,56 @@ EMSCRIPTEN_KEEPALIVE void sim_set_call(int state, const char *number, const char
     push_model();
 }
 
+/* Call features, for screenshots / the panel (frozen: no mock timers). `state`: UI_CALL_RINGING_IN
+ * (waiting) or UI_CALL_HELD, UI_CALL_IDLE clears the background call. */
+EMSCRIPTEN_KEEPALIVE void sim_set_second(int state, const char *number, const char *name, int seconds)
+{
+    if (state != UI_CALL_IDLE && state != UI_CALL_RINGING_IN && state != UI_CALL_HELD) {
+        return;
+    }
+    s_model.second_call = (ui_call_state_t)state;
+    snprintf(s_model.second_number, sizeof(s_model.second_number), "%s", number ? number : "");
+    snprintf(s_model.second_name, sizeof(s_model.second_name), "%s", name ? name : "");
+    s_model.second_seconds = seconds > 0 ? (uint32_t)seconds : 0;
+    push_model();
+}
+
+/* state: ui_xfer_state_t */
+EMSCRIPTEN_KEEPALIVE void sim_set_xfer(int state, int attended, int code, const char *target)
+{
+    if (state < UI_XFER_IDLE || state > UI_XFER_FAILED) {
+        return;
+    }
+    cancel_xfer_timer();
+    s_model.xfer = (ui_xfer_state_t)state;
+    s_model.xfer_attended = attended != 0;
+    s_model.xfer_code = code;
+    snprintf(s_model.xfer_target, sizeof(s_model.xfer_target), "%s", target ? target : "");
+    push_model();
+}
+
+EMSCRIPTEN_KEEPALIVE void sim_set_dnd(int on)
+{
+    s_model.dnd = on != 0;
+    push_model();
+}
+
+EMSCRIPTEN_KEEPALIVE void sim_set_page(int on)
+{
+    s_model.auto_answered = on != 0;
+    push_model();
+}
+
+/* A second incoming call while one is active (call waiting). */
+EMSCRIPTEN_KEEPALIVE void sim_waiting(const char *number, const char *name)
+{
+    if (s_model.call != UI_CALL_ACTIVE && s_model.call != UI_CALL_HELD) {
+        sim_log("mock: waiting call ignored, no call");
+        return;
+    }
+    sim_set_second(UI_CALL_RINGING_IN, number, name, 0);
+}
+
 EMSCRIPTEN_KEEPALIVE void sim_key(int key, int action)
 {
     if (action < UI_KEY_PRESS || action > UI_KEY_REPEAT) {
@@ -567,6 +838,8 @@ static const char *const NET_NAMES[] = {"OFF", "CONNECTING", "CONNECTED"};
 static const char *const REG_NAMES[] = {"NONE", "REGISTERING", "REGISTERED", "FAILED"};
 static const char *const OTA_NAMES[] = {"IDLE", "RUNNING", "DONE", "FAILED"};
 static const char *const BLF_NAMES[] = {"UNKNOWN", "IDLE", "RINGING", "BUSY"};
+static const char *const XFER_NAMES[] = {"IDLE", "CONSULT", "TRYING", "ACCEPTED",
+                                         "PROGRESS", "DONE", "FAILED"};
 static const char *const CALL_NAMES[] = {"IDLE",        "DIALING", "RINGING_OUT", "RINGING_IN",
                                          "ACTIVE",      "HELD",    "ENDED"};
 
@@ -653,7 +926,16 @@ EMSCRIPTEN_KEEPALIVE const char *sim_get_model_json(void)
         PUTS(m->blf[i].label);
         PUT(",\"state\":\"%s\"}", BLF_NAMES[m->blf[i].state]);
     }
-    PUT("]}");
+    PUT("],\"dnd\":%s,\"auto_answered\":%s,\"second_call\":\"%s\",\"second_number\":",
+        m->dnd ? "true" : "false", m->auto_answered ? "true" : "false", CALL_NAMES[m->second_call]);
+    PUTS(m->second_number);
+    PUT(",\"second_name\":");
+    PUTS(m->second_name);
+    PUT(",\"second_seconds\":%u,\"xfer\":\"%s\",\"xfer_attended\":%s,\"xfer_code\":%d,\"xfer_target\":",
+        (unsigned)m->second_seconds, XFER_NAMES[m->xfer], m->xfer_attended ? "true" : "false",
+        m->xfer_code);
+    PUTS(m->xfer_target);
+    PUT("}");
 #undef PUT
 #undef PUTS
     return s_json;
@@ -718,6 +1000,14 @@ int main(void)
         .ota_start = act_ota_start,
         .save_blf = act_save_blf,
         .save_vm_number = act_save_vm_number,
+        .answer_waiting = act_answer_waiting,
+        .reject_waiting = act_reject_waiting,
+        .swap = act_swap,
+        .transfer_blind = act_transfer_blind,
+        .transfer_attended_start = act_transfer_attended_start,
+        .transfer_attended_complete = act_transfer_attended_complete,
+        .transfer_attended_cancel = act_transfer_attended_cancel,
+        .set_dnd = act_set_dnd,
     };
 
     ui_init(disp, &s_actions);

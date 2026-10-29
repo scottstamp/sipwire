@@ -25,6 +25,7 @@ static const ui_screen_ops_t *const OPS[UI_SCR_COUNT] = {
     [UI_SCR_ENDED] = &ui_ops_ended,
     [UI_SCR_SETTINGS] = &ui_ops_settings,
     [UI_SCR_CALIBRATE] = &ui_ops_calibrate,
+    [UI_SCR_TRANSFER] = &ui_ops_transfer,
 };
 
 static const ui_actions_t *s_actions;
@@ -69,13 +70,15 @@ void ui_goto(ui_screen_t screen, const char *arg)
     if (!s_inited || screen >= UI_SCR_COUNT || screen == s_kind) {
         return;
     }
-    bool back = screen == UI_SCR_HOME || (s_kind == UI_SCR_CALIBRATE && screen == UI_SCR_SETTINGS);
+    bool back = screen == UI_SCR_HOME || (s_kind == UI_SCR_CALIBRATE && screen == UI_SCR_SETTINGS) ||
+                (s_kind == UI_SCR_TRANSFER && screen == UI_SCR_CALL);
     show(screen, arg, back ? LV_SCREEN_LOAD_ANIM_MOVE_RIGHT : LV_SCREEN_LOAD_ANIM_MOVE_LEFT);
 }
 
 static bool is_call_screen(ui_screen_t s)
 {
-    return s == UI_SCR_OUTGOING || s == UI_SCR_INCOMING || s == UI_SCR_CALL || s == UI_SCR_ENDED;
+    return s == UI_SCR_OUTGOING || s == UI_SCR_INCOMING || s == UI_SCR_CALL || s == UI_SCR_ENDED ||
+           s == UI_SCR_TRANSFER;
 }
 
 void ui_init(lv_display_t *disp, const ui_actions_t *actions)
@@ -126,6 +129,19 @@ void ui_update(const ui_model_t *model)
             want = UI_SCR_HOME;
         }
         break;
+    }
+
+    /* call features: an attended transfer's consultation call (dialling, ringing,
+     * talking) lives on the call screen; the transfer picker stays up over the
+     * plain call until the user leaves it, a waiting call or a consultation
+     * call pulls the user back. */
+    bool consult = model->xfer == UI_XFER_CONSULT && model->xfer_attended;
+    if (consult && (model->call == UI_CALL_DIALING || model->call == UI_CALL_RINGING_OUT ||
+                    model->call == UI_CALL_ACTIVE || model->call == UI_CALL_HELD)) {
+        want = UI_SCR_CALL;
+    } else if (s_kind == UI_SCR_TRANSFER && want == UI_SCR_CALL &&
+               model->second_call != UI_CALL_RINGING_IN) {
+        want = UI_SCR_TRANSFER;
     }
 
     if (want != s_kind) {
@@ -265,6 +281,64 @@ void ui_act_touch_cal_end(const ui_touch_cal_t *cal_or_null)
 {
     if (s_actions && s_actions->touch_cal_end) {
         s_actions->touch_cal_end(s_actions->ctx, cal_or_null);
+    }
+}
+
+/* ---- call features ------------------------------------------------------- */
+
+void ui_act_answer_waiting(void)
+{
+    if (s_actions && s_actions->answer_waiting) {
+        s_actions->answer_waiting(s_actions->ctx);
+    }
+}
+
+void ui_act_reject_waiting(void)
+{
+    if (s_actions && s_actions->reject_waiting) {
+        s_actions->reject_waiting(s_actions->ctx);
+    }
+}
+
+void ui_act_swap(void)
+{
+    if (s_actions && s_actions->swap) {
+        s_actions->swap(s_actions->ctx);
+    }
+}
+
+void ui_act_transfer_blind(const char *target)
+{
+    if (s_actions && s_actions->transfer_blind && target && target[0]) {
+        s_actions->transfer_blind(s_actions->ctx, target);
+    }
+}
+
+void ui_act_transfer_attended_start(const char *target)
+{
+    if (s_actions && s_actions->transfer_attended_start && target && target[0]) {
+        s_actions->transfer_attended_start(s_actions->ctx, target);
+    }
+}
+
+void ui_act_transfer_attended_complete(void)
+{
+    if (s_actions && s_actions->transfer_attended_complete) {
+        s_actions->transfer_attended_complete(s_actions->ctx);
+    }
+}
+
+void ui_act_transfer_attended_cancel(void)
+{
+    if (s_actions && s_actions->transfer_attended_cancel) {
+        s_actions->transfer_attended_cancel(s_actions->ctx);
+    }
+}
+
+void ui_act_set_dnd(bool on)
+{
+    if (s_actions && s_actions->set_dnd) {
+        s_actions->set_dnd(s_actions->ctx, on);
     }
 }
 

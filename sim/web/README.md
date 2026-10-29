@@ -71,7 +71,12 @@ time; the mock formats it as 12 h "3:07 PM" or 24 h like the bridge does),
 `set_clock24(bool)`, `set_ota(state, percent, message)` (0 idle, 1 running, 2 done,
 3 failed; jump to an update state without the fake download), `set_blf_count(n)`,
 `set_blf(i, ext, label, state)` (0 unknown, 1 idle, 2 ringing, 3 busy; extends the
-count), `set_mwi(waiting, new, old)` and `model()`. Enum values follow `components/ui/include/ui_model.h`. Anything
+count), `set_mwi(waiting, new, old)`, `set_second(state, number, name, seconds)` (background call:
+3 waiting, 5 held, 0 none), `set_xfer(state, attended, code, target)` (0 idle, 1 consult, 2 trying,
+3 accepted, 4 progress, 5 done, 6 failed), `set_dnd(on)`, `set_page(on)` (auto-answered call),
+`waiting(number, name)` and `model()`. The mock implements the call-feature actions: a transfer to a number
+starting with `9` fails with 486, any other succeeds and ends the call; swap / answer-waiting exchange
+the two calls; hanging up the active call promotes the background call. Enum values follow `components/ui/include/ui_model.h`. Anything
 else the screen needs (new model fields) should get a new `sim_*` function
 there, added to `SIM_EXPORTS` in `CMakeLists.txt` and wrapped in `shell.html`.
 

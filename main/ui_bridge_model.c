@@ -38,6 +38,25 @@ ui_call_state_t ui_bridge_map_call(call_state_t st)
     }
 }
 
+ui_xfer_state_t ui_bridge_map_xfer(xfer_state_t st)
+{
+    switch (st) {
+    case XFER_CONSULT:  return UI_XFER_CONSULT;
+    case XFER_TRYING:   return UI_XFER_TRYING;
+    case XFER_ACCEPTED: return UI_XFER_ACCEPTED;
+    case XFER_PROGRESS: return UI_XFER_PROGRESS;
+    case XFER_DONE:     return UI_XFER_DONE;
+    case XFER_FAILED:   return UI_XFER_FAILED;
+    case XFER_IDLE:
+    default:            return UI_XFER_IDLE;
+    }
+}
+
+ui_call_state_t ui_bridge_map_second(call_state_t st)
+{
+    return st == CALL_ACTIVE ? UI_CALL_HELD : ui_bridge_map_call(st);
+}
+
 /* Bounded append; always NUL-terminates, truncates silently. */
 static void append(char *out, size_t size, size_t *len, const char *s)
 {
@@ -154,6 +173,11 @@ void ui_bridge_fill_vm(ui_bridge_local_t *loc, const char *vm_number)
     copy_or_empty(loc->vm_number, sizeof(loc->vm_number), vm_number);
 }
 
+void ui_bridge_fill_dnd(ui_bridge_local_t *loc, bool dnd)
+{
+    loc->dnd = dnd;
+}
+
 void ui_bridge_fill_fw(ui_bridge_local_t *loc, const char *version, const char *partition)
 {
     copy_or_empty(loc->fw_version, sizeof(loc->fw_version), version);
@@ -234,4 +258,20 @@ void ui_bridge_build_model(const ui_bridge_local_t *loc, const phone_status_t *p
         out->mwi_old = ph->mwi.old_msgs;
     }
     copy(out->vm_number, sizeof(out->vm_number), loc->vm_number);
+
+    /* call features */
+    out->dnd = loc->dnd;
+    out->auto_answered = out->call != UI_CALL_IDLE && ph->auto_answered;
+    out->second_call = ui_bridge_map_second(ph->second.call);
+    if (out->second_call != UI_CALL_IDLE) {
+        copy(out->second_number, sizeof(out->second_number), ph->second.number);
+        copy(out->second_name, sizeof(out->second_name), ph->second.name);
+        out->second_seconds = ui_bridge_call_seconds(ph->second.call, ph->second.call_start_us, now_us);
+    }
+    out->xfer = ui_bridge_map_xfer(ph->xfer.state);
+    if (out->xfer != UI_XFER_IDLE) {
+        out->xfer_attended = ph->xfer.attended;
+        out->xfer_code = ph->xfer.code;
+        copy(out->xfer_target, sizeof(out->xfer_target), ph->xfer.target);
+    }
 }
