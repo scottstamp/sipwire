@@ -60,6 +60,29 @@ bool phone_end_is_busy(bool outgoing, int end_code);
 /** How long ENDED stays visible before the phone returns to IDLE. */
 uint32_t phone_ended_hold_ms(bool outgoing, int end_code);
 
+/* ---- call log ------------------------------------------------------------- */
+
+/* Same values as dir_result_t (directory.h); phone.c asserts that. */
+typedef enum {
+    PHONE_LOG_ANSWERED = 0,
+    PHONE_LOG_MISSED = 1,
+    PHONE_LOG_REJECTED = 2,
+    PHONE_LOG_DND = 3,
+} phone_log_result_t;
+
+/** Result of an ended call. `answered`: media was established (the call was
+ *  ACTIVE at some point; transferred calls were). `rejected_local`: the user
+ *  declined the ringing incoming call. `dnd`: refused by do-not-disturb.
+ *  An outgoing call that never connected is MISSED (no answer / failed). */
+phone_log_result_t phone_log_result(bool outgoing, bool answered, bool rejected_local, bool dnd);
+
+/** Talk time in whole seconds from start_us (0 = never answered) to now_us. */
+uint32_t phone_log_duration_s(int64_t start_us, int64_t now_us);
+
+/** Wall-clock start for the log: now minus the talk time (unanswered: now,
+ *  the moment the call went away); 0 when the clock is not set (now_wall <= 0). */
+int64_t phone_log_start(int64_t now_wall, uint32_t duration_s);
+
 /* ---- media ---------------------------------------------------------------- */
 
 /** What to do with the RTP stream in `state` given the negotiated direction

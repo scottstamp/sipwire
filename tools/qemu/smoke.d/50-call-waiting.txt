@@ -9,6 +9,11 @@ expect phone: do not disturb on 5
 shell ($ASTX 'channel originate PJSIP/1001 application Wait 1' >/dev/null 2>&1 &)
 expect missed call from .*\(do not disturb, 486\) 10
 absent call: ringing-in 1
+# the refused call is in the log as "dnd" (not an unseen missed call)
+do history
+expect \sin\s+dnd\s
+expect ^1 calls, 0 unseen missed
+do history clear
 do dnd off
 expect ^do not disturb off 5
 expect phone: do not disturb off 5
@@ -63,3 +68,9 @@ do sip
 expect ^call:\s+active
 do hangup
 expect call: idle 5
+
+# call log: newest first, the last call to 600, then the declined waiting call
+do history
+expect \sout\s+answered\s+[0-9]+s\s+600
+expect \sin\s+rejected\s
+expect ^[0-9]+ calls, 0 unseen missed

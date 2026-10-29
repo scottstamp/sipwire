@@ -178,6 +178,20 @@ void ui_bridge_fill_dnd(ui_bridge_local_t *loc, bool dnd)
     loc->dnd = dnd;
 }
 
+void ui_bridge_fill_sounds(ui_bridge_local_t *loc, int ringtone_count, uint8_t ring_tone, uint8_t ring_volume,
+                           uint8_t call_volume, uint8_t speaker_volume, bool call_waiting, bool auto_answer,
+                           bool dnd)
+{
+    loc->ringtone_count = (uint8_t)(ringtone_count < 0 ? 0 : ringtone_count > 255 ? 255 : ringtone_count);
+    loc->ring_tone = ring_tone;
+    loc->ring_volume = ring_volume > 100 ? 100 : ring_volume;
+    loc->call_volume = call_volume > 100 ? 100 : call_volume;
+    loc->speaker_volume = speaker_volume > 100 ? 100 : speaker_volume;
+    loc->call_waiting = call_waiting;
+    loc->auto_answer = auto_answer;
+    loc->dnd = dnd;
+}
+
 void ui_bridge_fill_fw(ui_bridge_local_t *loc, const char *version, const char *partition)
 {
     copy_or_empty(loc->fw_version, sizeof(loc->fw_version), version);
@@ -274,4 +288,12 @@ void ui_bridge_build_model(const ui_bridge_local_t *loc, const phone_status_t *p
         out->xfer_code = ph->xfer.code;
         copy(out->xfer_target, sizeof(out->xfer_target), ph->xfer.target);
     }
+    out->ringtone_count = loc->ringtone_count;
+    out->ring_tone = loc->ring_tone;
+    out->ring_volume = loc->ring_volume;
+    out->call_volume = loc->call_volume;
+    out->speaker_volume = loc->speaker_volume;
+    out->call_waiting = loc->call_waiting;
+    out->auto_answer = loc->auto_answer;
+    /* missed_unseen and now come from the directory / clock in the bridge task */
 }

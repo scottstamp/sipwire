@@ -301,3 +301,35 @@ const char *phone_blf_state_name(blf_state_t st)
     default:          return "unknown";
     }
 }
+
+/* ---- call log ---- */
+
+phone_log_result_t phone_log_result(bool outgoing, bool answered, bool rejected_local, bool dnd)
+{
+    if (answered) {
+        return PHONE_LOG_ANSWERED;
+    }
+    if (outgoing) {
+        return PHONE_LOG_MISSED;
+    }
+    if (dnd) {
+        return PHONE_LOG_DND;
+    }
+    return rejected_local ? PHONE_LOG_REJECTED : PHONE_LOG_MISSED;
+}
+
+uint32_t phone_log_duration_s(int64_t start_us, int64_t now_us)
+{
+    if (start_us <= 0 || now_us <= start_us) {
+        return 0;
+    }
+    return (uint32_t)((now_us - start_us) / 1000000);
+}
+
+int64_t phone_log_start(int64_t now_wall, uint32_t duration_s)
+{
+    if (now_wall <= 0) {
+        return 0;
+    }
+    return now_wall > (int64_t)duration_s ? now_wall - (int64_t)duration_s : now_wall;
+}

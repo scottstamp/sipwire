@@ -10,7 +10,9 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <strings.h>
 #include <string.h>
+#include <time.h>
 
 #include "lvgl.h"
 #include "ui.h"
@@ -73,8 +75,47 @@ static void format_clock(void)
     }
 }
 
+/* Mock wall clock: the fixed date 2026-10-29 at the mock time (0 until the clock is set), so
+ * history timestamps ("14:03", "Wed", "Oct 12") are the same in every screenshot. */
+static time_t wall_at(int days_ago, int hour, int minute)
+{
+    struct tm tm;
+    memset(&tm, 0, sizeof(tm));
+    tm.tm_year = 2026 - 1900;
+    tm.tm_mon = 9;
+    tm.tm_mday = 29 - days_ago;
+    tm.tm_hour = hour;
+    tm.tm_min = minute;
+    tm.tm_isdst = -1;
+    return mktime(&tm);
+}
+
+/* ---- directory stubs ---- */
+
+#define SIM_SPEED_SLOTS 10
+static ui_contact_t s_contacts[UI_CONTACTS_MAX];   /* sorted by name; .speed unused here */
+static size_t s_n_contacts;
+static char s_speed[SIM_SPEED_SLOTS][UI_NUMBER_LEN];
+static ui_call_t s_hist[UI_HISTORY_MAX];           /* newest first */
+static size_t s_n_hist;
+static const char *const RINGTONES[] = {"Classic", "Digital", "Chime", "Old bell", "Soft"};
+#define N_RINGTONES ((int)(sizeof(RINGTONES) / sizeof(RINGTONES[0])))
+
+static unsigned count_unseen(void)
+{
+    unsigned n = 0;
+    for (size_t i = 0; i < s_n_hist; i++) {
+        if (s_hist[i].direction == UI_CALLDIR_IN && s_hist[i].result == UI_CALLRES_MISSED && !s_hist[i].seen) {
+            n++;
+        }
+    }
+    return n > 99 ? 99 : n;
+}
+
 static void push_model(void)
 {
+    s_model.missed_unseen = (uint8_t)count_unseen();
+    s_model.now = s_hour >= 0 ? (int64_t)wall_at(0, s_hour, s_minute) : 0;
     format_clock();
     ui_update(&s_model);
     js_model_changed();
@@ -280,6 +321,239 @@ static void act_hold(void *ctx, bool hold)
         s_model.call = UI_CALL_ACTIVE;
     }
     push_model();
+}
+
+/* ---- directory / sounds mock ---- */
+
+static int find_contact(const char *number)
+{
+    for (size_t i = 0; i < s_n_contacts; i++) {
+        if (strcmp(s_contacts[i].number, number) == 0) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static void clear_speed_for(const char *number)
+{
+    for (int d = UI_SPEED_FIRST; d <= UI_SPEED_LAST; d++) {
+        if (strcmp(s_speed[d], number) == 0) {
+            s_speed[d][0] = '\0';
+        }
+    }
+}
+
+static uint8_t speed_of(const char *number)
+{
+    for (int d = UI_SPEED_FIRST; d <= UI_SPEED_LAST; d++) {
+        if (s_speed[d][0] && strcmp(s_speed[d], number) == 0) {
+            return (uint8_t)d;
+        }
+    }
+    return 0;
+}
+
+static bool contains_ci(const char *hay, const char *needle)
+{
+    size_t nl = strlen(needle);
+    for (; *hay; hay++) {
+        if (strncasecmp(hay, needle, nl) == 0) {
+            return true;
+        }
+    }
+    return nl == 0;
+}
+
+static size_t act_contacts_search(void *ctx, const char *query, ui_contact_t *out, size_t max)
+{
+    (void)ctx;
+    size_t n = 0;
+    size_t ql = strlen(query);
+    for (int pass = 0; pass < 2; pass++) {   /* prefix matches first, then the rest */
+        for (size_t i = 0; i < s_n_contacts && n < max; i++) {
+            const ui_contact_t *c = &s_contacts[i];
+            bool hit = ql == 0 || contains_ci(c->name, query) || strstr(c->number, query);
+            bool prefix = ql == 0 || strncasecmp(c->name, query, ql) == 0 || strncmp(c->number, query, ql) == 0;
+            if (hit && (pass == 0) == prefix) {
+                out[n] = *c;
+                out[n].speed = speed_of(c->number);
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+static const char *act_contact_save(void *ctx, const char *old_number, const char *name, const char *number,
+                                    uint8_t speed)
+{
+    (void)ctx;
+    sim_log("action contact_save(old=%s, \"%s\", %s, speed=%u)", old_number ? old_number : "-", name, number,
+            (unsigned)speed);
+    if (!number[0] || !name[0]) {
+        return "Name and number required";
+    }
+    if (old_number && old_number[0] && strcmp(old_number, number) != 0) {
+        int o = find_contact(old_number);
+        if (o >= 0) {
+            memmove(&s_contacts[o], &s_contacts[o + 1], (s_n_contacts - (size_t)o - 1) * sizeof(s_contacts[0]));
+            s_n_contacts--;
+        }
+        clear_speed_for(old_number);
+    }
+    int idx = find_contact(number);
+    if (idx < 0) {
+        if (s_n_contacts >= UI_CONTACTS_MAX) {
+            return "Contact list is full";
+        }
+        size_t at = 0;
+        while (at < s_n_contacts && strcasecmp(s_contacts[at].name, name) <= 0) {
+            at++;
+        }
+        memmove(&s_contacts[at + 1], &s_contacts[at], (s_n_contacts - at) * sizeof(s_contacts[0]));
+        s_n_contacts++;
+        idx = (int)at;
+    }
+    memset(&s_contacts[idx], 0, sizeof(s_contacts[idx]));
+    snprintf(s_contacts[idx].name, UI_NAME_LEN, "%s", name);
+    snprintf(s_contacts[idx].number, UI_NUMBER_LEN, "%s", number);
+    clear_speed_for(number);
+    if (speed >= UI_SPEED_FIRST && speed <= UI_SPEED_LAST) {
+        snprintf(s_speed[speed], UI_NUMBER_LEN, "%s", number);
+    }
+    return NULL;
+}
+
+static void act_contact_delete(void *ctx, const char *number)
+{
+    (void)ctx;
+    sim_log("action contact_delete(%s)", number);
+    int o = find_contact(number);
+    if (o >= 0) {
+        memmove(&s_contacts[o], &s_contacts[o + 1], (s_n_contacts - (size_t)o - 1) * sizeof(s_contacts[0]));
+        s_n_contacts--;
+    }
+    clear_speed_for(number);
+}
+
+static bool act_speed_get(void *ctx, int digit, ui_contact_t *out)
+{
+    (void)ctx;
+    if (digit < UI_SPEED_FIRST || digit > UI_SPEED_LAST || !s_speed[digit][0]) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    snprintf(out->number, UI_NUMBER_LEN, "%s", s_speed[digit]);
+    int c = find_contact(s_speed[digit]);
+    if (c >= 0) {
+        snprintf(out->name, UI_NAME_LEN, "%s", s_contacts[c].name);
+    }
+    out->speed = (uint8_t)digit;
+    return true;
+}
+
+static size_t act_history_list(void *ctx, ui_call_t *out, size_t max)
+{
+    (void)ctx;
+    size_t n = s_n_hist < max ? s_n_hist : max;
+    memcpy(out, s_hist, n * sizeof(out[0]));
+    return n;
+}
+
+static void act_history_clear(void *ctx)
+{
+    (void)ctx;
+    sim_log("action history_clear()");
+    s_n_hist = 0;
+    push_model();
+}
+
+static void act_history_mark_seen(void *ctx)
+{
+    (void)ctx;
+    sim_log("action history_mark_seen()");
+    for (size_t i = 0; i < s_n_hist; i++) {
+        s_hist[i].seen = true;
+    }
+    push_model();
+}
+
+static const char *act_ringtone_name(void *ctx, int idx)
+{
+    (void)ctx;
+    return idx >= 0 && idx < N_RINGTONES ? RINGTONES[idx] : NULL;
+}
+
+static void act_ringtone_preview(void *ctx, int idx)
+{
+    (void)ctx;
+    if (idx < 0) {
+        sim_log("action ringtone_preview(stop)");
+    } else {
+        sim_log("action ringtone_preview(%d %s)", idx, RINGTONES[idx % N_RINGTONES]);
+    }
+}
+
+static void act_save_sounds(void *ctx, uint8_t tone, uint8_t rv, uint8_t cv, uint8_t sv)
+{
+    (void)ctx;
+    sim_log("action save_sounds(tone=%u ring=%u call=%u speaker=%u)", tone, rv, cv, sv);
+    s_model.ring_tone = tone;
+    s_model.ring_volume = rv;
+    s_model.call_volume = cv;
+    s_model.speaker_volume = sv;
+    push_model();
+}
+
+static void act_save_call_features(void *ctx, bool cw, bool aa, bool dnd)
+{
+    (void)ctx;
+    sim_log("action save_call_features(cw=%d aa=%d dnd=%d)", cw, aa, dnd);
+    s_model.call_waiting = cw;
+    s_model.auto_answer = aa;
+    s_model.dnd = dnd;
+    push_model();
+}
+
+/* Seed data (every start): 14 contacts, speed dial 2/3/5, a week of calls, all seen. */
+static void seed_directory(void)
+{
+    static const struct { const char *name, *number; int speed; } C[] = {
+        {"Alice Johnson", "1001", 0},      {"Bob Example", "1002", 2},     {"Carol Test", "1003", 0},
+        {"Dave Miller", "5551234567", 0},  {"Eve Adams", "1005", 3},       {"Frank Castle", "+4915112345678", 0},
+        {"Front desk", "100", 5},          {"Grace Hopper", "1007", 0},    {"Heidi Klum", "1008", 0},
+        {"Ivan Petrov", "1009", 0},        {"Judy Garland", "1010", 0},    {"Karl Lagerfeld", "1011", 0},
+        {"Dr. Maximilian von Hohenzollern-Sigmaringen", "1012", 0},
+        {"Pizza Palace", "5557890", 0},
+    };
+    for (size_t i = 0; i < sizeof(C) / sizeof(C[0]); i++) {
+        act_contact_save(NULL, NULL, C[i].name, C[i].number, (uint8_t)C[i].speed);
+    }
+    static const struct { int dir, res, days, h, m, dur; const char *name, *number; } H[] = {
+        {UI_CALLDIR_IN, UI_CALLRES_MISSED, 0, 12, 20, 0, "Bob Example", "1002"},
+        {UI_CALLDIR_OUT, UI_CALLRES_ANSWERED, 0, 11, 5, 185, "Alice Johnson", "1001"},
+        {UI_CALLDIR_IN, UI_CALLRES_ANSWERED, 0, 9, 41, 62, "Front desk", "100"},
+        {UI_CALLDIR_IN, UI_CALLRES_MISSED, 1, 17, 58, 0, "", "+4930555123456"},
+        {UI_CALLDIR_OUT, UI_CALLRES_MISSED, 1, 14, 3, 0, "Carol Test", "1003"},
+        {UI_CALLDIR_IN, UI_CALLRES_REJECTED, 2, 20, 12, 0, "Dave Miller", "5551234567"},
+        {UI_CALLDIR_IN, UI_CALLRES_DND, 3, 22, 30, 0, "", "1099"},
+        {UI_CALLDIR_OUT, UI_CALLRES_ANSWERED, 4, 8, 15, 3725, "Eve Adams", "1005"},
+        {UI_CALLDIR_IN, UI_CALLRES_ANSWERED, 6, 16, 45, 7, "Dr. Maximilian von Hohenzollern-Sigmaringen", "1012"},
+        {UI_CALLDIR_OUT, UI_CALLRES_ANSWERED, 12, 13, 0, 45, "", "5557890"},
+    };
+    s_n_hist = 0;
+    for (size_t i = 0; i < sizeof(H) / sizeof(H[0]); i++) {
+        ui_call_t *c = &s_hist[s_n_hist++];
+        memset(c, 0, sizeof(*c));
+        c->direction = (uint8_t)H[i].dir;
+        c->result = (uint8_t)H[i].res;
+        c->seen = true;
+        c->start = (int64_t)wall_at(H[i].days, H[i].h, H[i].m);
+        c->duration_s = (uint32_t)H[i].dur;
+        snprintf(c->name, UI_NAME_LEN, "%s", H[i].name);
+        snprintf(c->number, UI_NUMBER_LEN, "%s", H[i].number);
+    }
 }
 
 /* Like the device: saving updates what the forms prefill from; an empty
@@ -834,6 +1108,31 @@ EMSCRIPTEN_KEEPALIVE void sim_set_mwi(int waiting, int new_msgs, int old_msgs)
     push_model();
 }
 
+/* Mark the `n` newest missed incoming calls as not yet seen (home badge, bold rows in History). */
+EMSCRIPTEN_KEEPALIVE void sim_set_unseen(int n)
+{
+    for (size_t i = 0; i < s_n_hist; i++) {
+        bool missed_in = s_hist[i].direction == UI_CALLDIR_IN && s_hist[i].result == UI_CALLRES_MISSED;
+        if (missed_in) {
+            s_hist[i].seen = n <= 0;
+            n--;
+        }
+    }
+    push_model();
+}
+
+/* Directory sizes for the page / tests: 0 = empty the history, 1 = empty the contacts. */
+EMSCRIPTEN_KEEPALIVE void sim_clear_directory(int which)
+{
+    if (which == 0) {
+        s_n_hist = 0;
+    } else {
+        s_n_contacts = 0;
+        memset(s_speed, 0, sizeof(s_speed));
+    }
+    push_model();
+}
+
 static const char *const NET_NAMES[] = {"OFF", "CONNECTING", "CONNECTED"};
 static const char *const REG_NAMES[] = {"NONE", "REGISTERING", "REGISTERED", "FAILED"};
 static const char *const OTA_NAMES[] = {"IDLE", "RUNNING", "DONE", "FAILED"};
@@ -935,7 +1234,11 @@ EMSCRIPTEN_KEEPALIVE const char *sim_get_model_json(void)
         (unsigned)m->second_seconds, XFER_NAMES[m->xfer], m->xfer_attended ? "true" : "false",
         m->xfer_code);
     PUTS(m->xfer_target);
-    PUT("}");
+    PUT(",\"missed_unseen\":%u,\"contacts\":%u,\"history\":%u,\"ring_tone\":%u,\"ring_volume\":%u,"
+        "\"call_volume\":%u,\"speaker_volume\":%u,\"call_waiting\":%s,\"auto_answer\":%s}",
+        (unsigned)m->missed_unseen, (unsigned)s_n_contacts, (unsigned)s_n_hist, (unsigned)m->ring_tone,
+        (unsigned)m->ring_volume, (unsigned)m->call_volume, (unsigned)m->speaker_volume,
+        m->call_waiting ? "true" : "false", m->auto_answer ? "true" : "false");
 #undef PUT
 #undef PUTS
     return s_json;
@@ -981,6 +1284,14 @@ int main(void)
     snprintf(s_model.fw_partition, sizeof(s_model.fw_partition), "ota_0");
     snprintf(s_model.ota_url, sizeof(s_model.ota_url), "http://192.168.2.193/ota.bin");
     snprintf(s_model.vm_number, sizeof(s_model.vm_number), "*97");
+    s_model.ringtone_count = N_RINGTONES;
+    s_model.ring_tone = 1;
+    s_model.ring_volume = 70;
+    s_model.call_volume = 60;
+    s_model.speaker_volume = 90;
+    s_model.call_waiting = true;
+    s_model.auto_answer = true;
+    seed_directory();
 
     s_actions = (ui_actions_t){
         .ctx = NULL,
@@ -1008,6 +1319,17 @@ int main(void)
         .transfer_attended_complete = act_transfer_attended_complete,
         .transfer_attended_cancel = act_transfer_attended_cancel,
         .set_dnd = act_set_dnd,
+        .contacts_search = act_contacts_search,
+        .contact_save = act_contact_save,
+        .contact_delete = act_contact_delete,
+        .speed_get = act_speed_get,
+        .history_list = act_history_list,
+        .history_clear = act_history_clear,
+        .history_mark_seen = act_history_mark_seen,
+        .ringtone_name = act_ringtone_name,
+        .ringtone_preview = act_ringtone_preview,
+        .save_sounds = act_save_sounds,
+        .save_call_features = act_save_call_features,
     };
 
     ui_init(disp, &s_actions);

@@ -79,6 +79,7 @@ expect ^imported 2 contacts, 1 bad lines, 4 total
 prompt
 do contact list
 expect ^7004\s+Dan, D
+do history clear
 do history add in missed 7002
 do history
 expect in\s+missed\s+NEW\s+0s\s+7002\s+Bob

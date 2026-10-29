@@ -39,6 +39,10 @@ typedef struct {
     char ota_message[64];
     char vm_number[32];             /* settings vm_number */
     bool dnd;                       /* settings dnd (the phone follows it a moment later) */
+    /* sounds + call features (settings) */
+    uint8_t ringtone_count;
+    uint8_t ring_tone, ring_volume, call_volume, speaker_volume;
+    bool call_waiting, auto_answer;
 } ui_bridge_local_t;
 
 /** Fill the time/update settings of `loc` (Settings > Time and > Update prefill).
@@ -66,6 +70,10 @@ void ui_bridge_fill_vm(ui_bridge_local_t *loc, const char *vm_number);
 
 /** Do-not-disturb setting (read from settings so a tap shows at once, before the phone applies it). */
 void ui_bridge_fill_dnd(ui_bridge_local_t *loc, bool dnd);
+/** Ringtone list size + stored sounds / call feature settings (Settings > Sounds, Call features). */
+void ui_bridge_fill_sounds(ui_bridge_local_t *loc, int ringtone_count, uint8_t ring_tone, uint8_t ring_volume,
+                           uint8_t call_volume, uint8_t speaker_volume, bool call_waiting, bool auto_answer,
+                           bool dnd);
 
 ui_blf_state_t ui_bridge_map_blf(blf_state_t st);
 

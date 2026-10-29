@@ -6,5 +6,5 @@ idf_component_register(
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "private_include"
     REQUIRES common rtp esp_common
-    PRIV_REQUIRES sip audio storage net cli esp_event esp_timer esp_hw_support freertos lwip log
+    PRIV_REQUIRES directory sip audio storage net cli esp_event esp_timer esp_hw_support freertos lwip log
 )

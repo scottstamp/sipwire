@@ -699,6 +699,31 @@ static void test_build_model_blf_mwi(void)
     TEST_ASSERT_EQUAL_STRING("", loc.vm_number);
 }
 
+static void test_fill_sounds(void)
+{
+    ui_bridge_local_t loc;
+    memset(&loc, 0, sizeof(loc));
+    ui_bridge_fill_sounds(&loc, 6, 2, 70, 150, 90, true, false, true);
+    TEST_ASSERT_EQUAL_UINT8(6, loc.ringtone_count);
+    TEST_ASSERT_EQUAL_UINT8(100, loc.call_volume);   /* clamped */
+    phone_status_t ph;
+    memset(&ph, 0, sizeof(ph));
+    ui_model_t m;
+    ui_bridge_build_model(&loc, &ph, 0, &m);
+    TEST_ASSERT_EQUAL_UINT8(6, m.ringtone_count);
+    TEST_ASSERT_EQUAL_UINT8(2, m.ring_tone);
+    TEST_ASSERT_EQUAL_UINT8(70, m.ring_volume);
+    TEST_ASSERT_EQUAL_UINT8(100, m.call_volume);
+    TEST_ASSERT_EQUAL_UINT8(90, m.speaker_volume);
+    TEST_ASSERT_TRUE(m.call_waiting);
+    TEST_ASSERT_FALSE(m.auto_answer);
+    TEST_ASSERT_TRUE(m.dnd);
+    TEST_ASSERT_EQUAL_UINT8(0, m.missed_unseen);
+    TEST_ASSERT_EQUAL_INT64(0, m.now);
+    ui_bridge_fill_sounds(&loc, -3, 0, 0, 0, 0, false, false, false);
+    TEST_ASSERT_EQUAL_UINT8(0, loc.ringtone_count);
+}
+
 static void test_tone_call_waiting(void)
 {
     /* beep only while the foreground call is established and the other rings */
@@ -734,6 +759,28 @@ static void test_xfer_map(void)
     TEST_ASSERT_EQUAL(XFER_FAILED, phone_xfer_map(SIP_XFER_FAILED));
 }
 
+static void test_call_log_classify(void)
+{
+    TEST_ASSERT_EQUAL(PHONE_LOG_ANSWERED, phone_log_result(false, true, false, false));
+    TEST_ASSERT_EQUAL(PHONE_LOG_ANSWERED, phone_log_result(true, true, false, false));
+    TEST_ASSERT_EQUAL(PHONE_LOG_MISSED, phone_log_result(false, false, false, false));
+    TEST_ASSERT_EQUAL(PHONE_LOG_REJECTED, phone_log_result(false, false, true, false));
+    TEST_ASSERT_EQUAL(PHONE_LOG_DND, phone_log_result(false, false, false, true));
+    TEST_ASSERT_EQUAL(PHONE_LOG_MISSED, phone_log_result(true, false, false, false));
+    TEST_ASSERT_EQUAL(PHONE_LOG_MISSED, phone_log_result(true, false, true, false));
+}
+
+static void test_call_log_times(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(0, phone_log_duration_s(0, 5000000));
+    TEST_ASSERT_EQUAL_UINT32(0, phone_log_duration_s(5000000, 5000000));
+    TEST_ASSERT_EQUAL_UINT32(12, phone_log_duration_s(1000000, 13900000));
+    TEST_ASSERT_EQUAL_INT64(0, phone_log_start(0, 10));
+    TEST_ASSERT_EQUAL_INT64(1700000000 - 30, phone_log_start(1700000000, 30));
+    TEST_ASSERT_EQUAL_INT64(1700000000, phone_log_start(1700000000, 0));
+    TEST_ASSERT_EQUAL_INT64(5, phone_log_start(5, 50));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -754,6 +801,9 @@ int main(void)
     RUN_TEST(test_dtmf_event_fits_in_gap);
     RUN_TEST(test_dtmf_push_rejects);
     RUN_TEST(test_volume_kind);
+    RUN_TEST(test_fill_sounds);
+    RUN_TEST(test_call_log_classify);
+    RUN_TEST(test_call_log_times);
     RUN_TEST(test_codec_names);
     RUN_TEST(test_codec_pref_parse);
     RUN_TEST(test_account_format);

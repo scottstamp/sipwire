@@ -5,7 +5,10 @@
  * must not block — post to a queue/event and return. Any member may be NULL. */
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
+
+#include "ui_model.h"
 
 /* Touch calibration, same semantics as settings.h `touch_cal` and display.h:
  * raw 12-bit touch values (after the controller's swap_xy, before any mirror or
@@ -62,4 +65,36 @@ typedef struct {
     void (*transfer_attended_complete)(void *ctx);
     void (*transfer_attended_cancel)(void *ctx);
     void (*set_dnd)(void *ctx, bool on);
+    /* ---- directory (called from the LVGL task: in-RAM lookups; the saves write a small file (tens of ms)
+     * and return the result, so the screen can refetch right after) ---- */
+    /* Contacts whose name contains `query` or whose number contains it (case-insensitive;
+     * "" = all), best matches first, then sorted. Fills up to `max` entries incl. the
+     * speed dial key of each; returns the count. */
+    size_t (*contacts_search)(void *ctx, const char *query, ui_contact_t *out, size_t max);
+    /* Add or change a contact. `old_number` (NULL for a new one) is the number the contact
+     * had before, so a changed number replaces it. `speed` 2..9 assigns that speed dial key
+     * to the contact (0 = none). Returns NULL on success or a short error text. */
+    const char *(*contact_save)(void *ctx, const char *old_number, const char *name,
+                                const char *number, uint8_t speed);
+    /* Delete a contact and its speed dial key. */
+    void (*contact_delete)(void *ctx, const char *number);
+    /* Speed dial slot `digit` (2..9): fills `out` (number, and the contact's name if known)
+     * and returns true when assigned. */
+    bool (*speed_get)(void *ctx, int digit, ui_contact_t *out);
+    /* Call history, newest first; returns the count (<= max). */
+    size_t (*history_list)(void *ctx, ui_call_t *out, size_t max);
+    void (*history_clear)(void *ctx);
+    /* Mark all missed calls seen (the badge count follows in the model). */
+    void (*history_mark_seen)(void *ctx);
+
+    /* ---- sounds / call features ---- */
+    const char *(*ringtone_name)(void *ctx, int idx);   /* NULL out of range */
+    /* Play ringtone `idx` in a loop (preview), or stop with idx < 0. Stopping does nothing
+     * while a call rings or is active (the phone owns the speaker then). */
+    void (*ringtone_preview)(void *ctx, int idx);
+    /* Persist ringtone + volumes (0-100). */
+    void (*save_sounds)(void *ctx, uint8_t ring_tone, uint8_t ring_volume, uint8_t call_volume,
+                        uint8_t speaker_volume);
+    /* Persist the call feature switches (applied live). */
+    void (*save_call_features)(void *ctx, bool call_waiting, bool auto_answer, bool dnd);
 } ui_actions_t;

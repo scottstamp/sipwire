@@ -14,6 +14,7 @@
 #include "esp_vfs_fat.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "wear_levelling.h"
 
 static const char *TAG = "directory";
@@ -34,6 +35,12 @@ static wl_handle_t s_wl = WL_INVALID_HANDLE;
 static dir_ctab_t s_contacts;
 static dir_speed_tab_t s_speed;
 static dir_hist_t s_hist;
+/* History changes come from the sip task (call end, small stack, must not stall on flash) and the
+ * LVGL task: they only mark the history dirty, and this task writes it (s_lock is held just for
+ * the in-RAM serialisation, not for the flash write). */
+static TaskHandle_t s_writer;
+static bool s_hist_dirty;           /* under s_lock */
+#define WRITER_COALESCE_MS  200     /* several changes in a row (mark seen + clear...) = one write */
 
 esp_err_t dir_console_register(void);    /* dir_console.c */
 
@@ -124,18 +131,22 @@ static esp_err_t save_speed(void)
     return save_text(F_SPEED, F_SPEED_T, write_speed, &s_speed);
 }
 
-static esp_err_t save_history(void)
+/* Caller holds s_lock: serialise the history into a new buffer (PSRAM if possible). */
+static uint8_t *history_snapshot_locked(size_t *len)
 {
-    if (!s_mounted) {
-        return ESP_ERR_INVALID_STATE;
-    }
     size_t need = dir_hist_size(&s_hist);
     uint8_t *buf = heap_caps_malloc(need, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (buf == NULL) {
         buf = heap_caps_malloc(need, MALLOC_CAP_8BIT);
     }
-    ESP_RETURN_ON_FALSE(buf, ESP_ERR_NO_MEM, TAG, "history buffer");
-    size_t len = dir_hist_serialize(&s_hist, buf, need);
+    if (buf != NULL) {
+        *len = dir_hist_serialize(&s_hist, buf, need);
+    }
+    return buf;
+}
+
+static esp_err_t write_history(const uint8_t *buf, size_t len)
+{
     esp_err_t err = ESP_FAIL;
     FILE *f = fopen(F_HISTORY_T, "wb");
     if (f) {
@@ -146,11 +157,42 @@ static esp_err_t save_history(void)
             unlink(F_HISTORY_T);
         }
     }
-    free(buf);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "save history failed");
     }
     return err;
+}
+
+static void writer_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        vTaskDelay(pdMS_TO_TICKS(WRITER_COALESCE_MS));
+        uint8_t *buf = NULL;
+        size_t len = 0;
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (s_hist_dirty) {
+            buf = history_snapshot_locked(&len);
+            s_hist_dirty = buf == NULL;     /* out of memory: retry on the next change */
+        }
+        xSemaphoreGive(s_lock);
+        if (buf != NULL) {
+            write_history(buf, len);
+            free(buf);
+        }
+    }
+}
+
+/* Caller holds s_lock. */
+static esp_err_t save_history(void)
+{
+    if (!s_mounted || s_writer == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_hist_dirty = true;
+    xTaskNotifyGive(s_writer);
+    return ESP_OK;
 }
 
 static void load_contacts(void)
@@ -243,6 +285,10 @@ esp_err_t dir_init(void)
         load_contacts();
         load_speed();
         load_history();
+        /* internal-RAM stack: it runs FATFS / flash writes */
+        if (xTaskCreate(writer_task, "dir_save", 4096, NULL, 2, &s_writer) != pdPASS) {
+            ESP_LOGE(TAG, "no memory for the writer task - history is not saved");
+        }
     }
     dir_console_register();
     return ESP_OK;

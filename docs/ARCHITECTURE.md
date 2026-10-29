@@ -22,10 +22,15 @@ components/
                      FAT partition (wear-levelled, /data; contacts.csv, speed.csv, history.bin,
                      atomic tmp+rename writes); `dir_*` API, thread-safe; console: contact,
                      speed, history. dir_core.c is pure C (host-tested in test_host/directory).
-                     Call-event hookup (phone -> dir_history_add) and UI are separate work.
+                     phone.c logs every ended call (dir_history_add; phone_log_* in
+                     phone_logic.c: answered / missed / declined / DND, outgoing no-answer =
+                     missed); the UI reads the lists through ui_actions_t (bridge) and keeps
+                     only the unseen-missed count in the model.
   ota/               firmware update (esp_https_ota, http or https), rollback health watch
   phone/             call state machine, ties sip+rtp+audio; emits UI events
-  ui/                LVGL screens: home, dialer, incoming, in-call, settings, contacts
+  ui/                LVGL screens: home, dialer (contact matches, speed dial), incoming, in-call,
+                     history, contacts, settings (Sounds, Call features...). Long lists (contacts,
+                     history) use ui_vlist.c: a pool of ~8 row widgets re-bound on scroll.
                      (pure LVGL, no IDF deps — also built for the web simulator)
 sim/web/             Emscripten build of components/ui + mock model → browser
 ```

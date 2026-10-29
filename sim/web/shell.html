@@ -203,6 +203,9 @@
     set_dnd: function (on) { Module.ccall('sim_set_dnd', null, ['number'], [on ? 1 : 0]); },
     set_page: function (on) { Module.ccall('sim_set_page', null, ['number'], [on ? 1 : 0]); },
     waiting: function (n, nm) { Module.ccall('sim_waiting', null, ['string', 'string'], [n, nm || '']); },
+    // directory stubs: mark the n newest missed incoming calls unseen; clear_directory(0 history | 1 contacts)
+    set_unseen: function (n) { Module.ccall('sim_set_unseen', null, ['number'], [n]); },
+    clear_directory: function (w) { Module.ccall('sim_clear_directory', null, ['number'], [w]); },
     model: function () { return JSON.parse(getModelJson()); }
   };
 

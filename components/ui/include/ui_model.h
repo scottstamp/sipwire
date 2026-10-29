@@ -68,6 +68,39 @@ typedef struct {
  * (24 h); "" until the clock is set. The home screen splits off the AM/PM at the space. */
 #define UI_TIME_STR_LEN 12
 
+/* ---- directory (contacts, call history) ---- */
+
+#define UI_CONTACTS_MAX   200  /* directory.h DIR_CONTACTS_MAX */
+#define UI_HISTORY_MAX    100  /* directory.h DIR_HISTORY_MAX */
+#define UI_NAME_LEN       32   /* incl. NUL */
+#define UI_NUMBER_LEN     32   /* incl. NUL */
+#define UI_SPEED_FIRST    2    /* speed dial keys 2..9 */
+#define UI_SPEED_LAST     9
+
+typedef struct {
+    char name[UI_NAME_LEN];
+    char number[UI_NUMBER_LEN];
+    uint8_t speed;             /* speed dial key 2..9, 0 = none */
+} ui_contact_t;
+
+typedef enum { UI_CALLDIR_IN, UI_CALLDIR_OUT } ui_call_dir_t;
+typedef enum {
+    UI_CALLRES_ANSWERED,
+    UI_CALLRES_MISSED,         /* incoming: not answered; outgoing: no answer / failed */
+    UI_CALLRES_REJECTED,       /* declined by the user */
+    UI_CALLRES_DND,            /* refused by do-not-disturb */
+} ui_call_result_t;
+
+typedef struct {
+    uint8_t direction;         /* ui_call_dir_t */
+    uint8_t result;            /* ui_call_result_t */
+    bool seen;                 /* missed calls: false until the history was opened */
+    int64_t start;             /* seconds since the epoch, 0 = unknown */
+    uint32_t duration_s;
+    char number[UI_NUMBER_LEN];
+    char name[UI_NAME_LEN];    /* may be empty */
+} ui_call_t;
+
 typedef struct {
     ui_net_state_t net;
     int8_t rssi;               /* dBm, valid when net == UI_NET_CONNECTED */
@@ -133,4 +166,19 @@ typedef struct {
     bool xfer_attended;
     int xfer_code;             /* SIP status for UI_XFER_FAILED / DONE, 0 = none */
     char xfer_target[64];
+    /* directory: the lists themselves are fetched through ui_actions_t (contacts_search,
+     * history_list) when a screen opens; only the badge count lives in the model. */
+    uint8_t missed_unseen;     /* missed incoming calls not yet seen in the history (capped at 99) */
+    int64_t now;               /* wall clock, seconds since the epoch rounded down to the minute;
+                                * 0 until the clock is set */
+
+    /* sounds + call features (stored settings; prefill Settings > Sounds / Call features) */
+    uint8_t ringtone_count;    /* ui_actions_t.ringtone_name valid for 0..count-1 */
+    uint8_t ring_tone;
+    uint8_t ring_volume;       /* 0-100 */
+    uint8_t call_volume;
+    uint8_t speaker_volume;
+    bool call_waiting;
+    bool auto_answer;          /* answer pages / intercom calls automatically */
+    /* dnd: see the call features block above */
 } ui_model_t;

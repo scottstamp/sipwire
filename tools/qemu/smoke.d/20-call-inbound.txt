@@ -20,6 +20,7 @@ expect ^update: failed
 # the refusals did not reboot (the lines since the last expect are checked too).
 absent (ota: update done|ESP-ROM:esp32s3|Guru Meditation) 1
 
+do history clear
 # 3: inbound call, answer, remote ends (Wait 1: Asterisk hangs up 1 s after we answer)
 shell ($ASTX 'channel originate PJSIP/1001 application Wait 1' >/dev/null 2>&1 &)
 expect call: ringing-in 10
@@ -38,6 +39,14 @@ expect call: idle 5
 # 5: unknown number -> rejected
 do call 777
 expect call: ended 777 \(code [45]\d\d\) 15
+
+# call log: the answered and the declined inbound call, and the refused outgoing call
+# (the clock is not set in QEMU: the time column may be "--"); newest first
+do history
+expect \sout\s+missed\s.*777
+expect \sin\s+rejected\s
+expect \sin\s+answered\s+[0-9]+s
+expect ^3 calls, 0 unseen missed
 
 # 6: account change -> unregister, re-register with new display name
 do cfg set sip_display_name QemuPhone

@@ -17,7 +17,14 @@
 #define DEFAULT_SIP_PORT 5060
 #define OTA_URL_MAX_CHARS 191       /* ota.h OTA_URL_MAX - 1 */
 
-typedef enum { PG_LIST, PG_WIFI, PG_ACCOUNT, PG_BLF, PG_TIME, PG_UPDATE, PG_ABOUT, PG_COUNT } page_t;
+typedef enum {
+    PG_LIST, PG_WIFI, PG_ACCOUNT, PG_BLF, PG_TIME, PG_UPDATE, PG_ABOUT,
+    PG_SOUNDS, PG_FEATURES,     /* no keyboard, apply immediately */
+    PG_COUNT
+} page_t;
+
+#define TONE_MAX 12             /* ringtone rows built at most */
+#define SLIDER_ROWS 3           /* ring, call, speaker volume */
 
 /* Dial pad for extensions / the voicemail number (LVGL's number pad has no
  * '*' or '#'); "abc" switches to letters for alphanumeric extensions. */
@@ -81,12 +88,24 @@ typedef struct {
     int blf_n;
 
     lv_obj_t *about_ip, *about_acc, *about_reg, *about_wifi, *about_fw;
+
+    /* Sounds page */
+    lv_obj_t *tone_box;
+    lv_obj_t *tone_row[TONE_MAX];
+    int tone_n;
+    int tone_sel;                   /* selected ringtone */
+    int tone_playing;               /* preview running (-1 = none) */
+    lv_obj_t *vol[SLIDER_ROWS];     /* sliders: ring, call, speaker */
+    lv_obj_t *vol_cap[SLIDER_ROWS];
+
+    /* Call features page */
+    lv_obj_t *sw_cw, *sw_aa, *sw_dnd;
 } settings_t;
 
 static settings_t *s_s;
 
 static const char *const TITLES[PG_COUNT] = {"Settings", "Wi-Fi", "Account", "BLF", "Time", "Update",
-                                             "About"};
+                                             "About", "Sounds", "Call features"};
 
 static void on_delete(lv_event_t *e)
 {
@@ -234,9 +253,14 @@ static void prefill(settings_t *s, page_t p)
     }
 }
 
+static void sounds_stop(settings_t *s);
+static void sounds_prefill(settings_t *s);
+static void features_prefill(settings_t *s);
+
 static void show_page(settings_t *s, page_t p)
 {
     kb_hide(s);
+    sounds_stop(s);                 /* a preview never outlives its page */
     for (int i = 0; i < PG_COUNT; i++) {
         if (i == (int)p) {
             lv_obj_set_hidden(s->page[i], false);
@@ -252,6 +276,12 @@ static void show_page(settings_t *s, page_t p)
         lv_obj_scroll_to_y(s->page[p], 0, LV_ANIM_OFF);
     } else {
         lv_obj_set_hidden(s->save, true);
+        if (p == PG_SOUNDS) {
+            sounds_prefill(s);
+            lv_obj_scroll_to_y(s->page[p], 0, LV_ANIM_OFF);
+        } else if (p == PG_FEATURES) {
+            features_prefill(s);
+        }
     }
 }
 
@@ -348,39 +378,6 @@ static lv_obj_t *about_row(lv_obj_t *page, const char *caption, int32_t y)
     lv_obj_t *val = ui_fit_create(page, 12, y + 18, 216, 30, UI_COL_TEXT);
     lv_obj_set_style_text_align(lv_obj_get_child(val, 0), LV_TEXT_ALIGN_LEFT, 0);
     return val;
-}
-
-static void style_dropdown(lv_obj_t *dd)
-{
-    lv_obj_set_style_bg_color(dd, UI_COL_SURFACE, 0);
-    lv_obj_set_style_bg_opa(dd, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(dd, UI_COL_SURFACE2, 0);
-    lv_obj_set_style_border_width(dd, 2, 0);
-    lv_obj_set_style_radius(dd, 8, 0);
-    lv_obj_set_style_text_color(dd, UI_COL_TEXT, 0);
-    lv_obj_set_style_text_font(dd, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_pad_hor(dd, 8, 0);
-    lv_obj_set_style_pad_ver(dd, 6, 0);
-    lv_obj_set_style_shadow_width(dd, 0, 0);
-    lv_obj_set_style_border_color(dd, UI_COL_BLUE, LV_STATE_FOCUSED);
-    lv_obj_set_style_outline_width(dd, 0, LV_STATE_FOCUS_KEY);
-
-    /* The popup list lives on the screen, not inside the dropdown: style it separately.
-     * Line space makes every option a 44 px touch target. */
-    lv_obj_t *list = lv_dropdown_get_list(dd);
-    lv_obj_set_style_bg_color(list, UI_COL_SURFACE, 0);
-    lv_obj_set_style_bg_opa(list, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(list, UI_COL_BLUE, 0);
-    lv_obj_set_style_border_width(list, 2, 0);
-    lv_obj_set_style_radius(list, 8, 0);
-    lv_obj_set_style_pad_hor(list, 8, 0);
-    lv_obj_set_style_text_color(list, UI_COL_TEXT, 0);
-    lv_obj_set_style_text_font(list, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_text_line_space(list, 16, 0);
-    lv_obj_set_style_shadow_width(list, 0, 0);
-    lv_obj_set_style_bg_color(list, UI_COL_BLUE, LV_PART_SELECTED | LV_STATE_CHECKED);
-    lv_obj_set_style_bg_color(list, UI_COL_SURFACE2, LV_PART_SELECTED | LV_STATE_PRESSED);
-    lv_obj_set_style_text_color(list, UI_COL_TEXT, LV_PART_SELECTED | LV_STATE_CHECKED);
 }
 
 static void tz_pressed(lv_event_t *e)
@@ -636,6 +633,183 @@ static void on_save(lv_event_t *e)
     }
 }
 
+/* ---- Sounds ----------------------------------------------------------------- */
+
+static void tone_paint(settings_t *s)
+{
+    for (int i = 0; i < s->tone_n; i++) {
+        lv_obj_t *r = s->tone_row[i];
+        bool sel = i == s->tone_sel, play = i == s->tone_playing;
+        lv_obj_set_style_border_width(r, sel ? 2 : 0, 0);
+        lv_obj_set_style_border_color(r, UI_COL_BLUE, 0);
+        lv_obj_t *ic = lv_obj_get_child(r, 1);
+        lv_label_set_text(ic, play ? LV_SYMBOL_VOLUME_MAX : (sel ? LV_SYMBOL_OK : ""));
+        lv_obj_set_style_text_color(ic, play ? UI_COL_OK : UI_COL_BLUE, 0);
+    }
+}
+
+static void sounds_stop(settings_t *s)
+{
+    if (s->tone_playing >= 0) {
+        s->tone_playing = -1;
+        ui_act_ringtone_preview(-1);
+        tone_paint(s);
+    }
+}
+
+static void sounds_save(settings_t *s)
+{
+    ui_act_save_sounds((uint8_t)s->tone_sel, (uint8_t)lv_slider_get_value(s->vol[0]),
+                       (uint8_t)lv_slider_get_value(s->vol[1]), (uint8_t)lv_slider_get_value(s->vol[2]));
+}
+
+static void on_tone(lv_event_t *e)
+{
+    settings_t *s = s_s;
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    if (!s || i < 0 || i >= s->tone_n) {
+        return;
+    }
+    s->tone_sel = i;
+    if (s->tone_playing == i) {
+        s->tone_playing = -1;               /* tap the playing one again: stop */
+        ui_act_ringtone_preview(-1);
+    } else {
+        s->tone_playing = i;                /* replaces any other preview */
+        ui_act_ringtone_preview(i);
+    }
+    tone_paint(s);
+    sounds_save(s);
+}
+
+static const char *const VOL_NAMES[SLIDER_ROWS] = {"Ring volume", "Call volume", "Speaker volume"};
+
+static void vol_caption(settings_t *s, int i)
+{
+    lv_label_set_text_fmt(s->vol_cap[i], "%s  %d%%", VOL_NAMES[i], (int)lv_slider_get_value(s->vol[i]));
+}
+
+static void on_vol(lv_event_t *e)
+{
+    settings_t *s = s_s;
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    if (!s) {
+        return;
+    }
+    vol_caption(s, i);
+    if (lv_event_get_code(e) == LV_EVENT_RELEASED) {
+        sounds_save(s);
+    } else if (i == 0) {
+        ui_act_set_volume((uint8_t)lv_slider_get_value(s->vol[0]));   /* a running preview follows live */
+    }
+}
+
+static void sounds_prefill(settings_t *s)
+{
+    const ui_model_t *m = ui_model();
+    int n = m->ringtone_count > TONE_MAX ? TONE_MAX : m->ringtone_count;
+    for (; s->tone_n < n; s->tone_n++) {
+        int i = s->tone_n;
+        const char *name = ui_act_ringtone_name(i);
+        lv_obj_t *r = ui_btn_create(s->tone_box, UI_BTN_NEUTRAL, NULL, 0, 0, 228, 42);
+        lv_obj_t *l = ui_label_create(r, &lv_font_montserrat_24, UI_COL_TEXT, name ? name : "?");
+        lv_obj_align(l, LV_ALIGN_LEFT_MID, 10, 0);
+        lv_obj_t *ic = ui_label_create(r, &lv_font_montserrat_24, UI_COL_BLUE, "");
+        lv_obj_align(ic, LV_ALIGN_RIGHT_MID, -10, 0);
+        lv_obj_add_event_cb(r, on_tone, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        s->tone_row[i] = r;
+    }
+    s->tone_sel = m->ring_tone < s->tone_n ? m->ring_tone : 0;
+    s->tone_playing = -1;
+    tone_paint(s);
+    const uint8_t v[SLIDER_ROWS] = {m->ring_volume, m->call_volume, m->speaker_volume};
+    for (int i = 0; i < SLIDER_ROWS; i++) {
+        lv_slider_set_value(s->vol[i], v[i], LV_ANIM_OFF);
+        vol_caption(s, i);
+    }
+}
+
+static lv_obj_t *slider_row(settings_t *s, lv_obj_t *page, int i)
+{
+    s->vol_cap[i] = ui_label_create(page, &lv_font_montserrat_14, UI_COL_DIM, "");
+    lv_obj_set_style_pad_top(s->vol_cap[i], 8, 0);
+    lv_obj_t *row = ui_box_create(page, 0, 0, 228, 40);
+    lv_obj_t *sl = lv_slider_create(row);
+    lv_obj_set_size(sl, 200, 12);
+    lv_obj_align(sl, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_ext_click_area(sl, 14);
+    lv_slider_set_range(sl, 0, 100);
+    lv_obj_set_style_bg_color(sl, UI_COL_SURFACE2, 0);
+    lv_obj_set_style_bg_opa(sl, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(sl, UI_COL_BLUE, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(sl, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(sl, UI_COL_TEXT, LV_PART_KNOB);
+    lv_obj_set_style_bg_opa(sl, LV_OPA_COVER, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(sl, 9, LV_PART_KNOB);
+    lv_obj_add_event_cb(sl, on_vol, LV_EVENT_VALUE_CHANGED, (void *)(intptr_t)i);
+    lv_obj_add_event_cb(sl, on_vol, LV_EVENT_RELEASED, (void *)(intptr_t)i);
+    s->vol[i] = sl;
+    return sl;
+}
+
+/* ---- Call features ---------------------------------------------------------- */
+
+static void features_save(settings_t *s)
+{
+    ui_act_save_call_features(lv_obj_has_state(s->sw_cw, LV_STATE_CHECKED),
+                              lv_obj_has_state(s->sw_aa, LV_STATE_CHECKED),
+                              lv_obj_has_state(s->sw_dnd, LV_STATE_CHECKED));
+}
+
+static void on_feature(lv_event_t *e)
+{
+    (void)e;
+    if (s_s) {
+        features_save(s_s);
+    }
+}
+
+static void set_switch(lv_obj_t *sw, bool on)
+{
+    if (on) {
+        lv_obj_add_state(sw, LV_STATE_CHECKED);
+    } else {
+        lv_obj_remove_state(sw, LV_STATE_CHECKED);
+    }
+}
+
+static void features_prefill(settings_t *s)
+{
+    const ui_model_t *m = ui_model();
+    set_switch(s->sw_cw, m->call_waiting);
+    set_switch(s->sw_aa, m->auto_answer);
+    set_switch(s->sw_dnd, m->dnd);
+}
+
+static lv_obj_t *feature_row(lv_obj_t *page, const char *title, const char *desc)
+{
+    lv_obj_t *row = ui_box_create(page, 0, 0, 228, 64);
+    lv_obj_t *t = ui_label_create(row, &lv_font_montserrat_24, UI_COL_TEXT, title);
+    lv_obj_set_pos(t, 4, 6);
+    lv_obj_t *d = ui_label_create(row, &lv_font_montserrat_14, UI_COL_DIM, desc);
+    lv_obj_set_pos(d, 4, 38);
+    lv_obj_t *sw = lv_switch_create(row);
+    lv_obj_set_size(sw, 52, 30);
+    lv_obj_align(sw, LV_ALIGN_TOP_RIGHT, -2, 4);
+    lv_obj_set_style_bg_color(sw, UI_COL_SURFACE2, 0);
+    lv_obj_set_style_bg_color(sw, UI_COL_GREEN, LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(sw, UI_COL_TEXT, LV_PART_KNOB);
+    lv_obj_add_event_cb(sw, on_feature, LV_EVENT_VALUE_CHANGED, NULL);
+    return sw;
+}
+
+static void settings_leave(void)
+{
+    if (s_s) {
+        sounds_stop(s_s);
+    }
+}
+
 static lv_obj_t *settings_create(const char *arg)
 {
     (void)arg;
@@ -654,6 +828,8 @@ static lv_obj_t *settings_create(const char *arg)
     list_row(list, PG_ACCOUNT, LV_SYMBOL_CALL, "SIP account");
     list_row(list, PG_BLF, LV_SYMBOL_EYE_OPEN, "BLF keys");
     list_row(list, PG_COUNT, LV_SYMBOL_EDIT, "Calibrate");
+    list_row(list, PG_SOUNDS, LV_SYMBOL_VOLUME_MAX, "Sounds");
+    list_row(list, PG_FEATURES, LV_SYMBOL_SHUFFLE, "Call features");
     list_row(list, PG_TIME, LV_SYMBOL_BELL, "Time");
     list_row(list, PG_UPDATE, LV_SYMBOL_DOWNLOAD, "Update");
     list_row(list, PG_ABOUT, LV_SYMBOL_LIST, "About");
@@ -696,7 +872,7 @@ static lv_obj_t *settings_create(const char *arg)
     s->tz_dd = lv_dropdown_create(tf);
     lv_dropdown_set_options_static(s->tz_dd, ZONE_OPTIONS);
     lv_obj_set_size(s->tz_dd, 228, FIELD_H);
-    style_dropdown(s->tz_dd);
+    ui_style_dropdown(s->tz_dd);
     lv_obj_add_event_cb(s->tz_dd, tz_pressed, LV_EVENT_PRESSED, s);
     lv_obj_add_event_cb(s->tz_dd, tz_changed, LV_EVENT_VALUE_CHANGED, s);
     s->tz_custom = field_create(s, tf, "POSIX TZ string", "EST5EDT,M3.2.0,M11.1.0", 63, false);
@@ -737,6 +913,24 @@ static lv_obj_t *settings_create(const char *arg)
     s->ota_msg = ui_label_create(uf, &lv_font_montserrat_14, UI_COL_DIM, "");
     lv_obj_set_width(s->ota_msg, 228);
     lv_obj_set_style_pad_top(s->ota_msg, 4, 0);
+
+    lv_obj_t *sf = form_create(s, scr);
+    s->page[PG_SOUNDS] = sf;
+    lv_obj_t *tcap = ui_label_create(sf, &lv_font_montserrat_14, UI_COL_DIM, "Ringtone (tap to preview)");
+    lv_obj_set_style_pad_top(tcap, 4, 0);
+    s->tone_box = ui_box_create(sf, 0, 0, 228, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s->tone_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s->tone_box, 4, 0);
+    s->tone_playing = -1;
+    for (int i = 0; i < SLIDER_ROWS; i++) {
+        slider_row(s, sf, i);
+    }
+
+    lv_obj_t *ff = form_create(s, scr);
+    s->page[PG_FEATURES] = ff;
+    s->sw_cw = feature_row(ff, "Call waiting", "Beep for a second call");
+    s->sw_aa = feature_row(ff, "Auto-answer", "Pages on the loudspeaker");
+    s->sw_dnd = feature_row(ff, "Don't disturb", "Refuse calls silently");
 
     lv_obj_t *about = ui_box_create(scr, 0, BODY_Y, UI_W, BODY_H);
     s->page[PG_ABOUT] = about;
@@ -832,4 +1026,4 @@ static void settings_update(const ui_model_t *m)
     ui_fit_set(s->about_fw, buf, &lv_font_montserrat_24, false);
 }
 
-const ui_screen_ops_t ui_ops_settings = {settings_create, settings_update, NULL, NULL, NULL};
+const ui_screen_ops_t ui_ops_settings = {settings_create, settings_update, NULL, NULL, settings_leave};

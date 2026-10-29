@@ -21,6 +21,12 @@ const buildDir = path.join(here, 'build');
 
 // Add scenarios here. `sim` is window.sim inside the page; the function is
 // serialised and run in the browser, so it cannot capture Node variables.
+
+// Pixel positions used by the directory / sounds scenarios (tuned from screenshots).
+const KB_A = [52, 218];                         // 'a' on the text keyboard (bottom 160 px)
+const KB_L = [190, 218];                        // 'l'
+const SETTINGS_ROW = { sounds: 150, features: 204 };   // list rows after scrolling to the end
+
 const SCENARIOS = {
   idle: () => {},
   registered: (sim) => {
@@ -121,7 +127,7 @@ const SCENARIOS = {
       sim.set_time('12:34');
     },
     steps: async (page, click) => {
-      await click(178, 282);   // Home -> "Settings"
+      await click(207, 282);   // Home -> "Settings"
     },
   },
   settings_wifi_keyboard: {
@@ -131,7 +137,7 @@ const SCENARIOS = {
       sim.set_time('12:34');
     },
     steps: async (page, click) => {
-      await click(178, 282);   // Home -> Settings
+      await click(207, 282);   // Home -> Settings
       await page.waitForTimeout(250);
       await click(120, 106);   // "Wi-Fi" row
       await page.waitForTimeout(100);
@@ -154,7 +160,7 @@ const SCENARIOS = {
       sim.set_time('12:34');
     },
     steps: async (page, click, drag) => {
-      await click(178, 282);   // Home -> Settings
+      await click(207, 282);   // Home -> Settings
       await page.waitForTimeout(250);
       await drag(120, 280, 120, 100);   // list scrolls to its end: About is the last row
       await click(120, 290);   // "About" row
@@ -167,7 +173,7 @@ const SCENARIOS = {
       sim.set_time('12:34');
     },
     steps: async (page, click, drag) => {
-      await click(178, 282);   // Home -> Settings
+      await click(207, 282);   // Home -> Settings
       await page.waitForTimeout(250);
       await click(120, 168);   // "SIP account" row
       await page.waitForTimeout(100);
@@ -187,7 +193,7 @@ const SCENARIOS = {
       sim.set_time('12:34');
     },
     steps: async (page, click) => {
-      await click(178, 282);   // Home -> Settings
+      await click(207, 282);   // Home -> Settings
       await page.waitForTimeout(250);
       await click(120, 106);   // "Wi-Fi" row
     },
@@ -199,7 +205,7 @@ const SCENARIOS = {
       sim.set_time('12:34');
     },
     steps: async (page, click) => {
-      await click(178, 282);   // Home -> Settings
+      await click(207, 282);   // Home -> Settings
       await page.waitForTimeout(250);
       await click(120, 166);   // "SIP account" row
     },
@@ -231,7 +237,7 @@ const SCENARIOS = {
       sim.set_time('15:07');
     },
     steps: async (page, click, drag) => {
-      await click(178, 282);   // Home -> Settings
+      await click(207, 282);   // Home -> Settings
       await page.waitForTimeout(250);
       await drag(120, 280, 120, 100);   // scroll the list to its end
     },
@@ -243,7 +249,7 @@ const SCENARIOS = {
       sim.set_time('15:07');
     },
     steps: async (page, click, drag) => {
-      await click(178, 282);   // Home -> Settings
+      await click(207, 282);   // Home -> Settings
       await page.waitForTimeout(250);
       await drag(120, 280, 120, 100);   // scroll the list to its end
       await click(120, 182);   // "Time" row
@@ -256,7 +262,7 @@ const SCENARIOS = {
       sim.set_time('15:07');
     },
     steps: async (page, click, drag) => {
-      await click(178, 282);   // Home -> Settings
+      await click(207, 282);   // Home -> Settings
       await page.waitForTimeout(250);
       await drag(120, 280, 120, 100);   // scroll the list to its end
       await click(120, 182);   // "Time" row
@@ -272,7 +278,7 @@ const SCENARIOS = {
       sim.set_time('15:07');
     },
     steps: async (page, click, drag) => {
-      await click(178, 282);   // Home -> Settings
+      await click(207, 282);   // Home -> Settings
       await page.waitForTimeout(250);
       await drag(120, 280, 120, 100);   // scroll the list to its end
       await click(120, 182);   // "Time" row
@@ -291,7 +297,7 @@ const SCENARIOS = {
       sim.set_time('15:07');
     },
     steps: async (page, click, drag) => {
-      await click(178, 282);   // Home -> Settings
+      await click(207, 282);   // Home -> Settings
       await page.waitForTimeout(250);
       await drag(120, 280, 120, 100);   // scroll the list to its end
       await click(120, 236);   // "Update" row
@@ -304,7 +310,7 @@ const SCENARIOS = {
       sim.set_time('15:07');
     },
     steps: async (page, click, drag) => {
-      await click(178, 282);   // Home -> Settings
+      await click(207, 282);   // Home -> Settings
       await page.waitForTimeout(250);
       await drag(120, 280, 120, 100);   // scroll the list to its end
       await click(120, 236);   // "Update" row
@@ -319,7 +325,7 @@ const SCENARIOS = {
       sim.set_time('15:07');
     },
     steps: async (page, click, drag) => {
-      await click(178, 282);   // Home -> Settings
+      await click(207, 282);   // Home -> Settings
       await page.waitForTimeout(250);
       await drag(120, 280, 120, 100);   // scroll the list to its end
       await click(120, 236);   // "Update" row
@@ -334,7 +340,7 @@ const SCENARIOS = {
       sim.set_time('15:07');
     },
     steps: async (page, click, drag) => {
-      await click(178, 282);
+      await click(207, 282);
       await page.waitForTimeout(250);
       await drag(120, 280, 120, 100);   // scroll the list to its end
       await click(120, 236);
@@ -408,7 +414,7 @@ const SCENARIOS = {
       sim.set_blf(2, '1004', '', 0);
     },
     steps: async (page, click) => {
-      await click(178, 291);   // Home -> Settings (bottom row with BLF keys)
+      await click(207, 291);   // Home -> Settings (bottom row with BLF keys)
       await page.waitForTimeout(250);
       await click(120, 208);   // "BLF keys" row
     },
@@ -419,7 +425,7 @@ const SCENARIOS = {
       sim.set_blf(0, '1002', 'Bob', 1);
     },
     steps: async (page, click) => {
-      await click(178, 291);   // Home -> Settings
+      await click(207, 291);   // Home -> Settings
       await page.waitForTimeout(250);
       await click(120, 208);   // "BLF keys" row
       await page.waitForTimeout(100);
@@ -436,7 +442,7 @@ const SCENARIOS = {
       sim.set_blf(1, '1003', 'Front desk', 3);
     },
     steps: async (page, click, drag) => {
-      await click(178, 291);   // Home -> Settings
+      await click(207, 291);   // Home -> Settings
       await page.waitForTimeout(250);
       await click(120, 208);   // "BLF keys" row
       await page.waitForTimeout(100);
@@ -463,7 +469,7 @@ const SCENARIOS = {
       sim.set_time('12:34');
     },
     steps: async (page, click) => {
-      await click(178, 282);   // Home -> Settings
+      await click(207, 282);   // Home -> Settings
       await page.waitForTimeout(250);
       await click(120, 262);   // "Calibrate" row
       await page.waitForTimeout(400);
@@ -479,7 +485,7 @@ const SCENARIOS = {
       sim.set_time('12:34');
     },
     steps: async (page, click, drag, hold) => {
-      await click(178, 282);   // Home -> Settings
+      await click(207, 282);   // Home -> Settings
       await page.waitForTimeout(250);
       await click(120, 262);   // "Calibrate" row
       await page.waitForTimeout(500);
@@ -647,6 +653,196 @@ const SCENARIOS = {
     sim.set_blf(0, '1003', 'Dave Reception', 1);
     sim.set_call(6, '1001', 'Bob Example', 73);
     sim.set_xfer(5, 0, 200, '1003');
+  },
+  // ---- directory: call history, contacts, speed dial; sounds + call features ----
+  // Home (no BLF keys): Contacts (62,225) | History (178,225) above Dial (62,282) | Settings (178,282).
+  home_missed: (sim) => {
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+    sim.set_unseen(2);
+  },
+  home_blf_missed: (sim) => {   // BLF panel + voicemail + missed badge: five icon buttons
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    sim.set_blf(0, '1002', 'Bob', 1); sim.set_blf(1, '1003', 'Front desk', 3);
+    sim.set_blf(2, '1004', '', 0); sim.set_blf(3, '1005', 'Eve', 2);
+    sim.set_mwi(true, 3, 1);
+    sim.set_unseen(12);
+  },
+  home_blf8_missed: (sim) => {  // the crowded case: 4 tile rows, no voicemail
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    for (let i = 0; i < 8; i++) sim.set_blf(i, '10' + (10 + i), i % 2 ? 'Key ' + i : '', i % 4);
+    sim.set_unseen(1);
+  },
+  history: {
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.set_unseen(2);
+    },
+    steps: async (page, click) => {
+      await click(178, 225);   // History
+      await page.waitForTimeout(350);
+    },
+  },
+  history_scrolled: {
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    },
+    steps: async (page, click, drag) => {
+      await click(178, 225);
+      await page.waitForTimeout(350);
+      await drag(120, 280, 120, 120);
+    },
+  },
+  history_clear_confirm: {
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    },
+    steps: async (page, click) => {
+      await click(178, 225);
+      await page.waitForTimeout(350);
+      await click(196, 46);    // Clear
+      await page.waitForTimeout(150);
+    },
+  },
+  history_empty: {
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.clear_directory(0);
+    },
+    steps: async (page, click) => {
+      await click(178, 225);
+      await page.waitForTimeout(350);
+    },
+  },
+  contacts_list: {
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    },
+    steps: async (page, click) => {
+      await click(62, 225);    // Contacts
+      await page.waitForTimeout(350);
+    },
+  },
+  contacts_scrolled: {
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    },
+    steps: async (page, click, drag) => {
+      await click(62, 225);
+      await page.waitForTimeout(350);
+      await drag(120, 280, 120, 90);
+    },
+  },
+  contacts_search: {   // "al" typed into the search field; the keyboard takes the lower half
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    },
+    steps: async (page, click) => {
+      await click(62, 225);
+      await page.waitForTimeout(350);
+      await click(110, 46);    // search field
+      await page.waitForTimeout(150);
+      await click(KB_A[0], KB_A[1]);
+      await click(KB_L[0], KB_L[1]);
+      await page.waitForTimeout(150);
+    },
+  },
+  contacts_edit: {
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    },
+    steps: async (page, click) => {
+      await click(62, 225);
+      await page.waitForTimeout(350);
+      await click(212, 142);   // pencil on "Bob Example" (speed dial 2)
+      await page.waitForTimeout(250);
+    },
+  },
+  contacts_edit_keyboard: {
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    },
+    steps: async (page, click) => {
+      await click(62, 225);
+      await page.waitForTimeout(350);
+      await click(212, 142);
+      await page.waitForTimeout(250);
+      await click(120, 190);   // number field: dial pad
+      await page.waitForTimeout(250);
+    },
+  },
+  contacts_new: {
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    },
+    steps: async (page, click) => {
+      await click(62, 225);
+      await page.waitForTimeout(350);
+      await click(216, 46);    // +
+      await page.waitForTimeout(250);
+    },
+  },
+  contacts_empty: {
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.clear_directory(1);
+    },
+    steps: async (page, click) => {
+      await click(62, 225);
+      await page.waitForTimeout(350);
+    },
+  },
+  dialer_matches: {   // "100" -> Alice Johnson (1001) and more
+    sim: (sim) => {
+      sim.set_net(2, -62); sim.set_reg(2); sim.set_time('12:34');
+      for (const k of '100') sim.key(k, 0);
+    },
+  },
+  dialer_speed_hint: {   // a lone 5 has a speed dial entry: "Hold 5 to call Front desk"
+    sim: (sim) => {
+      sim.set_net(2, -62); sim.set_reg(2); sim.set_time('12:34');
+      sim.key('5', 0);
+    },
+  },
+  settings_sounds: {
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    },
+    steps: async (page, click, drag) => {
+      await click(207, 282);   // Home -> Settings
+      await page.waitForTimeout(250);
+      await drag(120, 280, 120, 100);   // list to its end: Sounds is 5th from the end
+      await click(120, SETTINGS_ROW.sounds);
+      await page.waitForTimeout(250);
+      await click(120, 150);   // "Digital" is selected: tap another one to preview it
+      await page.waitForTimeout(150);
+    },
+  },
+  settings_sounds_volumes: {
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    },
+    steps: async (page, click, drag) => {
+      await click(207, 282);
+      await page.waitForTimeout(250);
+      await drag(120, 280, 120, 100);
+      await click(120, SETTINGS_ROW.sounds);
+      await page.waitForTimeout(250);
+      await drag(120, 280, 120, 60);    // scroll to the sliders
+    },
+  },
+  settings_features: {
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    },
+    steps: async (page, click, drag) => {
+      await click(207, 282);
+      await page.waitForTimeout(250);
+      await drag(120, 280, 120, 100);
+      await click(120, SETTINGS_ROW.features);
+      await page.waitForTimeout(250);
+      await click(200, 160);   // Auto-answer off
+      await page.waitForTimeout(150);
+    },
   },
 };
 

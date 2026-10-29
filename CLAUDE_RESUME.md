@@ -46,8 +46,10 @@ Needs the user / hardware:
 Open development work (see `docs/PLAN.md` for the full list):
 - AEC / speakerphone echo (Phase 5, `[core]`).
 - Battery ADC (GPIO 4 reserved) once the divider exists; dock detect design.
-- Contacts, call log (ringtones done: `ring` console cmd, setting ring_tone) (no SD card for now — user doesn't want it;
-  use the 9.9 MB `storage` partition if storage is needed).
+- Contacts / call log / speed dial: backend, call-log hookup in phone.c and UI (History,
+  Contacts, dialer matches + long-press speed dial, home badge) done; Settings has Sounds
+  (ringtone preview, volumes) and Call features pages. Not done: import/export UI (CSV via
+  console `contact import`), SD card (not wanted: the `storage` partition is used).
 - Review task priorities, DMA sizing, PSRAM placement (`[core]`).
 - SIP over TCP/TLS, SRTP, RTCP (optional).
 - Known small gaps: https OTA untested. (SIP INFO DTMF fallback, 491 retry,
