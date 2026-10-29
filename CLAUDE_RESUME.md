@@ -50,9 +50,15 @@ Open development work (see `docs/PLAN.md` for the full list):
   use the 9.9 MB `storage` partition if storage is needed).
 - Review task priorities, DMA sizing, PSRAM placement (`[core]`).
 - SIP over TCP/TLS, SRTP, RTCP (optional).
-- Known small gaps: no SIP INFO DTMF fallback; RTP timestamps jump after
-  hold (fixed: rtp_tx_resume); speaker volume now persisted (settings speaker_volume); re-INVITE glare (491) not
-  retried; https OTA untested.
+- Known small gaps: https OTA untested. (SIP INFO DTMF fallback, 491 retry,
+  RTP timestamps after hold and speaker-volume persistence are done.)
+- Call waiting / transfer / DND / page auto answer: phone + SIP done (see
+  ARCHITECTURE "Call features"); no UI screens for them yet. Incoming
+  INVITE with Replaces and incoming REFER are not supported (REFER → 603).
+- QEMU flake seen again (2026-10-29, full smoke): 40-ota, right after the
+  OTA reboot core 1 panicked (LoadStorePIFAddrError) in SysTickIsrHandler
+  reading the systimer counter (0x6002304c) from the idle task. Under
+  investigation.
 
 ## Hardware (details in docs/HARDWARE.md)
 

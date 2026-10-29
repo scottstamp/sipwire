@@ -29,6 +29,10 @@ typedef struct {
     /* BLF keys + voicemail */
     char blf[SIPWIRE_BLF_LIST_MAX]; /* "1002:Bob,1003:Front desk" (sipwire_blf.h), "" = none */
     char vm_number[32];        /* dialled by the voicemail button, default "*97" */
+    /* call features */
+    bool call_waiting;         /* offer a second incoming call during a call, default true */
+    bool dnd;                  /* do not disturb: refuse incoming calls with 486, default false */
+    bool auto_answer;          /* answer pages / intercom calls (Call-Info answer-after...), default true */
     /* audio */
     uint8_t ring_volume;       /* 0-100 */
     uint8_t call_volume;       /* 0-100 */

@@ -8,11 +8,17 @@
  *
  * s.st (the status snapshot) and the volume fields are guarded by st_mtx so
  * phone_get_status / phone_set_* work from any task. Everything else in `s`
- * is sip-task only. */
+ * is sip-task only.
+ *
+ * Two lines: the foreground call lives in s.call / s.state / s.outgoing /
+ * s.line / s.fg_media (+ number, name, start time in s.st) as before; the
+ * background call (waiting or held) in s.bg. Swapping exchanges them
+ * (fg_save / fg_load) and moves the single media stream. */
 
 #include "phone.h"
 
 #include <stdatomic.h>
+#include <stdlib.h>
 #include <string.h>
 #include <arpa/inet.h>
 
@@ -60,7 +66,32 @@ typedef enum {
     CMD_HANGUP,
     CMD_HOLD,
     CMD_DTMF,
+    CMD_ANSWER_WAITING,
+    CMD_REJECT_WAITING,
+    CMD_SWAP,
+    CMD_XFER_BLIND,
+    CMD_XFER_START,
+    CMD_XFER_COMPLETE,
+    CMD_XFER_CANCEL,
 } cmd_type_t;
+
+#define AUTO_ANSWER_MAX_S       60          /* longer answer-after delays are capped */
+#define WAITING_REJECT_CODE     486
+#define INFO_DTMF_DURATION_MS   160
+
+/* One call line (the background call, or a saved foreground call). */
+typedef struct {
+    sip_call_handle_t h;                /* 0 = none */
+    sip_ua_call_state_t state;
+    bool outgoing;
+    int answer_after;
+    uint8_t line;
+    char number[64];
+    char name[64];
+    int64_t start_us;
+    bool media_valid;
+    sip_media_info_t media;
+} phone_line_t;
 
 typedef struct {
     cmd_type_t type;
@@ -98,6 +129,17 @@ static struct {
     int end_code;
     uint64_t ended_until;
     phone_dtmf_seq_t dtmf;
+    uint8_t line;                       /* foreground line number, 0 = none */
+    int answer_after;                   /* foreground: caller asked for auto answer, -1 = no */
+    bool aa_pending;                    /* auto answer due at aa_at */
+    uint64_t aa_at;
+    bool fg_media_valid;                /* last media of the foreground call */
+    sip_media_info_t fg_media;
+    phone_line_t bg;                    /* background call (bg.h == 0: none) */
+    /* transfer: the call being transferred and the consultation call */
+    sip_call_handle_t xfer_h, xfer_consult;
+    /* call features (settings) */
+    bool f_dnd, f_cw, f_aa;
     /* BLF: the parsed `blf` setting and one subscription per entry */
     char blf_list[SIPWIRE_BLF_LIST_MAX];
     sipwire_blf_entry_t blf[SIPWIRE_BLF_MAX];
@@ -282,12 +324,18 @@ static void publish_call_state(void)
     strlcpy(ev.name, s.st.name, sizeof(ev.name));
     st_unlock();
 
+    st_lock();
+    s.st.line = s.line;
+    st_unlock();
+
     phone_media_set_state(s.state);
     bool early = phone_media_early();
     bool stream = phone_media_active() &&
                   (s.state == SIP_UA_CALL_ACTIVE || s.state == SIP_UA_CALL_HELD ||
                    ((s.state == SIP_UA_CALL_DIALING || s.state == SIP_UA_CALL_RINGING_OUT) && early));
-    phone_media_audio(stream, phone_tone_for(s.state, s.outgoing, early, s.end_code));
+    phone_tone_t tone = phone_tone_for(s.state, s.outgoing, early, s.end_code);
+    tone = phone_tone_waiting(tone, s.state, s.bg.h ? s.bg.state : SIP_UA_CALL_IDLE);
+    phone_media_audio(stream, tone);
     apply_volume();
 
     /* media updates re-run this without a state change: post only news */
@@ -321,6 +369,200 @@ static void reset_call_audio_prefs(void)
     audio_set_mic_mute(false);
 }
 
+/* ---- second line ---- */
+
+/* Status snapshot of the background call, and CALL_EVENT_SECOND with `state`
+ * (the line's own state, CALL_ENDED when it went away, CALL_IDLE when it was
+ * promoted to the foreground). */
+static void post_second(call_state_t state, int end_code, const char *number, const char *name)
+{
+    st_lock();
+    if (s.bg.h) {
+        s.st.second.call = map_call(s.bg.state);
+        s.st.second.outgoing = s.bg.outgoing;
+        strlcpy(s.st.second.number, s.bg.number, sizeof(s.st.second.number));
+        strlcpy(s.st.second.name, s.bg.name, sizeof(s.st.second.name));
+        s.st.second.call_start_us = s.bg.start_us;
+        s.st.second.line = s.bg.line;
+    } else {
+        memset(&s.st.second, 0, sizeof(s.st.second));
+        s.st.second.call = CALL_IDLE;
+    }
+    st_unlock();
+
+    call_event_state_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.state = state;
+    ev.end_code = end_code;
+    strlcpy(ev.number, number, sizeof(ev.number));
+    strlcpy(ev.name, name, sizeof(ev.name));
+    ESP_LOGI(TAG, "second call: %s %s (code %d)", state == CALL_ENDED ? "ended" : state == CALL_IDLE ? "to foreground"
+             : call_state_name(s.bg.state), ev.number, end_code);
+    esp_err_t err = esp_event_post(SIPWIRE_CALL_EVENT, CALL_EVENT_SECOND, &ev, sizeof(ev), EVENT_POST_TIMEOUT);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "post second call event: %s", esp_err_to_name(err));
+    }
+}
+
+static void post_second_state(void)
+{
+    post_second(map_call(s.bg.state), 0, s.bg.number, s.bg.name);
+}
+
+static uint8_t other_line(void)
+{
+    return s.line == 1 ? 2 : 1;
+}
+
+static void fg_save(phone_line_t *l)
+{
+    memset(l, 0, sizeof(*l));
+    l->h = s.call;
+    l->state = s.state;
+    l->outgoing = s.outgoing;
+    l->answer_after = s.answer_after;
+    l->line = s.line;
+    l->media_valid = s.fg_media_valid;
+    l->media = s.fg_media;
+    st_lock();
+    strlcpy(l->number, s.st.number, sizeof(l->number));
+    strlcpy(l->name, s.st.name, sizeof(l->name));
+    l->start_us = s.st.call_start_us;
+    st_unlock();
+}
+
+static void fg_load(const phone_line_t *l)
+{
+    s.call = l->h;
+    s.state = l->state;
+    s.outgoing = l->outgoing;
+    s.answer_after = l->answer_after;
+    s.line = l->line;
+    s.end_code = 0;
+    s.fg_media_valid = l->media_valid;
+    s.fg_media = l->media;
+    s.aa_pending = false;
+    st_lock();
+    strlcpy(s.st.number, l->number, sizeof(s.st.number));
+    strlcpy(s.st.name, l->name, sizeof(s.st.name));
+    s.st.call_start_us = l->start_us;
+    s.st.auto_answered = false;
+    st_unlock();
+}
+
+/* Exchange foreground and background: the media stream follows the new
+ * foreground call. publish: post both states now (otherwise the caller's
+ * next UA call reports the new state). */
+static void swap_lines(bool publish)
+{
+    phone_media_teardown();
+    phone_dtmf_seq_clear(&s.dtmf);
+    phone_line_t old;
+    fg_save(&old);
+    fg_load(&s.bg);
+    s.bg = old;
+    if (s.fg_media_valid) {
+        phone_media_update(&s.fg_media);
+    }
+    post_second_state();
+    if (publish) {
+        publish_call_state();
+    }
+}
+
+/* ---- transfer status ---- */
+
+static const char *xfer_state_name(xfer_state_t x)
+{
+    switch (x) {
+    case XFER_CONSULT:  return "consulting";
+    case XFER_TRYING:   return "trying";
+    case XFER_ACCEPTED: return "accepted";
+    case XFER_PROGRESS: return "progress";
+    case XFER_DONE:     return "done";
+    case XFER_FAILED:   return "failed";
+    case XFER_IDLE:
+    default:            return "idle";
+    }
+}
+
+static void set_xfer(xfer_state_t state, int code)
+{
+    call_event_transfer_t ev;
+    memset(&ev, 0, sizeof(ev));
+    st_lock();
+    bool changed = s.st.xfer.state != state || s.st.xfer.code != code;
+    s.st.xfer.state = state;
+    s.st.xfer.code = code;
+    ev.state = state;
+    ev.code = code;
+    ev.attended = s.st.xfer.attended;
+    strlcpy(ev.target, s.st.xfer.target, sizeof(ev.target));
+    st_unlock();
+    if (state == XFER_IDLE) {
+        s.xfer_h = 0;
+        s.xfer_consult = 0;
+    }
+    if (!changed) {
+        return;
+    }
+    ESP_LOGI(TAG, "transfer%s to %s: %s (%d)", ev.attended ? " (attended)" : "", ev.target, xfer_state_name(state),
+             code);
+    esp_err_t err = esp_event_post(SIPWIRE_CALL_EVENT, CALL_EVENT_TRANSFER, &ev, sizeof(ev), EVENT_POST_TIMEOUT);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "post transfer event: %s", esp_err_to_name(err));
+    }
+}
+
+static void xfer_begin(bool attended, const char *target)
+{
+    st_lock();
+    s.st.xfer.attended = attended;
+    strlcpy(s.st.xfer.target, target, sizeof(s.st.xfer.target));
+    st_unlock();
+}
+
+static xfer_state_t xfer_state(void)
+{
+    st_lock();
+    xfer_state_t x = s.st.xfer.state;
+    st_unlock();
+    return x;
+}
+
+/* A call involved in a transfer ended (before call_ended / bg removal). */
+static void xfer_call_gone(sip_call_handle_t h, int end_code)
+{
+    xfer_state_t x = xfer_state();
+    if (h == 0 || (h != s.xfer_h && h != s.xfer_consult)) {
+        return;
+    }
+    if (x == XFER_ACCEPTED || x == XFER_PROGRESS) {
+        set_xfer(XFER_DONE, 0);         /* the far end took over and hung up */
+    } else if (x == XFER_TRYING || x == XFER_CONSULT) {
+        set_xfer(XFER_FAILED, end_code);
+    }
+    if (h == s.xfer_consult) {
+        s.xfer_consult = 0;
+    }
+    if (h == s.xfer_h) {
+        s.xfer_h = 0;
+    }
+}
+
+/* The foreground call is gone: the background call (if any) moves up. */
+static void promote_bg(void)
+{
+    phone_line_t l = s.bg;
+    memset(&s.bg, 0, sizeof(s.bg));
+    fg_load(&l);
+    post_second(CALL_IDLE, 0, l.number, l.name);
+    if (s.fg_media_valid) {
+        phone_media_update(&s.fg_media);
+    }
+    publish_call_state();
+}
+
 /* The call is over (UA said ENDED, or the UA went away under it). */
 static void call_ended(int end_code)
 {
@@ -328,10 +570,24 @@ static void call_ended(int end_code)
     phone_dtmf_seq_clear(&s.dtmf);
     reset_call_audio_prefs();
     s.call = 0;
+    s.aa_pending = false;
+    s.fg_media_valid = false;
     s.state = SIP_UA_CALL_ENDED;
     s.end_code = end_code;
     s.ended_until = now_ms() + phone_ended_hold_ms(s.outgoing, end_code);
     publish_call_state();
+    if (s.bg.h) {
+        promote_bg();
+    }
+}
+
+/* The background call is over. */
+static void bg_ended(int end_code)
+{
+    phone_line_t l = s.bg;
+    memset(&s.bg, 0, sizeof(s.bg));
+    post_second(CALL_ENDED, end_code, l.number, l.name);
+    publish_call_state();               /* stop the call-waiting beep */
 }
 
 static void go_idle(void)
@@ -339,11 +595,14 @@ static void go_idle(void)
     s.state = SIP_UA_CALL_IDLE;
     s.end_code = 0;
     s.outgoing = false;
+    s.line = 0;
     st_lock();
     s.st.number[0] = '\0';
     s.st.name[0] = '\0';
     s.st.call_start_us = 0;
+    s.st.auto_answered = false;
     st_unlock();
+    set_xfer(XFER_IDLE, 0);
     publish_call_state();
 }
 
@@ -533,22 +792,85 @@ static void on_reg(void *ctx, sip_ua_reg_state_t state, int code)
 static void on_incoming(void *ctx, sip_call_handle_t call, const char *number, const char *name)
 {
     (void)ctx;
+    if (s.call != 0) {
+        /* call waiting: the UA only offers it while our call is established */
+        ESP_LOGI(TAG, "call waiting: %s \"%s\"", number, name);
+        memset(&s.bg, 0, sizeof(s.bg));
+        s.bg.h = call;
+        s.bg.state = SIP_UA_CALL_IDLE;
+        s.bg.answer_after = -1;
+        s.bg.line = other_line();
+        strlcpy(s.bg.number, number ? number : "", sizeof(s.bg.number));
+        strlcpy(s.bg.name, name ? name : "", sizeof(s.bg.name));
+        return;                         /* call_state(RINGING_IN) follows */
+    }
     ESP_LOGI(TAG, "incoming call from %s \"%s\"", number, name);
     s.call = call;
     s.outgoing = false;
     s.end_code = 0;
+    s.line = 1;
+    s.answer_after = -1;
+    s.aa_pending = false;
+    s.fg_media_valid = false;
     phone_dtmf_seq_clear(&s.dtmf);
     st_lock();
     strlcpy(s.st.number, number ? number : "", sizeof(s.st.number));
     strlcpy(s.st.name, name ? name : "", sizeof(s.st.name));
     s.st.call_start_us = 0;
+    s.st.auto_answered = false;
     st_unlock();
     /* state follows with call_state(RINGING_IN) */
+}
+
+/* Answer the ringing foreground call as a page: loudspeaker, no ring. */
+static bool auto_answer_now(void)
+{
+    if (s.ua == NULL || s.call == 0 || sip_call_answer(s.ua, s.call) != SIP_OK) {
+        return false;
+    }
+    ESP_LOGI(TAG, "auto answered %s (page / intercom)", s.st.number);
+    st_lock();
+    s.st.auto_answered = true;
+    st_unlock();
+    phone_set_speaker(true);
+    return true;
+}
+
+static void on_bg_state(sip_call_handle_t call, const sip_call_info_t *info)
+{
+    if (info->state == SIP_UA_CALL_ENDED) {
+        int code = phone_end_code(info->end_reason, info->status_code);
+        xfer_call_gone(call, code);
+        bg_ended(code);
+        return;
+    }
+    if (info->number && info->number[0]) {
+        strlcpy(s.bg.number, info->number, sizeof(s.bg.number));
+    }
+    if (info->display_name && info->display_name[0]) {
+        strlcpy(s.bg.name, info->display_name, sizeof(s.bg.name));
+    }
+    if (info->state == SIP_UA_CALL_ACTIVE && s.bg.start_us == 0) {
+        s.bg.start_us = esp_timer_get_time();
+    }
+    if (info->state == SIP_UA_CALL_RINGING_IN) {
+        s.bg.answer_after = info->answer_after;  /* a page during a call just waits */
+    }
+    bool changed = s.bg.state != info->state;
+    s.bg.state = info->state;
+    if (changed) {
+        post_second_state();
+        publish_call_state();           /* call-waiting beep on / off */
+    }
 }
 
 static void on_call_state(void *ctx, sip_call_handle_t call, const sip_call_info_t *info)
 {
     (void)ctx;
+    if (s.bg.h != 0 && call == s.bg.h) {
+        on_bg_state(call, info);
+        return;
+    }
     if (call != s.call || s.call == 0) {
         ESP_LOGD(TAG, "ignoring state %d of stale call %d", (int)info->state, call);
         return;
@@ -566,11 +888,75 @@ static void on_call_state(void *ctx, sip_call_handle_t call, const sip_call_info
     st_unlock();
 
     if (info->state == SIP_UA_CALL_ENDED) {
-        call_ended(phone_end_code(info->end_reason, info->status_code));
+        int code = phone_end_code(info->end_reason, info->status_code);
+        xfer_call_gone(call, code);
+        call_ended(code);
         return;
+    }
+    if (info->state == SIP_UA_CALL_RINGING_IN && s.state != SIP_UA_CALL_RINGING_IN) {
+        s.answer_after = info->answer_after;
+        if (phone_auto_answer(info->answer_after, s.f_aa, s.bg.h != 0)) {
+            s.state = SIP_UA_CALL_RINGING_IN;
+            if (info->answer_after == 0 && auto_answer_now()) {
+                return;                 /* ACTIVE follows; never rings */
+            }
+            int delay = info->answer_after < AUTO_ANSWER_MAX_S ? info->answer_after : AUTO_ANSWER_MAX_S;
+            s.aa_pending = true;
+            s.aa_at = now_ms() + (uint64_t)delay * 1000u;
+        }
     }
     s.state = info->state;
     publish_call_state();
+}
+
+static void on_xfer(void *ctx, sip_call_handle_t call, sip_xfer_state_t st, int code)
+{
+    (void)ctx;
+    if (call == 0 || call != s.xfer_h) {
+        return;
+    }
+    xfer_state_t x = phone_xfer_map(st);
+    set_xfer(x, code);
+    if (x == XFER_DONE && s.ua) {
+        /* the parties are connected: leave both calls, the background one
+         * first (its ENDED comes first: nothing is promoted in between) */
+        sip_call_handle_t first = s.xfer_consult, second = s.xfer_h;
+        if (first == 0 || s.bg.h == second) {
+            first = s.xfer_h;
+            second = s.xfer_consult;
+        }
+        if (first) {
+            sip_call_hangup(s.ua, first);
+        }
+        if (second) {
+            sip_call_hangup(s.ua, second);
+        }
+    } else if (x == XFER_FAILED && s.ua) {
+        bool attended = false;
+        st_lock();
+        attended = s.st.xfer.attended;
+        st_unlock();
+        if (!attended && call == s.call && s.state == SIP_UA_CALL_HELD) {
+            sip_call_hold(s.ua, call, false);   /* keep the call: back to talking */
+        }
+    }
+}
+
+static void on_rejected(void *ctx, const char *number, const char *name, int code)
+{
+    (void)ctx;
+    call_event_missed_t ev;
+    memset(&ev, 0, sizeof(ev));
+    strlcpy(ev.number, number ? number : "", sizeof(ev.number));
+    strlcpy(ev.name, name ? name : "", sizeof(ev.name));
+    ev.code = code;
+    ev.dnd = s.f_dnd;
+    ESP_LOGI(TAG, "missed call from %s \"%s\" (%s, %d)", ev.number, ev.name, ev.dnd ? "do not disturb" : "busy",
+             code);
+    esp_err_t err = esp_event_post(SIPWIRE_CALL_EVENT, CALL_EVENT_MISSED, &ev, sizeof(ev), EVENT_POST_TIMEOUT);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "post missed call event: %s", esp_err_to_name(err));
+    }
 }
 
 static void on_blf(void *ctx, sip_sub_handle_t sub, const char *ext, sip_blf_state_t state)
@@ -605,10 +991,20 @@ static void on_mwi(void *ctx, bool waiting, int new_msgs, int old_msgs)
 static void on_media(void *ctx, sip_call_handle_t call, const sip_media_info_t *mi)
 {
     (void)ctx;
+    if (s.bg.h != 0 && call == s.bg.h) {
+        s.bg.media = *mi;               /* applied when it comes to the foreground */
+        s.bg.media_valid = true;
+        return;
+    }
     if (call != s.call || s.call == 0) {
         return;
     }
+    s.fg_media = *mi;
+    s.fg_media_valid = true;
     phone_media_update(mi);
+    if (s.state == SIP_UA_CALL_RINGING_IN) {
+        return;                 /* answering: ACTIVE follows (no media while ringing) */
+    }
     publish_call_state();       /* early media → stop ringback, start stream; hold → flags */
 }
 
@@ -629,6 +1025,9 @@ static void ua_destroy(void)
 {
     if (s.ua == NULL) {
         return;
+    }
+    if (s.bg.h != 0) {
+        bg_ended(0);
     }
     if (s.call != 0) {
         ESP_LOGW(TAG, "SIP stack restarted during a call");
@@ -720,6 +1119,8 @@ static void ua_create(uint64_t now)
             .media = on_media,
             .blf_state = on_blf,
             .mwi = on_mwi,
+            .transfer = on_xfer,
+            .call_rejected = on_rejected,
         },
     };
     cfg.n_codecs = (uint8_t)phone_codec_pref_parse(s.acc.codec_pref, cfg.codecs, SIP_UA_MAX_CODECS);
@@ -739,6 +1140,8 @@ static void ua_create(uint64_t now)
         return;
     }
     s.ua_ip = lip;
+    sip_ua_set_dnd(s.ua, s.f_dnd);
+    sip_ua_set_call_waiting(s.ua, s.f_cw);
     phone_media_set_server_ip(srv.ip);
 
     char ip[16];
@@ -767,8 +1170,11 @@ static void ua_restart(uint64_t now)
         s.retry_at = 0;
         return;
     }
+    if (s.bg.h != 0) {
+        sip_call_hangup(s.ua, s.bg.h);  /* reports ENDED synchronously */
+    }
     if (s.call != 0) {
-        sip_call_hangup(s.ua, s.call);  /* reports ENDED synchronously */
+        sip_call_hangup(s.ua, s.call);
     }
     if (sip_ua_reg_state(s.ua) == SIP_UA_REG_REGISTERED && sip_ua_unregister(s.ua) == SIP_OK) {
         s.closing = true;
@@ -795,6 +1201,26 @@ static void on_net_up(uint64_t now)
     (void)now;
 }
 
+/* Settings `dnd`, `call_waiting`, `auto_answer`, live. */
+static void apply_features(const settings_t *st)
+{
+    if (st->dnd != s.f_dnd) {
+        ESP_LOGI(TAG, "do not disturb %s", st->dnd ? "on" : "off");
+    }
+    s.f_dnd = st->dnd;
+    s.f_cw = st->call_waiting;
+    s.f_aa = st->auto_answer;
+    st_lock();
+    s.st.dnd = st->dnd;
+    s.st.call_waiting = st->call_waiting;
+    s.st.auto_answer = st->auto_answer;
+    st_unlock();
+    if (s.ua) {
+        sip_ua_set_dnd(s.ua, s.f_dnd);
+        sip_ua_set_call_waiting(s.ua, s.f_cw);
+    }
+}
+
 static void on_settings(uint64_t now)
 {
     static settings_t ns;               /* sip task only; keep it off the stack */
@@ -809,6 +1235,7 @@ static void on_settings(uint64_t now)
     st_unlock();
     apply_volume();
     apply_aec(&ns);
+    apply_features(&ns);
 
     if (account_changed(&ns, &s.acc)) {
         ESP_LOGI(TAG, "SIP account changed, re-registering");
@@ -834,7 +1261,14 @@ static void cmd_dial(const char *number)
     }
     s.outgoing = true;
     s.end_code = 0;
+    s.line = 1;
+    s.answer_after = -1;
+    s.aa_pending = false;
+    s.fg_media_valid = false;
     phone_dtmf_seq_clear(&s.dtmf);
+    st_lock();
+    s.st.auto_answered = false;
+    st_unlock();
     st_lock();
     strlcpy(s.st.number, number, sizeof(s.st.number));
     s.st.name[0] = '\0';
@@ -849,10 +1283,185 @@ static void cmd_dial(const char *number)
     }
 }
 
+static bool fg_established(void)
+{
+    return s.call != 0 && (s.state == SIP_UA_CALL_ACTIVE || s.state == SIP_UA_CALL_HELD);
+}
+
+static sip_err_t cmd_answer_waiting(void)
+{
+    if (s.ua == NULL || s.bg.h == 0 || s.bg.state != SIP_UA_CALL_RINGING_IN) {
+        ESP_LOGW(TAG, "answer2: no waiting call");
+        return SIP_OK;
+    }
+    if (s.call != 0 && s.state == SIP_UA_CALL_ACTIVE) {
+        sip_err_t e = sip_call_hold(s.ua, s.call, true);
+        if (e != SIP_OK) {
+            ESP_LOGW(TAG, "answer2: cannot hold the current call: %s", esp_err_to_name(map_sip_err(e)));
+        }
+    }
+    swap_lines(false);                  /* no RINGING_IN blip: ACTIVE comes from the answer */
+    sip_err_t err = sip_call_answer(s.ua, s.call);
+    if (s.state == SIP_UA_CALL_RINGING_IN) {
+        publish_call_state();           /* the answer failed: show it ringing */
+    }
+    return err;
+}
+
+static sip_err_t cmd_swap(void)
+{
+    if (s.bg.h != 0 && s.bg.state == SIP_UA_CALL_RINGING_IN) {
+        return cmd_answer_waiting();
+    }
+    if (s.ua == NULL || s.bg.h == 0 || !fg_established() ||
+        (s.bg.state != SIP_UA_CALL_HELD && s.bg.state != SIP_UA_CALL_ACTIVE)) {
+        ESP_LOGW(TAG, "swap: needs two established calls");
+        return SIP_OK;
+    }
+    sip_err_t err = sip_call_hold(s.ua, s.call, true);
+    if (err == SIP_OK) {
+        err = sip_call_hold(s.ua, s.bg.h, false);
+    }
+    swap_lines(true);
+    return err;
+}
+
+static sip_err_t cmd_xfer_blind(const char *target)
+{
+    if (s.ua == NULL || !fg_established()) {
+        ESP_LOGW(TAG, "xfer: no established call");
+        return SIP_OK;
+    }
+    xfer_state_t x = xfer_state();
+    if (x != XFER_IDLE && x != XFER_DONE && x != XFER_FAILED) {
+        ESP_LOGW(TAG, "xfer: a transfer is in progress");
+        return SIP_OK;
+    }
+    xfer_begin(false, target);
+    s.xfer_h = s.call;
+    s.xfer_consult = 0;
+    sip_err_t err = sip_call_transfer(s.ua, s.call, target);   /* TRYING is reported inside */
+    if (err != SIP_OK) {
+        set_xfer(XFER_FAILED, 0);
+    }
+    return err;
+}
+
+static sip_err_t cmd_xfer_start(const char *target)
+{
+    if (s.ua == NULL || !fg_established() || s.bg.h != 0) {
+        ESP_LOGW(TAG, "axfer: needs exactly one established call");
+        return SIP_OK;
+    }
+    xfer_state_t x = xfer_state();
+    if (x != XFER_IDLE && x != XFER_DONE && x != XFER_FAILED) {
+        ESP_LOGW(TAG, "axfer: a transfer is in progress");
+        return SIP_OK;
+    }
+    sip_call_handle_t orig = s.call;
+    if (s.state == SIP_UA_CALL_ACTIVE) {
+        sip_err_t e = sip_call_hold(s.ua, orig, true);
+        if (e != SIP_OK) {
+            ESP_LOGW(TAG, "axfer: cannot hold the call: %s", esp_err_to_name(map_sip_err(e)));
+        }
+    }
+    /* the original goes to the background, the consultation call is dialled
+     * in the foreground */
+    phone_media_teardown();
+    phone_dtmf_seq_clear(&s.dtmf);
+    fg_save(&s.bg);
+    uint8_t line = other_line();
+    s.call = 0;
+    s.outgoing = true;
+    s.end_code = 0;
+    s.line = line;
+    s.answer_after = -1;
+    s.aa_pending = false;
+    s.fg_media_valid = false;
+    st_lock();
+    strlcpy(s.st.number, target, sizeof(s.st.number));
+    s.st.name[0] = '\0';
+    s.st.call_start_us = 0;
+    s.st.auto_answered = false;
+    st_unlock();
+    xfer_begin(true, target);
+    s.xfer_h = orig;
+    s.xfer_consult = 0;
+    set_xfer(XFER_CONSULT, 0);
+    post_second_state();
+
+    sip_err_t err = sip_call_dial(s.ua, target, &s.call);  /* DIALING is delivered inside */
+    if (err != SIP_OK) {
+        s.call = 0;
+        set_xfer(XFER_FAILED, 0);
+        promote_bg();                   /* back to the original call, still held */
+        return err;
+    }
+    s.xfer_consult = s.call;
+    return SIP_OK;
+}
+
+static sip_err_t cmd_xfer_complete(void)
+{
+    if (s.ua == NULL || xfer_state() != XFER_CONSULT || s.xfer_h == 0 || s.xfer_consult == 0) {
+        ESP_LOGW(TAG, "axfer complete: no consultation call");
+        return SIP_OK;
+    }
+    sip_ua_call_state_t cs = sip_call_state(s.ua, s.xfer_consult);
+    if (cs != SIP_UA_CALL_ACTIVE && cs != SIP_UA_CALL_HELD) {
+        ESP_LOGW(TAG, "axfer complete: the consultation call is not answered");
+        return SIP_OK;
+    }
+    sip_err_t err = sip_call_transfer_replace(s.ua, s.xfer_h, s.xfer_consult);
+    if (err != SIP_OK) {
+        set_xfer(XFER_FAILED, 0);
+    }
+    return err;
+}
+
+static sip_err_t cmd_xfer_cancel(void)
+{
+    sip_call_handle_t consult = s.xfer_consult;
+    st_lock();
+    bool attended = s.st.xfer.attended;
+    st_unlock();
+    if (s.ua == NULL || !attended || consult == 0) {
+        ESP_LOGW(TAG, "axfer cancel: no consultation call");
+        return SIP_OK;
+    }
+    set_xfer(XFER_IDLE, 0);
+    return sip_call_hangup(s.ua, consult);  /* the original stays held */
+}
+
 static void handle_cmd(const phone_cmd_t *c, uint64_t now)
 {
     sip_err_t err = SIP_OK;
     switch (c->type) {
+    case CMD_ANSWER_WAITING:
+        err = cmd_answer_waiting();
+        break;
+    case CMD_REJECT_WAITING:
+        if (s.ua && s.bg.h && s.bg.state == SIP_UA_CALL_RINGING_IN) {
+            err = sip_call_reject(s.ua, s.bg.h, WAITING_REJECT_CODE);
+        } else {
+            ESP_LOGW(TAG, "reject2: no waiting call");
+        }
+        break;
+    case CMD_SWAP:
+        err = cmd_swap();
+        break;
+    case CMD_XFER_BLIND:
+        err = cmd_xfer_blind(c->arg);
+        break;
+    case CMD_XFER_START:
+        err = cmd_xfer_start(c->arg);
+        break;
+    case CMD_XFER_COMPLETE:
+        err = cmd_xfer_complete();
+        break;
+    case CMD_XFER_CANCEL:
+        err = cmd_xfer_cancel();
+        break;
     case CMD_DIAL:
         cmd_dial(c->arg);
         return;
@@ -919,6 +1528,13 @@ static void housekeeping(uint64_t now)
         go_idle();
     }
 
+    if (s.aa_pending && now >= s.aa_at) {
+        s.aa_pending = false;
+        if (s.state == SIP_UA_CALL_RINGING_IN && s.bg.h == 0) {
+            auto_answer_now();
+        }
+    }
+
     char d = phone_dtmf_seq_due(&s.dtmf, now);
     if (d) {
         phone_dtmf_res_t r = phone_media_send_dtmf(d);
@@ -926,7 +1542,15 @@ static void housekeeping(uint64_t now)
             phone_dtmf_seq_consume(&s.dtmf, now);
             audio_play_dtmf(d);
             if (r == PHONE_DTMF_UNAVAILABLE) {
-                ESP_LOGW(TAG, "dtmf %c: peer has no telephone-event (or not sending)", d);
+                /* no telephone-event negotiated: SIP INFO (dtmf-relay) */
+                sip_err_t e = SIP_ERR_STATE;
+                if (s.ua && s.call && s.state == SIP_UA_CALL_ACTIVE) {
+                    e = sip_call_send_info_dtmf(s.ua, s.call, d, INFO_DTMF_DURATION_MS);
+                }
+                if (e != SIP_OK) {
+                    ESP_LOGW(TAG, "dtmf %c: cannot send (no telephone-event, INFO: %s)", d,
+                             esp_err_to_name(map_sip_err(e)));
+                }
             }
         }
     }
@@ -1033,6 +1657,15 @@ esp_err_t phone_init(void)
     s.state = SIP_UA_CALL_IDLE;
     s.vstate = SIP_UA_CALL_IDLE;
     s.st.volume = s.ring_vol;
+    s.st.second.call = CALL_IDLE;
+    s.st.xfer.state = XFER_IDLE;
+    s.answer_after = -1;
+    s.f_dnd = s.acc.dnd;
+    s.f_cw = s.acc.call_waiting;
+    s.f_aa = s.acc.auto_answer;
+    s.st.dnd = s.acc.dnd;
+    s.st.call_waiting = s.acc.call_waiting;
+    s.st.auto_answer = s.acc.auto_answer;
     s.need_ua = true;
     audio_set_volume(s.st.volume);
     apply_aec(&s.acc);
@@ -1122,6 +1755,69 @@ esp_err_t phone_hold(bool hold)
 {
     const phone_cmd_t c = { .type = CMD_HOLD, .flag = hold };
     return send_cmd(&c);
+}
+
+esp_err_t phone_answer_waiting(void)
+{
+    const phone_cmd_t c = { .type = CMD_ANSWER_WAITING };
+    return send_cmd(&c);
+}
+
+esp_err_t phone_reject_waiting(void)
+{
+    const phone_cmd_t c = { .type = CMD_REJECT_WAITING };
+    return send_cmd(&c);
+}
+
+esp_err_t phone_swap(void)
+{
+    const phone_cmd_t c = { .type = CMD_SWAP };
+    return send_cmd(&c);
+}
+
+static esp_err_t send_target_cmd(cmd_type_t type, const char *target)
+{
+    phone_cmd_t c = { .type = type };
+    ESP_RETURN_ON_FALSE(target && target[0] && strlen(target) < sizeof(c.arg), ESP_ERR_INVALID_ARG, TAG,
+                        "bad transfer target");
+    strlcpy(c.arg, target, sizeof(c.arg));
+    return send_cmd(&c);
+}
+
+esp_err_t phone_transfer_blind(const char *target)
+{
+    return send_target_cmd(CMD_XFER_BLIND, target);
+}
+
+esp_err_t phone_transfer_attended_start(const char *target)
+{
+    return send_target_cmd(CMD_XFER_START, target);
+}
+
+esp_err_t phone_transfer_attended_complete(void)
+{
+    const phone_cmd_t c = { .type = CMD_XFER_COMPLETE };
+    return send_cmd(&c);
+}
+
+esp_err_t phone_transfer_attended_cancel(void)
+{
+    const phone_cmd_t c = { .type = CMD_XFER_CANCEL };
+    return send_cmd(&c);
+}
+
+esp_err_t phone_set_dnd(bool on)
+{
+    settings_t *cur = malloc(sizeof(*cur));     /* ~1 KB: not on the caller's stack */
+    ESP_RETURN_ON_FALSE(cur, ESP_ERR_NO_MEM, TAG, "no memory");
+    settings_get(cur);
+    esp_err_t err = ESP_OK;
+    if (cur->dnd != on) {
+        cur->dnd = on;
+        err = settings_set(cur);        /* applied by the sip task on SETTINGS_EVENT_CHANGED */
+    }
+    free(cur);
+    return err;
 }
 
 void phone_set_mute(bool muted)

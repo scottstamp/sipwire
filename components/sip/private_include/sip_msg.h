@@ -18,6 +18,7 @@
 #define SIP_MAX_CONTACT    8
 #define SIP_MAX_ROUTE      8
 #define SIP_MAX_AUTH       4
+#define SIP_MAX_INFO_HDR   4     /* Call-Info / Alert-Info occurrences kept */
 #define SIP_MAX_HEADERS    64
 #define SIP_MAX_CSEQ       0x7fffffffu   /* §8.1.1.5: < 2^31 */
 
@@ -116,6 +117,10 @@ typedef struct {
     sip_str_t event;        /* Event (RFC 6665), whole value incl. params */
     sip_str_t sub_state;    /* Subscription-State, whole value */
     int retry_after;        /* Retry-After seconds, -1 absent */
+    sip_str_t call_info[SIP_MAX_INFO_HDR];   /* Call-Info values (auto answer) */
+    int n_call_info;
+    sip_str_t alert_info[SIP_MAX_INFO_HDR];  /* Alert-Info values (auto answer) */
+    int n_alert_info;
     sip_str_t body;
 } sip_msg_t;
 

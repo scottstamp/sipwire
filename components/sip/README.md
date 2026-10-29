@@ -100,7 +100,10 @@ Functions return `sip_err_t` (0 / negative) because the core cannot depend on
   `sip_ua_unregister` (Expires: 0), `sip_ua_reg_state`, `sip_ua_set_local_addr`
 * calls: `sip_call_dial` → handle, `sip_call_answer`, `sip_call_reject(code)`,
   `sip_call_hangup` (CANCEL / 486 / BYE as appropriate), `sip_call_hold(bool)`,
-  `sip_call_state`
+  `sip_call_state`, `sip_call_transfer(target)` (blind REFER),
+  `sip_call_transfer_replace(call, consult)` (attended, Refer-To with Replaces),
+  `sip_call_send_info_dtmf(digit, ms)` (INFO application/dtmf-relay)
+* incoming policy: `sip_ua_set_call_waiting(bool)` (default on), `sip_ua_set_dnd(bool)`
 * subscriptions: `sip_ua_subscribe_blf(ua, ext, &handle)` (≤ `SIP_UA_MAX_BLF` = 8),
   `sip_ua_subscribe_mwi(ua, &handle)` (one), `sip_ua_unsubscribe(ua, handle)`,
   `sip_ua_blf_state(ua, handle)`; `cfg.sub_expires` (default 600 s)
@@ -109,7 +112,10 @@ Functions return `sip_err_t` (0 / negative) because the core cannot depend on
   `media(handle, info)` (remote IP/port, PT 9/0/8, telephone-event PT, ptime,
   direction from our point of view, local RTP port, early flag),
   `blf_state(handle, ext, state)` (UNKNOWN / IDLE / RINGING / BUSY, on change),
-  `mwi(waiting, new, old)` (on change; subscription or unsolicited NOTIFY)
+  `mwi(waiting, new, old)` (on change; subscription or unsolicited NOTIFY),
+  `transfer(handle, state, code)` (TRYING / ACCEPTED / PROGRESS / SUCCESS / FAILED),
+  `call_rejected(number, name, code)` (INVITE refused without being offered:
+  busy, DND); `sip_call_info_t.answer_after` (auto answer request, -1 = none)
 
 ### Callback rules
 
@@ -131,9 +137,29 @@ Not thread-safe: use one task.
 * Auth: one cached challenge is reused (nc incremented) for REGISTER refreshes,
   INVITEs and re-INVITEs; a request is retried once per challenge, again only
   on `stale=true` (max 3). Passwords and Authorization values are never logged.
-* One visible call. A second INVITE while busy gets 486; a hung-up call may
-  linger internally (CANCEL / 487 / 200-race → ACK + BYE) without blocking a
-  new call.
+* Up to two visible calls. A second INVITE is offered (call waiting) only
+  while exactly one call exists and it is established, and call waiting is
+  on; otherwise 486 (+ `call_rejected`). DND: every new INVITE gets 486, no
+  180. A second outgoing call is allowed next to one established call
+  (consultation). A hung-up call may linger internally (CANCEL / 487 /
+  200-race → ACK + BYE) without blocking a new call (4 slots).
+* Hold: `sip_call_hold` records the wanted state; the re-INVITE goes out when
+  no INVITE transaction of the call is in flight. 491 → retried after the
+  §14.1 delay (2.1-4 s if we placed the call / own the Call-ID, else 0-2 s);
+  other failures give up (state unchanged).
+* Transfer (RFC 3515): in-dialog REFER (Refer-To, Referred-By, Contact; auth
+  retried once). 2xx → ACCEPTED; in-dialog NOTIFY `Event: refer` with
+  `message/sipfrag` → PROGRESS (1xx) / SUCCESS (2xx) / FAILED (>= 300, or
+  `Subscription-State: terminated` without a final status), 60 s without a
+  final NOTIFY → FAILED 408. The app hangs up after SUCCESS (Asterisk keeps
+  the transferor up, RFC 5589). Attended: `Refer-To: <consult-target?Replaces=
+  callid%3Bto-tag%3D<remote tag>%3Bfrom-tag%3D<local tag>>` (RFC 3891: to-tag
+  = the target's local tag = our remote tag), value escaped per §25.1 hvalue.
+  Incoming REFER → 603. Incoming INVITE with Replaces is not supported (treated
+  as a new call; `Require: replaces` → 420).
+* Auto answer: `Call-Info: <...>;answer-after=N`, or Alert-Info with
+  `info=alert-autoanswer` / `Ring Answer` / `intercom` / `auto answer`
+  (outside the `<URI>`, optional `;delay=N`) → `answer_after` = N (else 0).
 * Hangup on an incoming ringing call sends 486; `sip_call_reject` lets the
   app pick (e.g. 603). Hangup of an answered call before its ACK waits for the
   ACK (or its timeout) before sending BYE (§15).
@@ -141,7 +167,9 @@ Not thread-safe: use one task.
   inactive → inactive, c=0.0.0.0 honoured), reported via `media`. 491 on glare.
   Re-INVITE / initial INVITE without SDP: we offer in the 200, answer is taken
   from the ACK.
-* In-dialog INFO → 200, OPTIONS → 200, other unknown → 501; out-of-dialog
+* In-dialog INFO → 200 (DTMF from application/dtmf-relay `Signal=` or
+  application/dtmf is logged), OPTIONS → 200, NOTIFY → refer subscription
+  (other event packages 489), other unknown → 501; out-of-dialog
   OPTIONS → 200, NOTIFY with `Event: message-summary` → 200 (unsolicited MWI),
   any other NOTIFY that matches no subscription → 481, known-but-unsupported
   methods (incl. SUBSCRIBE: we are no notifier) → 405, unknown → 501, Require
@@ -208,13 +236,13 @@ Contact entries per message, 64 header lines.
 * Single route target: requests are always sent to the configured server even
   if Route/Contact name another host.
 * No forking support (a second 2xx with another To-tag is just ACKed), no
-  PRACK/100rel, no UPDATE, no session timers, no REFER/transfer, no MESSAGE.
+  PRACK/100rel, no UPDATE, no session timers, no MESSAGE; REFER sent only
+  (incoming REFER declined, no INVITE/Replaces handling).
 * Subscriber only (incoming SUBSCRIBE → 405); one dialog per subscription
   (a forked NOTIFY from another notifier gets 481); event packages `dialog`
   and `message-summary` only.
 * RFC 2543 (no magic cookie) request retransmissions are not matched.
 * Codecs: G.722 and G.711 only, static payload types 9/0/8; one audio stream.
-* Re-INVITE glare (491) is reported/logged but not retried automatically.
 * Digest: MD5 and qop=auth only (no MD5-sess, auth-int, SHA-256).
 * Raw NUL / control characters in headers are rejected (RFC 4475 "intmeth"
   accepts them; we choose to refuse).

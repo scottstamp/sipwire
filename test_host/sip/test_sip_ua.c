@@ -8,6 +8,7 @@
 #include "sip_auth.h"
 #include "sip_test_util.h"
 #include "sip_ua_internal.h"
+#include "sip_ua_priv.h"
 #include "unity.h"
 
 static fx_t F;
@@ -688,7 +689,6 @@ static void test_local_hold_resume(void)
     TEST_ASSERT_EQUAL_UINT32(2, fx_parse(f, re)->cseq);
     TEST_ASSERT_NOT_NULL(strstr(f->sent[re].buf, "a=sendonly\r\n"));
     TEST_ASSERT_NOT_NULL(strstr(f->sent[re].buf, "o=sipwire "));
-    TEST_ASSERT_EQUAL(SIP_ERR_STATE, sip_call_hold(f->ua, h, false)); /* one at a time */
     const char *ans =
         "v=0\r\no=srv 1 2 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\n"
         "m=audio 20000 RTP/AVP 0\r\na=recvonly\r\n";
@@ -849,6 +849,7 @@ static void test_incoming_remote_cancel(void)
 static void test_incoming_busy_second_call(void)
 {
     fx_init(f, NULL);
+    sip_ua_set_call_waiting(f->ua, false);
     const char *tag;
     establish_incoming("first@x", &tag);
     int nin = fx_count_ev(f, FXE_INCOMING);
@@ -863,6 +864,10 @@ static void test_incoming_busy_second_call(void)
     TEST_ASSERT_EQUAL_STRING("second@x", call_id_of(busy));
     TEST_ASSERT_EQUAL(nin, fx_count_ev(f, FXE_INCOMING));
     TEST_ASSERT_EQUAL(1, sip_ua_debug_call_slots(f->ua));
+    const fx_ev_t *rj = fx_last_ev(f, FXE_REJECTED);
+    TEST_ASSERT_NOT_NULL(rj);
+    TEST_ASSERT_EQUAL_STRING("1003", rj->number);
+    TEST_ASSERT_EQUAL(486, rj->code);
 }
 
 static void test_outgoing_g722_answer(void)
@@ -1123,6 +1128,402 @@ static void test_callback_reentrancy(void)
     TEST_ASSERT_NULL(f->ua);
 }
 
+/* ------------------------------------- call waiting, DND, auto answer */
+
+/* new INVITE from `from_user` (tag t-<from_user>), optional extra headers */
+static void inject_invite_from(const char *from_user, const char *callid, const char *branch, const char *extra)
+{
+    inject_fmt("INVITE sip:1001@10.0.0.2:5060 SIP/2.0\r\n"
+               "Via: SIP/2.0/UDP 10.0.0.1:5060;rport;branch=%s\r\n"
+               "From: <sip:%s@10.0.0.1>;tag=t-%s\r\nTo: <sip:1001@10.0.0.2>\r\n"
+               "Contact: <sip:asterisk@10.0.0.1:5060>\r\nCall-ID: %s\r\nCSeq: 1 INVITE\r\n%s"
+               "Content-Type: application/sdp\r\nContent-Length: %u\r\n\r\n%s",
+               branch, from_user, from_user, callid, extra ? extra : "", (unsigned)strlen(FX_SDP_PCMU),
+               FX_SDP_PCMU);
+}
+
+static void test_call_waiting_offered(void)
+{
+    fx_init(f, NULL);
+    const char *tag;
+    sip_call_handle_t a = establish_incoming("first@x", &tag);
+    char tag_a[80];
+    snprintf(tag_a, sizeof(tag_a), "%s", tag);
+    inject_invite_from("1003", "second@x", "z9hG4bKw2", NULL);
+    int r180 = fx_find(f, "SIP/2.0 180", 0);
+    TEST_ASSERT_EQUAL_STRING("second@x", call_id_of(r180));
+    const fx_ev_t *in = fx_last_ev(f, FXE_INCOMING);
+    TEST_ASSERT_EQUAL_STRING("1003", in->number);
+    sip_call_handle_t b = in->call;
+    TEST_ASSERT_NOT_EQUAL(a, b);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_RINGING_IN, sip_call_state(f->ua, b));
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_ACTIVE, sip_call_state(f->ua, a));
+    TEST_ASSERT_EQUAL(0, fx_count_ev(f, FXE_REJECTED));
+
+    /* a third one is busy */
+    inject_invite_from("1004", "third@x", "z9hG4bKw3", NULL);
+    int busy = fx_find(f, "SIP/2.0 486", 0);
+    TEST_ASSERT_EQUAL_STRING("third@x", call_id_of(busy));
+    TEST_ASSERT_EQUAL_STRING("1004", fx_last_ev(f, FXE_REJECTED)->number);
+
+    /* hold A, answer B: two calls, independent dialogs */
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_hold(f->ua, a, true));
+    int re = fx_find(f, "INVITE", 0);
+    TEST_ASSERT_EQUAL_STRING("first@x", call_id_of(re));
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_answer(f->ua, b));
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_ACTIVE, sip_call_state(f->ua, b));
+    fx_reply(f, re, 200, NULL, NULL, FX_SDP_PCMU);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_HELD, sip_call_state(f->ua, a));
+    TEST_ASSERT_EQUAL(2, sip_ua_debug_call_slots(f->ua));
+
+    /* hang up B (it waits for its ACK first): A stays held */
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_hangup(f->ua, b));
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_HELD, sip_call_state(f->ua, a));
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_hold(f->ua, a, false));
+    re = fx_find(f, "INVITE", 0);
+    TEST_ASSERT_NOT_NULL(strstr(f->sent[re].buf, "a=sendrecv\r\n"));
+}
+
+static void test_call_waiting_only_when_established(void)
+{
+    fx_init(f, NULL);
+    inject_invite("ring1@x", "z9hG4bKr1", 1, FX_SDP_PCMU, NULL);
+    inject_invite_from("1003", "ring2@x", "z9hG4bKr2", NULL);
+    int busy = fx_find(f, "SIP/2.0 486", 0);
+    TEST_ASSERT_TRUE(busy >= 0);
+    TEST_ASSERT_EQUAL_STRING("ring2@x", call_id_of(busy));
+    TEST_ASSERT_EQUAL(1, fx_count_ev(f, FXE_INCOMING));
+}
+
+static void test_dnd_rejects_without_ringing(void)
+{
+    fx_init(f, NULL);
+    sip_ua_set_dnd(f->ua, true);
+    inject_invite("dnd@x", "z9hG4bKdnd", 1, FX_SDP_PCMU, NULL);
+    TEST_ASSERT_EQUAL(0, fx_count(f, "SIP/2.0 180"));
+    TEST_ASSERT_EQUAL(1, fx_count(f, "SIP/2.0 486"));
+    TEST_ASSERT_EQUAL(0, fx_count_ev(f, FXE_INCOMING));
+    const fx_ev_t *rj = fx_last_ev(f, FXE_REJECTED);
+    TEST_ASSERT_NOT_NULL(rj);
+    TEST_ASSERT_EQUAL_STRING("1002", rj->number);
+    TEST_ASSERT_EQUAL_STRING("Bob", rj->display);
+    TEST_ASSERT_EQUAL(486, rj->code);
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_call_slots(f->ua));
+    sip_ua_set_dnd(f->ua, false);
+    inject_invite("dnd2@x", "z9hG4bKdnd2", 1, FX_SDP_PCMU, NULL);
+    TEST_ASSERT_EQUAL(1, fx_count_ev(f, FXE_INCOMING));
+}
+
+static int answer_after_of(const char *hdrs)
+{
+    static char buf[1024];
+    static sip_msg_t m;
+    snprintf(buf, sizeof(buf),
+             "INVITE sip:1001@10.0.0.2 SIP/2.0\r\nVia: SIP/2.0/UDP 10.0.0.1;branch=z9hG4bKx\r\n"
+             "From: <sip:p@10.0.0.1>;tag=a\r\nTo: <sip:1001@10.0.0.2>\r\nCall-ID: c\r\nCSeq: 1 INVITE\r\n"
+             "%sContent-Length: 0\r\n\r\n", hdrs);
+    TEST_ASSERT_EQUAL(SIP_PARSE_OK, sip_msg_parse(&m, buf, strlen(buf)));
+    return sipua_answer_after(&m);
+}
+
+static void test_answer_after_parsing(void)
+{
+    TEST_ASSERT_EQUAL(-1, answer_after_of(""));
+    TEST_ASSERT_EQUAL(0, answer_after_of("Call-Info: <sip:10.0.0.1>;answer-after=0\r\n"));
+    TEST_ASSERT_EQUAL(0, answer_after_of("Call-Info: sip:10.0.0.1;answer-after=0\r\n"));
+    TEST_ASSERT_EQUAL(5, answer_after_of("Call-Info: <http://x/a.png>;purpose=icon, <sip:x>;Answer-After=5\r\n"));
+    TEST_ASSERT_EQUAL(-1, answer_after_of("Call-Info: <http://x/a.png>;purpose=icon\r\n"));
+    TEST_ASSERT_EQUAL(0, answer_after_of("Alert-Info: <http://www.notused.com>;info=alert-autoanswer;delay=0\r\n"));
+    TEST_ASSERT_EQUAL(2, answer_after_of("Alert-Info: <http://example.com>;info=alert-autoanswer;delay=2\r\n"));
+    TEST_ASSERT_EQUAL(0, answer_after_of("Alert-Info: Ring Answer\r\n"));
+    TEST_ASSERT_EQUAL(0, answer_after_of("Alert-Info: <sip:x>;info=intercom\r\n"));
+    TEST_ASSERT_EQUAL(0, answer_after_of("Alert-Info: <http://x>;answer-after=0\r\n"));
+    TEST_ASSERT_EQUAL(0, answer_after_of("Alert-Info: auto answer\r\n"));
+    /* words inside the ringtone URL do not count */
+    TEST_ASSERT_EQUAL(-1, answer_after_of("Alert-Info: <http://x/intercom-autoanswer.wav>\r\n"));
+    TEST_ASSERT_EQUAL(-1, answer_after_of("Alert-Info: <http://x/r.wav>;info=ring2\r\n"));
+    TEST_ASSERT_EQUAL(0, answer_after_of("Alert-Info: <http://x/r.wav>\r\nAlert-Info: info=alert-autoanswer\r\n"));
+}
+
+static void test_answer_after_reported(void)
+{
+    fx_init(f, NULL);
+    inject_invite("page@x", "z9hG4bKpg", 1, FX_SDP_PCMU, "Call-Info: <sip:10.0.0.1>;answer-after=0\r\n");
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_RINGING_IN, last_call_ev()->state);
+    TEST_ASSERT_EQUAL(0, last_call_ev()->answer_after);
+    sip_call_reject(f->ua, last_call_ev()->call, 486);
+    inject_invite("plain@x", "z9hG4bKpl", 1, FX_SDP_PCMU, NULL);
+    TEST_ASSERT_EQUAL(-1, last_call_ev()->answer_after);
+}
+
+/* ------------------------------------------------- hold glare / queue */
+
+static void test_hold_queued_while_reinvite_in_flight(void)
+{
+    fx_init(f, NULL);
+    sip_call_handle_t h;
+    establish_outgoing(&h);
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_hold(f->ua, h, true));
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_hold(f->ua, h, false)); /* queued */
+    TEST_ASSERT_EQUAL(1, fx_count(f, "INVITE sip:srv"));
+    int re = fx_find(f, "INVITE", 0);
+    fx_reply(f, re, 200, "callee", NULL, FX_SDP_SENDONLY);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_HELD, sip_call_state(f->ua, h));
+    fx_advance(f, 20);
+    TEST_ASSERT_EQUAL(2, fx_count(f, "INVITE sip:srv"));
+    re = fx_find(f, "INVITE", 0);
+    TEST_ASSERT_NOT_NULL(strstr(f->sent[re].buf, "a=sendrecv\r\n"));
+    fx_reply(f, re, 200, "callee", NULL, FX_SDP_PCMU);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_ACTIVE, sip_call_state(f->ua, h));
+    fx_advance(f, 100);
+    TEST_ASSERT_EQUAL(2, fx_count(f, "INVITE sip:srv"));
+}
+
+/* first re-INVITE retry time after a 491, relative to the 491 */
+static uint64_t glare_retry_after(sip_call_handle_t h)
+{
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_hold(f->ua, h, true));
+    int n0 = fx_count(f, "INVITE sip:");
+    int re = fx_find(f, "INVITE", 0);
+    fx_reply(f, re, 491, NULL, NULL, NULL);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_ACTIVE, sip_call_state(f->ua, h));
+    uint64_t t0 = f->now;
+    while (fx_count(f, "INVITE sip:") == n0) {
+        TEST_ASSERT_TRUE(f->now - t0 < 5000);
+        fx_advance(f, 10);
+    }
+    re = fx_find(f, "INVITE", 0);
+    TEST_ASSERT_NOT_NULL(strstr(f->sent[re].buf, "a=sendonly\r\n"));
+    fx_reply(f, re, 200, NULL, NULL, FX_SDP_PCMU);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_HELD, sip_call_state(f->ua, h));
+    return f->now - t0;
+}
+
+static void test_reinvite_491_retry_timing(void)
+{
+    /* we placed the call (own the Call-ID): 2.1-4 s */
+    for (int i = 0; i < 4; i++) {
+        fx_init(f, NULL);
+        f->rng += (uint32_t)i * 7919u;
+        sip_call_handle_t h;
+        establish_outgoing(&h);
+        uint64_t d = glare_retry_after(h);
+        TEST_ASSERT_TRUE_MESSAGE(d >= 2100 && d <= 4010, "owner retry outside 2.1-4 s");
+        fx_free(f);
+    }
+    /* incoming call: 0-2 s */
+    for (int i = 0; i < 4; i++) {
+        fx_init(f, NULL);
+        f->rng += (uint32_t)i * 104729u;
+        const char *tag;
+        sip_call_handle_t h = establish_incoming("g@x", &tag);
+        uint64_t d = glare_retry_after(h);
+        TEST_ASSERT_TRUE_MESSAGE(d <= 2010, "non-owner retry outside 0-2 s");
+        fx_free(f);
+    }
+    /* the delay function itself over many draws */
+    fx_init(f, NULL);
+    for (int i = 0; i < 1000; i++) {
+        uint32_t a = sipua_glare_delay_ms(f->ua, true), b = sipua_glare_delay_ms(f->ua, false);
+        TEST_ASSERT_TRUE(a >= 2100 && a <= 4000 && a % 10 == 0);
+        TEST_ASSERT_TRUE(b <= 2000 && b % 10 == 0);
+    }
+}
+
+/* ---------------------------------------------------------- transfer */
+
+/* in-dialog request from the far end of the outgoing call of INVITE idx */
+static void inject_out_dialog_req(const char *method, int cseq, int invite_idx, const char *their_tag,
+                                  const char *branch, const char *hdrs, const char *ctype, const char *body)
+{
+    char cid[128], ours[80];
+    snprintf(cid, sizeof(cid), "%s", call_id_of(invite_idx));
+    snprintf(ours, sizeof(ours), "%s", from_tag_of(invite_idx));
+    char ct[96] = "";
+    if (ctype) {
+        snprintf(ct, sizeof(ct), "Content-Type: %s\r\n", ctype);
+    }
+    inject_fmt("%s sip:1001@10.0.0.2:5060 SIP/2.0\r\n"
+               "Via: SIP/2.0/UDP 10.0.0.1:5060;rport;branch=%s\r\n"
+               "From: <sip:600@10.0.0.1>;tag=%s\r\n"
+               "To: \"Alice\" <sip:1001@10.0.0.1>;tag=%s\r\n"
+               "Call-ID: %s\r\nCSeq: %d %s\r\nContact: <sip:srv@10.0.0.1:5060>\r\n%s%s"
+               "Content-Length: %u\r\n\r\n%s",
+               method, branch, their_tag, ours, cid, cseq, method, hdrs ? hdrs : "", ct,
+               (unsigned)(body ? strlen(body) : 0), body ? body : "");
+}
+
+static void notify_sipfrag(int inv, int cseq, const char *state, const char *frag)
+{
+    char br[32];
+    snprintf(br, sizeof(br), "z9hG4bKn%d", cseq);
+    char hdrs[128];
+    snprintf(hdrs, sizeof(hdrs), "Event: refer\r\nSubscription-State: %s\r\n", state);
+    inject_out_dialog_req("NOTIFY", cseq, inv, "callee", br, hdrs, "message/sipfrag;version=2.0", frag);
+}
+
+static void test_blind_transfer_success(void)
+{
+    fx_init(f, NULL);
+    sip_call_handle_t h;
+    int inv = establish_outgoing(&h);
+    TEST_ASSERT_EQUAL(SIP_ERR_ARG, sip_call_transfer(f->ua, h, ""));
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_transfer(f->ua, h, "1003"));
+    TEST_ASSERT_EQUAL(SIP_ERR_BUSY, sip_call_transfer(f->ua, h, "1004"));
+    int ref = fx_find(f, "REFER", 0);
+    TEST_ASSERT_TRUE(ref >= 0);
+    TEST_ASSERT_EQUAL_STRING("<sip:1003@10.0.0.1>", fx_hdr(f, ref, "Refer-To"));
+    TEST_ASSERT_EQUAL_STRING("<sip:1001@10.0.0.1>", fx_hdr(f, ref, "Referred-By"));
+    TEST_ASSERT_NOT_NULL(fx_hdr(f, ref, "Contact"));
+    TEST_ASSERT_EQUAL_UINT32(2, fx_parse(f, ref)->cseq);
+    TEST_ASSERT_TRUE(strstr(fx_hdr(f, ref, "To"), "tag=callee") != NULL);
+    TEST_ASSERT_EQUAL(SIP_XFER_TRYING, fx_last_ev(f, FXE_XFER)->state);
+    fx_reply(f, ref, 202, NULL, NULL, NULL);
+    TEST_ASSERT_EQUAL(SIP_XFER_ACCEPTED, fx_last_ev(f, FXE_XFER)->state);
+    TEST_ASSERT_EQUAL(202, fx_last_ev(f, FXE_XFER)->code);
+
+    notify_sipfrag(inv, 10, "active;expires=60", "SIP/2.0 100 Trying\r\n");
+    int ok = fx_find(f, "SIP/2.0 200", 0);
+    TEST_ASSERT_EQUAL(SIP_METHOD_NOTIFY, fx_parse(f, ok)->cseq_method);
+    TEST_ASSERT_EQUAL(SIP_XFER_PROGRESS, fx_last_ev(f, FXE_XFER)->state);
+    TEST_ASSERT_EQUAL(100, fx_last_ev(f, FXE_XFER)->code);
+    notify_sipfrag(inv, 11, "terminated;reason=noresource", "SIP/2.0 200 OK\r\n");
+    TEST_ASSERT_EQUAL(SIP_XFER_SUCCESS, fx_last_ev(f, FXE_XFER)->state);
+    TEST_ASSERT_EQUAL(200, fx_last_ev(f, FXE_XFER)->code);
+    int nx = fx_count_ev(f, FXE_XFER);
+    /* a late NOTIFY no longer matches a subscription */
+    notify_sipfrag(inv, 12, "terminated", "SIP/2.0 200 OK\r\n");
+    TEST_ASSERT_TRUE(fx_find(f, "SIP/2.0 481", 0) >= 0);
+    TEST_ASSERT_EQUAL(nx, fx_count_ev(f, FXE_XFER));
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_ACTIVE, sip_call_state(f->ua, h)); /* the app hangs up */
+    /* other event packages in the dialog: 489 */
+    inject_out_dialog_req("NOTIFY", 13, inv, "callee", "z9hG4bKn13", "Event: talk\r\n", NULL, NULL);
+    TEST_ASSERT_TRUE(fx_find(f, "SIP/2.0 489", 0) >= 0);
+}
+
+static void test_blind_transfer_failures(void)
+{
+    fx_init(f, NULL);
+    sip_call_handle_t h;
+    int inv = establish_outgoing(&h);
+    /* REFER refused */
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_transfer(f->ua, h, "1003"));
+    fx_reply(f, fx_find(f, "REFER", 0), 403, NULL, NULL, NULL);
+    TEST_ASSERT_EQUAL(SIP_XFER_FAILED, fx_last_ev(f, FXE_XFER)->state);
+    TEST_ASSERT_EQUAL(403, fx_last_ev(f, FXE_XFER)->code);
+    /* target busy (sipfrag 486) */
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_transfer(f->ua, h, "1003"));
+    fx_reply(f, fx_find(f, "REFER", 0), 202, NULL, NULL, NULL);
+    notify_sipfrag(inv, 20, "terminated", "SIP/2.0 486 Busy Here\r\n");
+    TEST_ASSERT_EQUAL(SIP_XFER_FAILED, fx_last_ev(f, FXE_XFER)->state);
+    TEST_ASSERT_EQUAL(486, fx_last_ev(f, FXE_XFER)->code);
+    /* terminated without a final status */
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_transfer(f->ua, h, "1003"));
+    fx_reply(f, fx_find(f, "REFER", 0), 202, NULL, NULL, NULL);
+    notify_sipfrag(inv, 21, "terminated", "SIP/2.0 100 Trying\r\n");
+    TEST_ASSERT_EQUAL(SIP_XFER_FAILED, fx_last_ev(f, FXE_XFER)->state);
+    /* accepted but nothing more: timeout */
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_transfer(f->ua, h, "1003"));
+    fx_reply(f, fx_find(f, "REFER", 0), 202, NULL, NULL, NULL);
+    fx_advance(f, 61000);
+    TEST_ASSERT_EQUAL(SIP_XFER_FAILED, fx_last_ev(f, FXE_XFER)->state);
+    TEST_ASSERT_EQUAL(408, fx_last_ev(f, FXE_XFER)->code);
+    /* REFER never answered: timer F */
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_transfer(f->ua, h, "1003"));
+    fx_advance(f, 33000);
+    TEST_ASSERT_EQUAL(SIP_XFER_FAILED, fx_last_ev(f, FXE_XFER)->state);
+    TEST_ASSERT_EQUAL(408, fx_last_ev(f, FXE_XFER)->code);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_ACTIVE, sip_call_state(f->ua, h));
+    /* not on a ringing call */
+    sip_call_handle_t h2;
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_dial(f->ua, "601", &h2));
+    TEST_ASSERT_EQUAL(SIP_ERR_STATE, sip_call_transfer(f->ua, h2, "1003"));
+}
+
+static void test_refer_to_replaces_escaping(void)
+{
+    char out[REFER_TO_MAX];
+    TEST_ASSERT_EQUAL(0, sipua_refer_to_replaces(out, sizeof(out), "sip:1003@10.0.0.1", "a1b2@10.0.0.2",
+                                                 "as5f3e", "8c1d"));
+    TEST_ASSERT_EQUAL_STRING("<sip:1003@10.0.0.1?Replaces=a1b2%4010.0.0.2%3Bto-tag%3Das5f3e%3Bfrom-tag%3D8c1d>",
+                             out);
+    /* odd characters in a Call-ID are escaped too; hnv-unreserved stay */
+    TEST_ASSERT_EQUAL(0, sipua_refer_to_replaces(out, sizeof(out), "sip:x@h", "a b%c=d&e/f:g", "t", "f"));
+    TEST_ASSERT_EQUAL_STRING("<sip:x@h?Replaces=a%20b%25c%3Dd%26e/f:g%3Bto-tag%3Dt%3Bfrom-tag%3Df>", out);
+    TEST_ASSERT_EQUAL(-1, sipua_refer_to_replaces(out, 20, "sip:x@h", "c", "t", "f"));
+    TEST_ASSERT_EQUAL(-1, sipua_refer_to_replaces(out, sizeof(out), "sip:x@h?a=b", "c", "t", "f"));
+}
+
+static void test_attended_transfer(void)
+{
+    fx_init(f, NULL);
+    sip_call_handle_t a, b;
+    int inv_a = establish_outgoing(&a);
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_hold(f->ua, a, true));
+    fx_reply(f, fx_find(f, "INVITE", 0), 200, NULL, NULL, FX_SDP_PCMU);
+    /* consultation call while A is held */
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_dial(f->ua, "1003", &b));
+    int inv_b = fx_find(f, "INVITE", 0);
+    TEST_ASSERT_EQUAL(SIP_ERR_STATE, sip_call_transfer_replace(f->ua, a, b)); /* B not answered */
+    fx_reply(f, inv_b, 200, "kb7", NULL, FX_SDP_PCMU);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_ACTIVE, sip_call_state(f->ua, b));
+    /* a third call is refused */
+    sip_call_handle_t c;
+    TEST_ASSERT_EQUAL(SIP_ERR_BUSY, sip_call_dial(f->ua, "1004", &c));
+
+    char cid_b[128], ftag_b[80];
+    snprintf(cid_b, sizeof(cid_b), "%s", call_id_of(inv_b));
+    snprintf(ftag_b, sizeof(ftag_b), "%s", from_tag_of(inv_b));
+    TEST_ASSERT_EQUAL(SIP_ERR_NOT_FOUND, sip_call_transfer_replace(f->ua, a, a));
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_transfer_replace(f->ua, a, b));
+    int ref = fx_find(f, "REFER", 0);
+    TEST_ASSERT_EQUAL_STRING(call_id_of(inv_a), call_id_of(ref)); /* sent on A's dialog */
+    char want[400], esc_cid[200];
+    size_t o = 0;
+    for (const char *p = cid_b; *p; p++) {
+        o += (size_t)snprintf(esc_cid + o, sizeof(esc_cid) - o, *p == '@' ? "%%40" : "%c", *p);
+    }
+    snprintf(want, sizeof(want), "<sip:1003@10.0.0.1?Replaces=%s%%3Bto-tag%%3Dkb7%%3Bfrom-tag%%3D%s>", esc_cid,
+             ftag_b);
+    TEST_ASSERT_EQUAL_STRING(want, fx_hdr(f, ref, "Refer-To"));
+    fx_reply(f, ref, 202, NULL, NULL, NULL);
+    notify_sipfrag(inv_a, 30, "terminated", "SIP/2.0 200 OK\r\n");
+    const fx_ev_t *x = fx_last_ev(f, FXE_XFER);
+    TEST_ASSERT_EQUAL(a, x->call);
+    TEST_ASSERT_EQUAL(SIP_XFER_SUCCESS, x->state);
+}
+
+/* ---------------------------------------------------------- INFO / REFER in */
+
+static void test_info_dtmf(void)
+{
+    fx_init(f, NULL);
+    sip_call_handle_t h;
+    int inv = establish_outgoing(&h);
+    TEST_ASSERT_EQUAL(SIP_ERR_ARG, sip_call_send_info_dtmf(f->ua, h, 'x', 100));
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_send_info_dtmf(f->ua, h, '5', 160));
+    int info = fx_find(f, "INFO", 0);
+    TEST_ASSERT_TRUE(info >= 0);
+    TEST_ASSERT_EQUAL_STRING("application/dtmf-relay", fx_hdr(f, info, "Content-Type"));
+    TEST_ASSERT_NOT_NULL(strstr(f->sent[info].buf, "\r\n\r\nSignal=5\r\nDuration=160\r\n"));
+    TEST_ASSERT_TRUE(strstr(fx_hdr(f, info, "To"), "tag=callee") != NULL);
+    fx_reply(f, info, 200, NULL, NULL, NULL);
+    fx_advance(f, 6000);
+    TEST_ASSERT_EQUAL(1, fx_count(f, "INFO"));
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_send_info_dtmf(f->ua, h, '#', 0));
+    TEST_ASSERT_NOT_NULL(strstr(f->sent[fx_find(f, "INFO", 0)].buf, "Signal=#\r\nDuration=160\r\n"));
+
+    /* incoming INFO DTMF: 200 */
+    inject_out_dialog_req("INFO", 40, inv, "callee", "z9hG4bKi40", NULL, "application/dtmf-relay",
+                          "Signal=7\r\nDuration=250\r\n");
+    int ok = fx_find(f, "SIP/2.0 200", 0);
+    TEST_ASSERT_EQUAL_UINT32(40, fx_parse(f, ok)->cseq);
+    /* incoming REFER: declined */
+    inject_out_dialog_req("REFER", 41, inv, "callee", "z9hG4bKr41", "Refer-To: <sip:9@10.0.0.1>\r\n", NULL, NULL);
+    TEST_ASSERT_TRUE(fx_find(f, "SIP/2.0 603", 0) >= 0);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_ACTIVE, sip_call_state(f->ua, h));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1165,5 +1566,17 @@ int main(void)
     RUN_TEST(test_delayed_offer_incoming);
     RUN_TEST(test_out_of_dialog_requests);
     RUN_TEST(test_callback_reentrancy);
+    RUN_TEST(test_call_waiting_offered);
+    RUN_TEST(test_call_waiting_only_when_established);
+    RUN_TEST(test_dnd_rejects_without_ringing);
+    RUN_TEST(test_answer_after_parsing);
+    RUN_TEST(test_answer_after_reported);
+    RUN_TEST(test_hold_queued_while_reinvite_in_flight);
+    RUN_TEST(test_reinvite_491_retry_timing);
+    RUN_TEST(test_blind_transfer_success);
+    RUN_TEST(test_blind_transfer_failures);
+    RUN_TEST(test_refer_to_replaces_escaping);
+    RUN_TEST(test_attended_transfer);
+    RUN_TEST(test_info_dtmf);
     return UNITY_END();
 }

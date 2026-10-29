@@ -228,6 +228,7 @@ static void tone_poll(dsp_tone_t *t)
         case AUDIO_TONE_BUSY:     dsp_tone_start(t, DSP_TONE_BUSY); break;
         case AUDIO_TONE_RING:     dsp_tone_start(t, DSP_TONE_RING); break;
         case AUDIO_TONE_KEYCLICK: dsp_tone_start(t, DSP_TONE_KEYCLICK); break;
+        case AUDIO_TONE_CALL_WAITING: dsp_tone_start(t, DSP_TONE_CALL_WAITING); break;
         case AUDIO_TONE_NONE:
         default:                  dsp_tone_stop(t); break;
         }

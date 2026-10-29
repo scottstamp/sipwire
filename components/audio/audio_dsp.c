@@ -152,6 +152,7 @@ static const dsp_tone_def_t PRESETS[] = {
     [DSP_TONE_BUSY]     = { .f1 = 480,  .f2 = 620,  .on_ms = 500,  .period_ms = 1000 },
     [DSP_TONE_RING]     = { .f1 = 1000, .f2 = 1200, .on_ms = 1000, .period_ms = 3000, .warble_ms = 40 },
     [DSP_TONE_KEYCLICK] = { .f1 = 1000, .f2 = 2000, .on_ms = 30, .oneshot = true },
+    [DSP_TONE_CALL_WAITING] = { .f1 = 440, .on_ms = 300, .period_ms = 10000 },
 };
 
 #define S(a, b, ms) { a, b, ms }
