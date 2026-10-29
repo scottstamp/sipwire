@@ -32,6 +32,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "rtp.h"
+#include "settings.h"
 
 #include "phone_priv.h"
 
@@ -79,6 +80,7 @@ static struct {
     bool early;
     sip_ua_call_state_t state;
     bool send, play;
+    uint32_t send_stop_ms;      /* when m.send last went false (0 = never sent) */
     rtp_stats_t stats;              /* last snapshot (kept after teardown) */
     uint32_t tx_errors;
 } m = {
@@ -154,6 +156,12 @@ static void recompute_locked(void)
     bool send = false, play = false;
     if (m.rtp) {
         phone_media_flags(m.state, m.dir, m.early, &send, &play);
+    }
+    if (m.send && !send) {
+        m.send_stop_ms = now_ms32() | 1;
+    } else if (!m.send && send && m.rtp && m.send_stop_ms) {
+        rtp_tx_resume(m.rtp, now_ms32() - m.send_stop_ms);  /* hold -> resume: ts follows the clock, M=1 */
+        m.send_stop_ms = 0;
     }
     m.send = send;
     m.play = play;
@@ -352,6 +360,7 @@ void phone_media_update(const sip_media_info_t *mi)
             .jb_max_ms = JB_MAX_MS,
         };
         m.rtp = rtp_session_create(&cfg);
+        m.send_stop_ms = 0;
         m.pt = mi->payload_type;
         m.dtmf_pt = dtmf_pt;
         m.tx_errors = 0;
@@ -469,7 +478,13 @@ void phone_media_audio(bool stream, phone_tone_t tone)
         }
     }
     if (tone != m.tone) {
-        audio_play_tone(to_audio_tone(tone));   /* auto-starts the stream if needed */
+        if (tone == PHONE_TONE_RING) {
+            settings_t cfg;
+            settings_get(&cfg);
+            audio_play_ringtone(cfg.ring_tone);     /* selected ringtone, at the ring volume */
+        } else {
+            audio_play_tone(to_audio_tone(tone));   /* auto-starts the stream if needed */
+        }
         m.tone = tone;
         m.running = true;
     }

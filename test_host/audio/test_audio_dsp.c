@@ -141,6 +141,41 @@ static int find_runs(dsp_tone_kind_t kind, int total_ms, int *runs, int max_runs
     return nruns;
 }
 
+static void test_ringtones_sound_and_pause(void)
+{
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(5, dsp_ringtone_count());
+    TEST_ASSERT_NULL(dsp_ringtone_name(dsp_ringtone_count()));
+    size_t n = (size_t)6000 * FS16 / 1000;
+    int32_t *acc = malloc(n * sizeof(int32_t));
+    TEST_ASSERT_NOT_NULL(acc);
+    for (int i = -1; i <= dsp_ringtone_count(); i++) {      /* -1 and count: fall back to 0 */
+        dsp_tone_t t;
+        dsp_tone_init(&t, FS16);
+        dsp_tone_start_ringtone(&t, i);
+        memset(acc, 0, n * sizeof(int32_t));
+        dsp_tone_add(&t, acc, n);
+        int on = 0, off = 0, peak = 0;
+        for (size_t b = 0; b + 160 <= n; b += 160) {         /* 10 ms blocks */
+            int p = 0;
+            for (size_t k = b; k < b + 160; k++) {
+                int a = abs((int)acc[k]);
+                p = a > p ? a : p;
+            }
+            peak = p > peak ? p : peak;
+            if (p > 2000) {
+                on++;
+            } else {
+                off++;
+            }
+        }
+        TEST_ASSERT_GREATER_THAN_INT(20, on);                /* audible */
+        TEST_ASSERT_GREATER_THAN_INT(100, off);              /* with a pause */
+        TEST_ASSERT_LESS_THAN_INT(32768, peak);
+        TEST_ASSERT_TRUE(dsp_tone_active(&t));
+    }
+    free(acc);
+}
+
 static void test_tone_cadence_ringback(void)
 {
     int runs[8];
@@ -440,6 +475,7 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_tone_single_frequency);
     RUN_TEST(test_tone_dial_components);
+    RUN_TEST(test_ringtones_sound_and_pause);
     RUN_TEST(test_tone_cadence_ringback);
     RUN_TEST(test_tone_cadence_busy);
     RUN_TEST(test_tone_cadence_ring);

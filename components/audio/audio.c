@@ -45,6 +45,7 @@ typedef enum {
     REQ_NONE,
     REQ_TONE,
     REQ_DTMF,
+    REQ_RINGTONE,                   /* index in req_digit */
 } tone_req_kind_t;
 
 static struct {
@@ -218,6 +219,8 @@ static void tone_poll(dsp_tone_t *t)
 
     if (kind == REQ_DTMF) {
         dsp_tone_start_dtmf(t, digit);
+    } else if (kind == REQ_RINGTONE) {
+        dsp_tone_start_ringtone(t, (uint8_t)digit);
     } else if (kind == REQ_TONE) {
         switch (tone) {
         case AUDIO_TONE_DIAL:     dsp_tone_start(t, DSP_TONE_DIAL); break;
@@ -600,6 +603,29 @@ static void tone_request(tone_req_kind_t kind, audio_tone_t tone, char digit)
 void audio_play_tone(audio_tone_t tone)
 {
     tone_request(REQ_TONE, tone, 0);
+}
+
+int audio_ringtone_count(void)
+{
+    return dsp_ringtone_count();
+}
+
+const char *audio_ringtone_name(int idx)
+{
+    return dsp_ringtone_name(idx);
+}
+
+void audio_play_ringtone(int idx)
+{
+    if (idx < 0 || idx >= dsp_ringtone_count()) {
+        idx = 0;
+    }
+    tone_request(REQ_RINGTONE, AUDIO_TONE_NONE, (char)idx);
+}
+
+void audio_stop_ringtone(void)
+{
+    audio_play_tone(AUDIO_TONE_NONE);
 }
 
 void audio_play_dtmf(char digit)

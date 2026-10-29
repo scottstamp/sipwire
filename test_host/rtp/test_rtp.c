@@ -1251,6 +1251,128 @@ void test_timestamp_gap_silence_suppression(void)
     rtp_session_destroy(rx);
 }
 
+/* ---- tests: hold / resume ---------------------------------------------- */
+
+static uint16_t pkt_seq(const uint8_t *p);
+static uint32_t pkt_ts(const uint8_t *p);
+
+void test_tx_resume_advances_ts_and_marks(void)
+{
+    rtp_config_t cfg = make_cfg(0);
+    rtp_session_t *tx = rtp_session_create(&cfg);
+    uint8_t p[RTP_MAX_PACKET];
+    int16_t pcm[RTP_FRAME_SAMPLES];
+    gen_frame(1, pcm);
+    for (int i = 0; i < 5; i++) {
+        rtp_build_audio(tx, pcm, p, sizeof(p));
+    }
+    uint32_t ts = pkt_ts(p);
+    uint16_t seq = pkt_seq(p);
+    rtp_tx_resume(tx, 1000);                        /* 1 s pause */
+    rtp_build_audio(tx, pcm, p, sizeof(p));
+    TEST_ASSERT_EQUAL_UINT16(seq + 1, pkt_seq(p));  /* sequence contiguous */
+    TEST_ASSERT_EQUAL_UINT32(ts + 1000 * 8, pkt_ts(p));   /* sampling clock */
+    TEST_ASSERT_TRUE(p[1] & 0x80);                  /* talkspurt start */
+    ts = pkt_ts(p);
+    rtp_build_audio(tx, pcm, p, sizeof(p));
+    TEST_ASSERT_EQUAL_UINT32(ts + RTP_FRAME_TS, pkt_ts(p));
+    TEST_ASSERT_FALSE(p[1] & 0x80);                 /* only the first one */
+    ts = pkt_ts(p);
+    rtp_tx_resume(tx, 0);                           /* no real gap: ts contiguous, still marked */
+    rtp_build_audio(tx, pcm, p, sizeof(p));
+    TEST_ASSERT_EQUAL_UINT32(ts + RTP_FRAME_TS, pkt_ts(p));
+    TEST_ASSERT_TRUE(p[1] & 0x80);
+    rtp_session_destroy(tx);
+}
+
+/* Receiver after the peer's hold: gap_ms of timestamp jump, sequence contiguous. */
+static void run_remote_hold(uint8_t pt, uint32_t gap_ms)
+{
+    rtp_config_t cfg = make_cfg(pt);
+    rtp_session_t *tx = rtp_session_create(&cfg);
+    rtp_session_t *rx = rtp_session_create(&cfg);
+    uint8_t p[RTP_MAX_PACKET];
+    int16_t pcm[RTP_FRAME_SAMPLES], out[RTP_FRAME_SAMPLES], e[RTP_FRAME_SAMPLES];
+    uint32_t t = 0;
+    for (uint32_t k = 0; k < 20; k++, t += 20) {
+        gen_frame(k, pcm);
+        size_t n = rtp_build_audio(tx, pcm, p, sizeof(p));
+        rtp_on_packet(rx, p, n, t);
+        rtp_pull_frame(rx, out, t + 10);
+    }
+    uint32_t gap_frames = gap_ms / 20;
+    for (uint32_t k = 0; k < gap_frames; k++, t += 20) {   /* peer silent, we keep pulling */
+        rtp_pull_frame(rx, out, t + 10);
+    }
+    rtp_tx_resume(tx, gap_ms);
+    int real = 0;
+    uint32_t kk = 1000;
+    for (uint32_t i = 0; i < 40; i++, t += 20, kk++) {
+        gen_frame(kk, pcm);
+        size_t n = rtp_build_audio(tx, pcm, p, sizeof(p));
+        rtp_on_packet(rx, p, n, t);
+        rtp_pull_frame(rx, out, t + 10);
+        for (uint32_t d = 0; d < 8; d++) {
+            expected_frame(pt, kk - d, e);
+            if (frames_match(out, e)) {
+                real++;
+                break;
+            }
+        }
+    }
+    TEST_ASSERT_GREATER_THAN_INT(28, real);
+    rtp_stats_t st;
+    rtp_get_stats(rx, &st);
+    TEST_ASSERT_EQUAL_UINT32(0, st.rx_late);
+    TEST_ASSERT_EQUAL_UINT32(0, st.rx_lost);        /* a pause is not loss */
+    rtp_session_destroy(tx);
+    rtp_session_destroy(rx);
+}
+
+void test_rx_resync_after_remote_hold_short(void) { run_remote_hold(0, 400); }
+void test_rx_resync_after_remote_hold_long(void) { run_remote_hold(0, 8000); }
+
+/* The peer's media timeline restarts (same SSRC, new seq and timestamp base,
+ * e.g. a re-INVITE that re-created its session): resync within a few frames. */
+void test_rx_resync_after_remote_timeline_jump(void)
+{
+    rtp_config_t cfg = make_cfg(0);
+    rtp_config_t cfg2 = cfg;
+    cfg2.initial_seq = 30000;
+    cfg2.initial_ts = 50000 - 400000;               /* far behind */
+    rtp_session_t *tx = rtp_session_create(&cfg);
+    rtp_session_t *tx2 = rtp_session_create(&cfg2);
+    rtp_session_t *rx = rtp_session_create(&cfg);
+    uint8_t p[RTP_MAX_PACKET];
+    int16_t pcm[RTP_FRAME_SAMPLES], out[RTP_FRAME_SAMPLES], e[RTP_FRAME_SAMPLES];
+    uint32_t t = 0;
+    for (uint32_t k = 0; k < 20; k++, t += 20) {
+        gen_frame(k, pcm);
+        size_t n = rtp_build_audio(tx, pcm, p, sizeof(p));
+        rtp_on_packet(rx, p, n, t);
+        rtp_pull_frame(rx, out, t + 10);
+    }
+    int real = 0;
+    uint32_t kk = 1000;
+    for (uint32_t i = 0; i < 40; i++, t += 20, kk++) {
+        gen_frame(kk, pcm);
+        size_t n = rtp_build_audio(tx2, pcm, p, sizeof(p));
+        rtp_on_packet(rx, p, n, t);
+        rtp_pull_frame(rx, out, t + 10);
+        for (uint32_t d = 0; d < 8; d++) {
+            expected_frame(0, kk - d, e);
+            if (frames_match(out, e)) {
+                real++;
+                break;
+            }
+        }
+    }
+    TEST_ASSERT_GREATER_THAN_INT(28, real);
+    rtp_session_destroy(tx);
+    rtp_session_destroy(tx2);
+    rtp_session_destroy(rx);
+}
+
 /* ---- tests: SSRC ------------------------------------------------------ */
 
 static void feed_and_pull(rtp_session_t *rx, const uint8_t *p, size_t n, uint32_t t,
@@ -1926,6 +2048,10 @@ int main(void)
     RUN_TEST(test_clock_drift_receiver_slow);
     RUN_TEST(test_burst_after_stall_resyncs);
     RUN_TEST(test_timestamp_gap_silence_suppression);
+    RUN_TEST(test_tx_resume_advances_ts_and_marks);
+    RUN_TEST(test_rx_resync_after_remote_hold_short);
+    RUN_TEST(test_rx_resync_after_remote_hold_long);
+    RUN_TEST(test_rx_resync_after_remote_timeline_jump);
     RUN_TEST(test_ssrc_switch_after_three_packets);
     RUN_TEST(test_ssrc_stray_packets_are_ignored);
     RUN_TEST(test_ssrc_stray_does_not_disturb_stream);

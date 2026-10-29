@@ -60,6 +60,12 @@ void rtp_session_destroy(rtp_session_t *s);
 size_t rtp_build_audio(rtp_session_t *s, const int16_t pcm[RTP_FRAME_SAMPLES],
                        uint8_t *out, size_t out_cap);
 
+/** Call when audio sending resumes after a pause in which rtp_build_audio()
+ *  was not called (hold): `gap_ms` = time since the last packet was built.
+ *  Advances the timestamp by the wall-clock gap (sequence stays contiguous)
+ *  and sets the marker bit on the next audio packet. See rtp.c. */
+void rtp_tx_resume(rtp_session_t *s, uint32_t gap_ms);
+
 /** Start an RFC 4733 event (digit '0'-'9','*','#','A'-'D'). Subsequent
  *  rtp_build_audio() calls emit event packets instead of audio for
  *  `duration_ms`, then 3 end packets. Returns false if busy or disabled. */

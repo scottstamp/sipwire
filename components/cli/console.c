@@ -67,6 +67,8 @@ static const field_t s_fields[] = {
     FIELD(ring_volume, F_U8, 0, 100),
     FIELD(call_volume, F_U8, 0, 100),
     FIELD(mic_gain, F_U8, 0, 100),
+    FIELD(speaker_volume, F_U8, 0, 100),
+    FIELD(ring_tone, F_U8, 0, 31),
     FIELD(aec, F_BOOL, 0, 1),
     FIELD(aec_suppress, F_U8, 0, SETTINGS_AEC_SUPPRESS_MAX),
     FIELD(aec_suppress_act, F_U8, 0, SETTINGS_AEC_SUPPRESS_MAX),
