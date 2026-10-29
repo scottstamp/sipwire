@@ -58,6 +58,8 @@ static const field_t s_fields[] = {
     STR_FIELD(sip_display_name, F_STR),
     FIELD(sip_reg_expires, F_U32, 0, UINT32_MAX),
     STR_FIELD(codec_pref, F_STR),
+    STR_FIELD(blf, F_STR),
+    STR_FIELD(vm_number, F_STR),
     FIELD(ring_volume, F_U8, 0, 100),
     FIELD(call_volume, F_U8, 0, 100),
     FIELD(mic_gain, F_U8, 0, 100),
@@ -315,7 +317,8 @@ esp_err_t console_register_command(const esp_console_cmd_t *cmd)
 esp_err_t console_start(void)
 {
     static const esp_console_cmd_t cmds[] = {
-        { .command = "cfg", .help = "Show/change settings, e.g. `cfg set sip_server 192.168.1.10`",
+        { .command = "cfg", .help = "Show/change settings, e.g. `cfg set sip_server 192.168.1.10`, "
+                                    "`cfg set blf \"1002:Bob,1003:Front desk\"`",
           .hint = "show | set <key> [value] | reset", .func = cmd_cfg },
         { .command = "wifi", .help = "Save wifi credentials and (re)connect",
           .hint = "<ssid> [pass]", .func = cmd_wifi },

@@ -10,6 +10,7 @@
  *   registering     amber, blink 500/500 ms
  *   reg failed      red,   solid
  *   registered      green, 100 ms pulse every 5 s
+ *   ...+ voicemail  amber 150 ms, blue 150 ms 250 ms later, every 3 s
  *   not registered  amber, 100 ms pulse every 5 s (no account configured) */
 
 typedef struct {
@@ -24,6 +25,17 @@ typedef struct {
 #define CYAN  { 0, 200, 255 }
 #define AMBER { 255, 120, 0 }
 #define WHITE { 255, 255, 255 }
+
+#define MWI_PERIOD_MS 3000u
+#define MWI_PULSE_MS  150u
+#define MWI_SECOND_MS 400u   /* start of the second (blue) pulse */
+
+/* Idle with voicemail waiting: a slow amber/blue double pulse. */
+static bool mwi_idle(const sl_state_t *st)
+{
+    return st->mwi && st->call == SL_CALL_IDLE && !st->booting && st->net == SL_NET_UP &&
+           st->reg == SL_REG_REGISTERED;
+}
 
 static pattern_t select(const sl_state_t *st)
 {
@@ -56,6 +68,16 @@ static uint8_t scale(uint8_t v, uint8_t max_level)
 
 sl_rgb_t sl_pattern(const sl_state_t *st, uint32_t now_ms, uint8_t max_level)
 {
+    if (mwi_idle(st)) {
+        uint32_t t = now_ms % MWI_PERIOD_MS;
+        sl_rgb_t c = { 0, 0, 0 };
+        if (t < MWI_PULSE_MS) {
+            c = (sl_rgb_t)AMBER;
+        } else if (t >= MWI_SECOND_MS && t < MWI_SECOND_MS + MWI_PULSE_MS) {
+            c = (sl_rgb_t)BLUE;
+        }
+        return (sl_rgb_t){ scale(c.r, max_level), scale(c.g, max_level), scale(c.b, max_level) };
+    }
     pattern_t p = select(st);
     if (p.period_ms != 0 && now_ms % p.period_ms >= p.on_ms) {
         return (sl_rgb_t){ 0, 0, 0 };

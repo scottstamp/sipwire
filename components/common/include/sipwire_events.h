@@ -13,6 +13,7 @@ ESP_EVENT_DECLARE_BASE(SIPWIRE_CALL_EVENT);
 ESP_EVENT_DECLARE_BASE(SIPWIRE_KEY_EVENT);
 ESP_EVENT_DECLARE_BASE(SIPWIRE_SETTINGS_EVENT);
 ESP_EVENT_DECLARE_BASE(SIPWIRE_OTA_EVENT);
+ESP_EVENT_DECLARE_BASE(SIPWIRE_BLF_EVENT);
 
 /* SIPWIRE_NET_EVENT */
 typedef enum {
@@ -31,9 +32,10 @@ typedef struct {
     uint8_t reason;            /* wifi_err_reason_t */
 } net_event_disc_t;
 
-/* SIPWIRE_SIP_EVENT — registration */
+/* SIPWIRE_SIP_EVENT — registration, message waiting (emitted by phone) */
 typedef enum {
     SIP_EVENT_REG_STATE,       /* sip_event_reg_t */
+    SIP_EVENT_MWI,             /* sip_event_mwi_t, when it changes */
 } sip_event_id_t;
 
 typedef enum {
@@ -47,6 +49,13 @@ typedef struct {
     sip_reg_state_t state;
     int status_code;           /* last SIP response, 0 if none / timeout */
 } sip_event_reg_t;
+
+typedef struct {
+    bool known;                /* false: no MWI information (yet / any more) */
+    bool waiting;              /* Messages-Waiting: yes */
+    uint16_t new_msgs;         /* new voice messages (capped at 9999) */
+    uint16_t old_msgs;
+} sip_event_mwi_t;
 
 /* SIPWIRE_CALL_EVENT — call lifecycle (emitted by phone) */
 typedef enum {
@@ -104,3 +113,23 @@ typedef struct {
     int32_t err;               /* esp_err_t */
     char reason[64];           /* short human readable cause */
 } ota_event_failed_t;
+
+/* SIPWIRE_BLF_EVENT — busy lamp field (emitted by phone). Entries follow the
+ * `blf` setting (sipwire_blf.h), index 0..SIPWIRE_BLF_MAX-1. After the list
+ * changes every entry is posted once (with its current state). */
+typedef enum {
+    BLF_EVENT_STATE,           /* blf_event_state_t */
+} blf_event_id_t;
+
+typedef enum {
+    BLF_UNKNOWN,               /* not subscribed (yet), refused or failed */
+    BLF_IDLE,
+    BLF_RINGING,
+    BLF_BUSY,
+} blf_state_t;
+
+typedef struct {
+    uint8_t index;
+    char ext[32];              /* SIPWIRE_BLF_EXT_MAX */
+    blf_state_t state;
+} blf_event_state_t;

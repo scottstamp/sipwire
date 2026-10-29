@@ -166,6 +166,38 @@ static int cmd_rtp(int argc, char **argv)
     return 0;
 }
 
+static int cmd_blf(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    static phone_status_t st;           /* console task only; keeps the stack small */
+    phone_get_status(&st);
+    if (st.blf_count == 0) {
+        printf("no BLF keys (cfg set blf \"1002:Bob,1003\")\n");
+        return 0;
+    }
+    for (int i = 0; i < st.blf_count; i++) {
+        printf("blf %d: %-8s %-12s %s\n", i + 1, st.blf[i].ext, st.blf[i].label[0] ? st.blf[i].label : "-",
+               phone_blf_state_name(st.blf[i].state));
+    }
+    return 0;
+}
+
+static int cmd_mwi(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    static phone_status_t st;           /* console task only */
+    phone_get_status(&st);
+    if (!st.mwi.known) {
+        printf("mwi: unknown\n");
+    } else {
+        printf("mwi: %s, %u new, %u old\n", st.mwi.waiting ? "waiting" : "none", (unsigned)st.mwi.new_msgs,
+               (unsigned)st.mwi.old_msgs);
+    }
+    return 0;
+}
+
 esp_err_t phone_console_register(void)
 {
     static const esp_console_cmd_t cmds[] = {
@@ -182,6 +214,8 @@ esp_err_t phone_console_register(void)
         { .command = "vol", .help = "Show/set the current output volume", .hint = "[0-100]", .func = cmd_vol },
         { .command = "sip", .help = "SIP registration and call status", .func = cmd_sip },
         { .command = "rtp", .help = "RTP statistics of the current/last call", .func = cmd_rtp },
+        { .command = "blf", .help = "BLF keys (setting blf) and their state", .func = cmd_blf },
+        { .command = "mwi", .help = "Message waiting (voicemail) state", .func = cmd_mwi },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         ESP_RETURN_ON_ERROR(console_register_command(&cmds[i]), TAG, "register %s", cmds[i].command);

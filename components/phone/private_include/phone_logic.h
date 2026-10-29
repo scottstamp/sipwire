@@ -9,6 +9,8 @@
 #include <stdint.h>
 
 #include "sip_ua.h"
+#include "sipwire_blf.h"
+#include "sipwire_events.h"
 
 /* ---- tones -------------------------------------------------------------- */
 
@@ -125,3 +127,18 @@ typedef enum {
 /** Which volume is "current" (applied to the output, changed by +/-).
  *  Idle and ringing → ring volume; any call state → call or speaker volume. */
 phone_vol_kind_t phone_volume_kind(sip_ua_call_state_t state, bool speaker);
+
+/* ---- BLF ---------------------------------------------------------------------- */
+
+/** Event-level state for a UA BLF state. */
+blf_state_t phone_blf_map(sip_blf_state_t st);
+
+/** The `blf` list changed from `old` to `nw`: keep[i] is the index in `old`
+ *  of the entry with the same extension as nw[i] (its subscription and state
+ *  carry over, only the label may differ), or -1 (subscribe anew). Returns a
+ *  bit mask of the old indices to unsubscribe (extension no longer listed). */
+uint32_t phone_blf_plan(const sipwire_blf_entry_t *old, int n_old, const sipwire_blf_entry_t *nw, int n_new,
+                        int keep[SIPWIRE_BLF_MAX]);
+
+/** Short name for logs and the console: "unknown", "idle", "ringing", "busy". */
+const char *phone_blf_state_name(blf_state_t st);

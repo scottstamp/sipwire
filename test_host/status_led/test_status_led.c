@@ -76,9 +76,52 @@ static void test_brightness_scaling(void)
     TEST_ASSERT_TRUE(is_off(sl_pattern(&st, 0, 0)));
 }
 
+static void test_mwi_double_pulse_when_idle(void)
+{
+    sl_state_t st = idle_registered();
+    st.mwi = true;
+    sl_rgb_t a = sl_pattern(&st, 3000 + 50, 255);      /* first pulse: amber */
+    TEST_ASSERT_EQUAL(255, a.r);
+    TEST_ASSERT_EQUAL(120, a.g);
+    TEST_ASSERT_EQUAL(0, a.b);
+    TEST_ASSERT_TRUE(is_off(sl_pattern(&st, 3000 + 250, 255)));
+    sl_rgb_t b = sl_pattern(&st, 3000 + 450, 255);      /* second pulse: blue */
+    TEST_ASSERT_EQUAL(0, b.r);
+    TEST_ASSERT_EQUAL(255, b.b);
+    for (uint32_t t = 600; t < 3000; t += 100) {
+        TEST_ASSERT_TRUE(is_off(sl_pattern(&st, 3000 + t, 255)));
+    }
+    /* differs from the plain registered heartbeat (green at 0-100 ms of 5 s) */
+    st.mwi = false;
+    TEST_ASSERT_EQUAL(255, sl_pattern(&st, 50, 255).g);
+    TEST_ASSERT_EQUAL(40, sl_pattern(&(sl_state_t){ .net = SL_NET_UP, .reg = SL_REG_REGISTERED, .mwi = true },
+                                     10, 40).r);
+}
+
+static void test_mwi_does_not_override_calls_or_faults(void)
+{
+    sl_state_t st = idle_registered();
+    st.mwi = true;
+    st.call = SL_CALL_INCOMING;          /* incoming: fast blue */
+    TEST_ASSERT_EQUAL(255, sl_pattern(&st, 0, 255).b);
+    TEST_ASSERT_TRUE(is_off(sl_pattern(&st, 200, 255)));
+    st.call = SL_CALL_ACTIVE;            /* active: solid green */
+    TEST_ASSERT_EQUAL(255, sl_pattern(&st, 1000, 255).g);
+    st.call = SL_CALL_IDLE;
+    st.reg = SL_REG_FAILED;              /* registration failed: solid red */
+    TEST_ASSERT_EQUAL(255, sl_pattern(&st, 1000, 255).r);
+    st.reg = SL_REG_REGISTERED;
+    st.net = SL_NET_DOWN;                /* no network: red blink */
+    sl_rgb_t c = sl_pattern(&st, 100, 255);
+    TEST_ASSERT_EQUAL(255, c.r);
+    TEST_ASSERT_EQUAL(0, c.g);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_mwi_double_pulse_when_idle);
+    RUN_TEST(test_mwi_does_not_override_calls_or_faults);
     RUN_TEST(test_booting_white_solid);
     RUN_TEST(test_no_network_red_blink);
     RUN_TEST(test_registered_heartbeat);

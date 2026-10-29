@@ -15,6 +15,7 @@ static const char *TAG = "storage";
 #define NVS_NAMESPACE "sipwire"
 #define POST_TIMEOUT pdMS_TO_TICKS(100)
 #define CODEC_PREF_DEFAULT "g722,pcmu,pcma"
+#define VM_NUMBER_DEFAULT "*97"
 
 /* Defaults live in main/Kconfig.projbuild (the fallbacks only matter if it is not part of the build). */
 #ifndef CONFIG_SIPWIRE_NTP_SERVER
@@ -40,6 +41,8 @@ static const char *TAG = "storage";
 #define K_SIP_NAME    "sip_disp_name"
 #define K_SIP_EXPIRES "sip_reg_exp"
 #define K_CODEC_PREF  "codec_pref"
+#define K_BLF         "blf"
+#define K_VM_NUMBER   "vm_number"
 #define K_RING_VOL    "ring_vol"
 #define K_CALL_VOL    "call_vol"
 #define K_MIC_GAIN    "mic_gain"
@@ -65,6 +68,7 @@ static void settings_defaults(settings_t *s)
     s->sip_transport = SIP_TRANSPORT_UDP;
     s->sip_reg_expires = 300;
     strcpy(s->codec_pref, CODEC_PREF_DEFAULT);
+    strcpy(s->vm_number, VM_NUMBER_DEFAULT);
     s->ring_volume = 70;
     s->call_volume = 60;
     s->mic_gain = 50;
@@ -120,6 +124,12 @@ static void load_all(nvs_handle_t h, settings_t *s)
         strcpy(s->codec_pref, CODEC_PREF_DEFAULT);  /* key added after release: keep the default */
     }
 
+    load_str_or_keep(h, K_BLF, s->blf, sizeof(s->blf));
+    load_str_or_keep(h, K_VM_NUMBER, s->vm_number, sizeof(s->vm_number));
+    if (sipwire_blf_parse(s->blf, NULL, SIPWIRE_BLF_MAX) < 0) {
+        ESP_LOGW(TAG, "stored blf list invalid, ignored");
+        s->blf[0] = '\0';
+    }
     load_str_or_keep(h, K_NTP_SERVER, s->ntp_server, sizeof(s->ntp_server));
     load_str_or_keep(h, K_TZ, s->tz, sizeof(s->tz));
     load_str_or_keep(h, K_OTA_URL, s->ota_url, sizeof(s->ota_url));
@@ -173,6 +183,8 @@ static esp_err_t validate(const settings_t *s)
                         str_ok(s->sip_password, sizeof(s->sip_password)) &&
                         str_ok(s->sip_display_name, sizeof(s->sip_display_name)) &&
                         str_ok(s->codec_pref, sizeof(s->codec_pref)) &&
+                        str_ok(s->blf, sizeof(s->blf)) &&
+                        str_ok(s->vm_number, sizeof(s->vm_number)) &&
                         str_ok(s->ntp_server, sizeof(s->ntp_server)) &&
                         str_ok(s->tz, sizeof(s->tz)) &&
                         str_ok(s->ota_url, sizeof(s->ota_url)),
@@ -180,6 +192,8 @@ static esp_err_t validate(const settings_t *s)
     ESP_RETURN_ON_FALSE(s->ntp_server[0] != '\0' && s->tz[0] != '\0', ESP_ERR_INVALID_ARG, TAG,
                         "ntp_server and tz must not be empty");
     ESP_RETURN_ON_FALSE(s->sip_port != 0, ESP_ERR_INVALID_ARG, TAG, "sip_port is 0");
+    ESP_RETURN_ON_FALSE(sipwire_blf_parse(s->blf, NULL, SIPWIRE_BLF_MAX) >= 0, ESP_ERR_INVALID_ARG, TAG,
+                        "blf: up to %d entries ext[:label], comma separated, no repeats", SIPWIRE_BLF_MAX);
     ESP_RETURN_ON_FALSE((unsigned)s->sip_transport <= SIP_TRANSPORT_TCP, ESP_ERR_INVALID_ARG, TAG,
                         "bad sip_transport");
     ESP_RETURN_ON_FALSE(s->ring_volume <= 100 && s->call_volume <= 100 && s->mic_gain <= 100 &&
@@ -213,6 +227,8 @@ static esp_err_t store_changed(nvs_handle_t h, const settings_t *in)
     STORE_STR(K_SIP_PASS, sip_password);
     STORE_STR(K_SIP_NAME, sip_display_name);
     STORE_STR(K_CODEC_PREF, codec_pref);
+    STORE_STR(K_BLF, blf);
+    STORE_STR(K_VM_NUMBER, vm_number);
     STORE_STR(K_NTP_SERVER, ntp_server);
     STORE_STR(K_TZ, tz);
     STORE_STR(K_OTA_URL, ota_url);

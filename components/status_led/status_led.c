@@ -64,6 +64,9 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         } else if (id == NET_EVENT_DISCONNECTED) {
             s.st.net = SL_NET_DOWN;
         }
+    } else if (base == SIPWIRE_SIP_EVENT && id == SIP_EVENT_MWI && data) {
+        const sip_event_mwi_t *m = data;
+        s.st.mwi = m->known && m->waiting;
     } else if (base == SIPWIRE_SIP_EVENT && id == SIP_EVENT_REG_STATE && data) {
         switch (((const sip_event_reg_t *)data)->state) {
         case SIP_REG_REGISTERING: s.st.reg = SL_REG_REGISTERING; break;

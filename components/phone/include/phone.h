@@ -12,7 +12,15 @@
  *   callbacks every 20 ms while a call has media.
  *
  * Events (default loop): SIPWIRE_SIP_EVENT / SIP_EVENT_REG_STATE and
- * SIPWIRE_CALL_EVENT / CALL_EVENT_STATE (see sipwire_events.h).
+ * SIP_EVENT_MWI, SIPWIRE_CALL_EVENT / CALL_EVENT_STATE and SIPWIRE_BLF_EVENT /
+ * BLF_EVENT_STATE (see sipwire_events.h).
+ *
+ * BLF and MWI: the UA subscribes to every extension of the `blf` setting
+ * ("dialog" package) and to our own mailbox ("message-summary") as soon as it
+ * is registered; Asterisk's unsolicited MWI NOTIFYs count as well. A changed
+ * `blf` list is applied live (removed extensions are unsubscribed, new ones
+ * subscribed, kept ones keep their state). States are UNKNOWN until the
+ * first NOTIFY and again whenever the UA is rebuilt or a subscription fails.
  *
  * ENDED → IDLE: the phone owns this timer. After a call ends the state stays
  * CALL_ENDED for 2 s (3 s while the busy tone plays after a 486/600/603 to
@@ -28,6 +36,7 @@
 
 #include "esp_err.h"
 #include "rtp.h"
+#include "sipwire_blf.h"
 #include "sipwire_events.h"
 
 typedef struct {
@@ -57,11 +66,20 @@ typedef struct {
     uint16_t rtp_local_port;
     rtp_stats_t rtp;
     uint32_t rtp_tx_errors;         /* sendto failures */
+
+    /* BLF keys (settings `blf`, in order) and message waiting */
+    uint8_t blf_count;
+    struct {
+        char ext[SIPWIRE_BLF_EXT_MAX];
+        char label[SIPWIRE_BLF_LABEL_MAX];
+        blf_state_t state;
+    } blf[SIPWIRE_BLF_MAX];
+    sip_event_mwi_t mwi;
 } phone_status_t;
 
 /** Start the sip and rtp_rx tasks, register event handlers and the console
  *  commands (call, answer, hangup, reject, dtmf, hold, resume, mute, unmute,
- *  vol, sip, rtp). Call after settings_init, net_init and audio_init. */
+ *  vol, sip, rtp, blf, mwi). Call after settings_init, net_init and audio_init. */
 esp_err_t phone_init(void);
 
 /** Dial a number / user part or full "sip:" URI. ESP_ERR_INVALID_ARG for an

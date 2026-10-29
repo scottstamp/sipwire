@@ -99,6 +99,11 @@ static struct {
     int end_code;
     uint64_t ended_until;
     phone_dtmf_seq_t dtmf;
+    /* BLF: the parsed `blf` setting and one subscription per entry */
+    char blf_list[SIPWIRE_BLF_LIST_MAX];
+    sipwire_blf_entry_t blf[SIPWIRE_BLF_MAX];
+    int blf_n;
+    sip_sub_handle_t blf_h[SIPWIRE_BLF_MAX];
 } s = {
     .udp = { .fd = -1 },
 };
@@ -328,6 +333,140 @@ static void go_idle(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* BLF / MWI state (sip task)                                         */
+/* ------------------------------------------------------------------ */
+
+static void post_blf(int i)
+{
+    blf_event_state_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.index = (uint8_t)i;
+    st_lock();
+    strlcpy(ev.ext, s.st.blf[i].ext, sizeof(ev.ext));
+    ev.state = s.st.blf[i].state;
+    st_unlock();
+    esp_err_t err = esp_event_post(SIPWIRE_BLF_EVENT, BLF_EVENT_STATE, &ev, sizeof(ev), EVENT_POST_TIMEOUT);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "post blf event: %s", esp_err_to_name(err));
+    }
+}
+
+static void set_blf_state(int i, blf_state_t st)
+{
+    st_lock();
+    bool changed = s.st.blf[i].state != st;
+    s.st.blf[i].state = st;
+    st_unlock();
+    if (changed) {
+        ESP_LOGI(TAG, "blf %s%s%s%s: %s", s.blf[i].ext, s.blf[i].label[0] ? " (" : "", s.blf[i].label,
+                 s.blf[i].label[0] ? ")" : "", phone_blf_state_name(st));
+        post_blf(i);
+    }
+}
+
+static void set_mwi(const sip_event_mwi_t *m)
+{
+    st_lock();
+    bool changed = memcmp(&s.st.mwi, m, sizeof(*m)) != 0;
+    s.st.mwi = *m;
+    st_unlock();
+    if (!changed) {
+        return;
+    }
+    if (m->known) {
+        ESP_LOGI(TAG, "mwi: %s, %u new / %u old voice messages", m->waiting ? "waiting" : "none",
+                 (unsigned)m->new_msgs, (unsigned)m->old_msgs);
+    }
+    esp_err_t err = esp_event_post(SIPWIRE_SIP_EVENT, SIP_EVENT_MWI, m, sizeof(*m), EVENT_POST_TIMEOUT);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "post mwi event: %s", esp_err_to_name(err));
+    }
+}
+
+static void blf_subscribe(int i)
+{
+    s.blf_h[i] = 0;
+    if (s.ua == NULL || s.closing) {
+        return;                         /* subscribed when the UA is (re)built */
+    }
+    sip_err_t err = sip_ua_subscribe_blf(s.ua, s.blf[i].ext, &s.blf_h[i]);
+    if (err != SIP_OK) {
+        s.blf_h[i] = 0;
+        ESP_LOGW(TAG, "blf %s: cannot subscribe: %s", s.blf[i].ext, esp_err_to_name(map_sip_err(err)));
+    }
+}
+
+/* New UA: every entry and the mailbox from scratch. */
+static void subscribe_all(void)
+{
+    for (int i = 0; i < s.blf_n; i++) {
+        blf_subscribe(i);
+    }
+    sip_err_t err = sip_ua_subscribe_mwi(s.ua, NULL);
+    if (err != SIP_OK) {
+        ESP_LOGW(TAG, "mwi: cannot subscribe: %s", esp_err_to_name(map_sip_err(err)));
+    }
+}
+
+/* The UA is gone: no subscriptions, nothing known. */
+static void blf_mwi_reset(void)
+{
+    for (int i = 0; i < s.blf_n; i++) {
+        s.blf_h[i] = 0;
+        set_blf_state(i, BLF_UNKNOWN);
+    }
+    const sip_event_mwi_t none = { 0 };
+    set_mwi(&none);
+}
+
+/* Apply a (possibly) changed `blf` setting: unsubscribe removed extensions,
+ * subscribe new ones, keep the rest (labels may change). */
+static void blf_apply(const char *list)
+{
+    if (strcmp(list, s.blf_list) == 0) {
+        return;
+    }
+    strlcpy(s.blf_list, list, sizeof(s.blf_list));
+    static sipwire_blf_entry_t nw[SIPWIRE_BLF_MAX];     /* sip task only */
+    int n = sipwire_blf_parse(list, nw, SIPWIRE_BLF_MAX);
+    if (n < 0) {
+        ESP_LOGW(TAG, "blf setting \"%s\" is invalid, no BLF keys", list);
+        n = 0;
+    }
+    int keep[SIPWIRE_BLF_MAX];
+    uint32_t drop = phone_blf_plan(s.blf, s.blf_n, nw, n, keep);
+    for (int k = 0; k < s.blf_n; k++) {
+        if ((drop & (1u << k)) && s.ua && s.blf_h[k]) {
+            sip_ua_unsubscribe(s.ua, s.blf_h[k]);
+        }
+    }
+    sip_sub_handle_t h[SIPWIRE_BLF_MAX];
+    blf_state_t st[SIPWIRE_BLF_MAX];
+    st_lock();
+    for (int i = 0; i < n; i++) {
+        h[i] = keep[i] >= 0 ? s.blf_h[keep[i]] : 0;
+        st[i] = keep[i] >= 0 ? s.st.blf[keep[i]].state : BLF_UNKNOWN;
+    }
+    for (int i = 0; i < n; i++) {
+        strlcpy(s.st.blf[i].ext, nw[i].ext, sizeof(s.st.blf[i].ext));
+        strlcpy(s.st.blf[i].label, nw[i].label, sizeof(s.st.blf[i].label));
+        s.st.blf[i].state = st[i];
+        s.blf[i] = nw[i];
+        s.blf_h[i] = h[i];
+    }
+    s.st.blf_count = (uint8_t)n;
+    st_unlock();
+    s.blf_n = n;
+    ESP_LOGI(TAG, "blf: %d key%s", n, n == 1 ? "" : "s");
+    for (int i = 0; i < n; i++) {
+        if (keep[i] < 0) {
+            blf_subscribe(i);
+        }
+        post_blf(i);
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* UA callbacks (sip task)                                            */
 /* ------------------------------------------------------------------ */
 
@@ -419,6 +558,35 @@ static void on_call_state(void *ctx, sip_call_handle_t call, const sip_call_info
     publish_call_state();
 }
 
+static void on_blf(void *ctx, sip_sub_handle_t sub, const char *ext, sip_blf_state_t state)
+{
+    (void)ctx;
+    (void)ext;
+    for (int i = 0; i < s.blf_n; i++) {
+        if (s.blf_h[i] == sub) {
+            set_blf_state(i, phone_blf_map(state));
+            return;
+        }
+    }
+}
+
+static uint16_t cap_count(int n)
+{
+    return (uint16_t)(n < 0 ? 0 : n > 9999 ? 9999 : n);
+}
+
+static void on_mwi(void *ctx, bool waiting, int new_msgs, int old_msgs)
+{
+    (void)ctx;
+    const sip_event_mwi_t m = {
+        .known = true,
+        .waiting = waiting,
+        .new_msgs = cap_count(new_msgs),
+        .old_msgs = cap_count(old_msgs),
+    };
+    set_mwi(&m);
+}
+
 static void on_media(void *ctx, sip_call_handle_t call, const sip_media_info_t *mi)
 {
     (void)ctx;
@@ -455,6 +623,7 @@ static void ua_destroy(void)
     s.ua = NULL;
     s.closing = false;
     sip_udp_close(&s.udp);
+    blf_mwi_reset();
     st_lock();
     s.st.local_addr[0] = '\0';
     st_unlock();
@@ -534,6 +703,8 @@ static void ua_create(uint64_t now)
             .incoming_call = on_incoming,
             .call_state = on_call_state,
             .media = on_media,
+            .blf_state = on_blf,
+            .mwi = on_mwi,
         },
     };
     cfg.n_codecs = (uint8_t)phone_codec_pref_parse(s.acc.codec_pref, cfg.codecs, SIP_UA_MAX_CODECS);
@@ -569,6 +740,7 @@ static void ua_create(uint64_t now)
     if (err != SIP_OK) {
         ESP_LOGE(TAG, "sip_ua_register: %d", (int)err);
     }
+    subscribe_all();                    /* sent once registered */
 }
 
 /* Start a clean shutdown of the UA (hang up, unregister, bounded wait) and
@@ -626,6 +798,7 @@ static void on_settings(uint64_t now)
         s.acc = ns;
         ua_restart(now);
     }
+    blf_apply(ns.blf);
 }
 
 /* ------------------------------------------------------------------ */
@@ -832,6 +1005,7 @@ esp_err_t phone_init(void)
     ESP_RETURN_ON_ERROR(phone_media_init(), TAG, "media init");
 
     settings_get(&s.acc);
+    blf_apply(s.acc.blf);               /* the sip task does not run yet */
     s.ring_vol = s.acc.ring_volume;
     s.call_vol = s.acc.call_volume;
     s.spk_vol = SPEAKER_VOLUME;

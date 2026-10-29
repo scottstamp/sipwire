@@ -234,3 +234,44 @@ int phone_codec_pref_parse(const char *s, uint8_t *pts, int max)
     }
     return n;
 }
+
+/* ---- BLF ---- */
+
+blf_state_t phone_blf_map(sip_blf_state_t st)
+{
+    switch (st) {
+    case SIP_BLF_IDLE:    return BLF_IDLE;
+    case SIP_BLF_RINGING: return BLF_RINGING;
+    case SIP_BLF_BUSY:    return BLF_BUSY;
+    case SIP_BLF_UNKNOWN:
+    default:              return BLF_UNKNOWN;
+    }
+}
+
+uint32_t phone_blf_plan(const sipwire_blf_entry_t *old, int n_old, const sipwire_blf_entry_t *nw, int n_new,
+                        int keep[SIPWIRE_BLF_MAX])
+{
+    uint32_t drop = n_old > 0 ? (1u << n_old) - 1u : 0;
+    for (int i = 0; i < n_new && i < SIPWIRE_BLF_MAX; i++) {
+        keep[i] = -1;
+        for (int k = 0; k < n_old; k++) {
+            if ((drop & (1u << k)) && strcmp(old[k].ext, nw[i].ext) == 0) {
+                keep[i] = k;
+                drop &= ~(1u << k);
+                break;
+            }
+        }
+    }
+    return drop;
+}
+
+const char *phone_blf_state_name(blf_state_t st)
+{
+    switch (st) {
+    case BLF_IDLE:    return "idle";
+    case BLF_RINGING: return "ringing";
+    case BLF_BUSY:    return "busy";
+    case BLF_UNKNOWN:
+    default:          return "unknown";
+    }
+}

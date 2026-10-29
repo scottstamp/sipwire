@@ -566,9 +566,47 @@ static void test_writer(void)
     TEST_ASSERT_EQUAL(0, w.len);
 }
 
+/* RFC 6665 headers: Event (compact "o"), Subscription-State, Retry-After */
+static void test_event_headers(void)
+{
+    const char *hdrs = "NOTIFY sip:1001@10.0.0.2 SIP/2.0\r\n"
+                       "Via: SIP/2.0/UDP 10.0.0.1;branch=z9hG4bKn1\r\n"
+                       "From: <sip:1002@x>;tag=a\r\nTo: <sip:1001@x>;tag=b\r\n"
+                       "Call-ID: n1@x\r\nCSeq: 2 NOTIFY\r\n"
+                       "o: dialog;id=7\r\n"
+                       "Subscription-State: active;expires=599\r\n"
+                       "Retry-After: 30 (back soon);duration=10\r\n";
+    TEST_ASSERT_EQUAL(SIP_PARSE_OK, parse_with_body(hdrs, ""));
+    TEST_ASSERT_EQUAL(SIP_METHOD_NOTIFY, m.method);
+    assert_str("dialog;id=7", m.event);
+    assert_str("active;expires=599", m.sub_state);
+    TEST_ASSERT_EQUAL(30, m.retry_after);
+    /* absent: NULL / -1 */
+    TEST_ASSERT_EQUAL(SIP_PARSE_OK, parse("SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 10.0.0.2;branch=z9hG4bKx\r\n"
+                                          "From: <sip:a@x>;tag=1\r\nTo: <sip:b@x>;tag=2\r\nCall-ID: c\r\n"
+                                          "CSeq: 1 SUBSCRIBE\r\nExpires: 600\r\nContent-Length: 0\r\n\r\n"));
+    TEST_ASSERT_NULL(m.event.p);
+    TEST_ASSERT_NULL(m.sub_state.p);
+    TEST_ASSERT_EQUAL(-1, m.retry_after);
+    TEST_ASSERT_EQUAL(600, m.expires);
+    TEST_ASSERT_EQUAL(SIP_METHOD_SUBSCRIBE, m.cseq_method);
+    /* a malformed Retry-After is only a hint: ignored; a second Event is not */
+    char tmp[1024];
+    snprintf(tmp, sizeof(tmp), "%sRetry-After: soon\r\n", "NOTIFY sip:1001@10.0.0.2 SIP/2.0\r\n"
+             "Via: SIP/2.0/UDP 10.0.0.1;branch=z9hG4bKn1\r\nFrom: <sip:1002@x>;tag=a\r\n"
+             "To: <sip:1001@x>;tag=b\r\nCall-ID: n1@x\r\nCSeq: 2 NOTIFY\r\n");
+    TEST_ASSERT_EQUAL(SIP_PARSE_OK, parse_with_body(tmp, ""));
+    TEST_ASSERT_EQUAL(-1, m.retry_after);
+    snprintf(tmp, sizeof(tmp), "%sEvent: dialog\r\nEvent: presence\r\n", "NOTIFY sip:1001@10.0.0.2 SIP/2.0\r\n"
+             "Via: SIP/2.0/UDP 10.0.0.1;branch=z9hG4bKn1\r\nFrom: <sip:1002@x>;tag=a\r\n"
+             "To: <sip:1001@x>;tag=b\r\nCall-ID: n1@x\r\nCSeq: 2 NOTIFY\r\n");
+    TEST_ASSERT_EQUAL(SIP_PARSE_ERR, parse_with_body(tmp, ""));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_event_headers);
     RUN_TEST(test_basic_request);
     RUN_TEST(test_basic_response);
     RUN_TEST(test_rfc4475_wsinv);

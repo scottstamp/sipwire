@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "sipwire_blf.h"
 
 typedef enum {
     SIP_TRANSPORT_UDP = 0,
@@ -23,6 +24,9 @@ typedef struct {
     char sip_display_name[64];
     uint32_t sip_reg_expires;  /* seconds, default 300 */
     char codec_pref[24];       /* "g722,pcmu,pcma" (default); "" = default */
+    /* BLF keys + voicemail */
+    char blf[SIPWIRE_BLF_LIST_MAX]; /* "1002:Bob,1003:Front desk" (sipwire_blf.h), "" = none */
+    char vm_number[32];        /* dialled by the voicemail button, default "*97" */
     /* audio */
     uint8_t ring_volume;       /* 0-100 */
     uint8_t call_volume;       /* 0-100 */

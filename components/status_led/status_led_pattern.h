@@ -30,6 +30,7 @@ typedef struct {
     sl_net_t net;
     sl_reg_t reg;
     sl_call_t call;
+    bool mwi;           /* voicemail waiting */
 } sl_state_t;
 
 typedef struct {
