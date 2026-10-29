@@ -25,6 +25,8 @@ static const ui_screen_ops_t *const OPS[UI_SCR_COUNT] = {
     [UI_SCR_ENDED] = &ui_ops_ended,
     [UI_SCR_SETTINGS] = &ui_ops_settings,
     [UI_SCR_CALIBRATE] = &ui_ops_calibrate,
+    [UI_SCR_HISTORY] = &ui_ops_history,
+    [UI_SCR_CONTACTS] = &ui_ops_contacts,
 };
 
 static const ui_actions_t *s_actions;
@@ -251,6 +253,87 @@ void ui_act_save_vm_number(const char *number)
 {
     if (s_actions && s_actions->save_vm_number && number) {
         s_actions->save_vm_number(s_actions->ctx, number);
+    }
+}
+
+/* ---- directory ---- */
+
+size_t ui_act_contacts_search(const char *query, ui_contact_t *out, size_t max)
+{
+    if (s_actions && s_actions->contacts_search && out && max) {
+        return s_actions->contacts_search(s_actions->ctx, query ? query : "", out, max);
+    }
+    return 0;
+}
+
+const char *ui_act_contact_save(const char *old_number, const char *name, const char *number,
+                                uint8_t speed)
+{
+    if (!s_actions || !s_actions->contact_save) {
+        return "Not available";
+    }
+    return s_actions->contact_save(s_actions->ctx, old_number, name, number, speed);
+}
+
+void ui_act_contact_delete(const char *number)
+{
+    if (s_actions && s_actions->contact_delete && number) {
+        s_actions->contact_delete(s_actions->ctx, number);
+    }
+}
+
+bool ui_act_speed_get(int digit, ui_contact_t *out)
+{
+    return s_actions && s_actions->speed_get && out && s_actions->speed_get(s_actions->ctx, digit, out);
+}
+
+size_t ui_act_history_list(ui_call_t *out, size_t max)
+{
+    if (s_actions && s_actions->history_list && out && max) {
+        return s_actions->history_list(s_actions->ctx, out, max);
+    }
+    return 0;
+}
+
+void ui_act_history_clear(void)
+{
+    if (s_actions && s_actions->history_clear) {
+        s_actions->history_clear(s_actions->ctx);
+    }
+}
+
+void ui_act_history_mark_seen(void)
+{
+    if (s_actions && s_actions->history_mark_seen) {
+        s_actions->history_mark_seen(s_actions->ctx);
+    }
+}
+
+/* ---- sounds ---- */
+
+const char *ui_act_ringtone_name(int idx)
+{
+    return s_actions && s_actions->ringtone_name ? s_actions->ringtone_name(s_actions->ctx, idx) : NULL;
+}
+
+void ui_act_ringtone_preview(int idx)
+{
+    if (s_actions && s_actions->ringtone_preview) {
+        s_actions->ringtone_preview(s_actions->ctx, idx);
+    }
+}
+
+void ui_act_save_sounds(uint8_t tone, uint8_t ring_vol, uint8_t call_vol, uint8_t spk_vol)
+{
+    if (s_actions && s_actions->save_sounds) {
+        s_actions->save_sounds(s_actions->ctx, tone, ring_vol, call_vol, spk_vol);
+    }
+}
+
+void ui_act_save_call_features(bool call_waiting, bool auto_answer, bool dnd)
+{
+    if (s_actions && s_actions->save_call_features) {
+        s_actions->save_call_features(s_actions->ctx, call_waiting, auto_answer, dnd);
     }
 }
 

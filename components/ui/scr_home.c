@@ -1,15 +1,17 @@
-/* Idle screen: clock, account, registration state, Dial / Settings; with BLF
- * keys configured a panel of up to 8 tiles (tap = dial that extension), and
- * when voicemail is waiting a button that dials the voicemail number.
+/* Idle screen: clock, account, registration state and buttons; with BLF keys configured
+ * a panel of up to 8 tiles (tap = dial that extension), and when voicemail is waiting a
+ * button that dials the voicemail number. The History button carries a red badge with the
+ * number of unseen missed calls.
  *
  * Layout (240x320, status bar 0-21):
- *   no BLF keys    as before: big clock, name, id, state; "N new voicemails"
- *                  button above Dial / Settings (the rest moves up a little)
+ *   no BLF keys    big clock, name, id, state; "N new voicemails" banner when
+ *                  waiting; Contacts | History (46 px) above Dial | Settings (62 px)
  *   BLF keys       tiles 2 per row, 44 px high, bottom-aligned above a 48 px
- *                  button row (Dial | [Voicemail] | Settings). The header
- *                  shrinks with the number of rows: 1 row → clock, name, id,
- *                  state; 2 → clock, name, state; 3 → clock, state;
- *                  4 → one line: smaller clock left, short state right. */
+ *                  icon-only button row: Dial, Contacts, History, [Voicemail],
+ *                  Settings (4 or 5 buttons). The header shrinks with the number of
+ *                  rows: 1 row -> clock, name, id, state; 2 -> clock, name, state;
+ *                  3 -> clock, state; 4 -> one line: smaller clock left, short state
+ *                  right. */
 
 #include "ui_priv.h"
 
@@ -20,6 +22,10 @@
 #define TILE_GAP    5
 #define TILE_W      111                 /* two per row: 6 + 111 + 6 + 111 + 6 */
 #define BTN_ROW_Y   266
+#define SUB_ROW_Y   202                 /* no BLF keys: Contacts | History */
+#define SUB_ROW_H   46
+#define MAIN_ROW_Y  252                 /* no BLF keys: Dial | Settings */
+#define MAIN_ROW_H  62
 #define BTN_ROW_H   48
 #define GRID_BOTTOM (BTN_ROW_Y - 6)
 #define LAMP_D      12
@@ -47,6 +53,10 @@ typedef struct {
     lv_obj_t *mwi_lbl;          /* envelope + "N new", 24 pt */
     lv_obj_t *mwi_lbl2;         /* "voicemails", 14 pt */
     lv_obj_t *dial;
+    lv_obj_t *con;              /* Contacts */
+    lv_obj_t *hist;             /* History (+ missed badge) */
+    lv_obj_t *badge;
+    lv_obj_t *badge_lbl;
     lv_obj_t *set;
     lv_obj_t *vm;               /* voicemail button in the bottom row (BLF keys) */
     lv_obj_t *vm_cap;
@@ -79,6 +89,18 @@ static void on_dial(lv_event_t *e)
 {
     (void)e;
     ui_goto(UI_SCR_DIALER, NULL);
+}
+
+static void on_contacts(lv_event_t *e)
+{
+    (void)e;
+    ui_goto(UI_SCR_CONTACTS, NULL);
+}
+
+static void on_history(lv_event_t *e)
+{
+    (void)e;
+    ui_goto(UI_SCR_HISTORY, NULL);
 }
 
 static void on_settings(lv_event_t *e)
@@ -212,10 +234,25 @@ static lv_obj_t *home_create(const char *arg)
     lv_obj_set_hidden(h->mwi_btn, true);
 
     h->dial = ui_icon_btn_create(scr, UI_BTN_GREEN, LV_SYMBOL_CALL, &lv_font_montserrat_24, 0, "Dial",
-                                 &lv_font_montserrat_14, 6, 250, 112, 64);
+                                 &lv_font_montserrat_14, 6, MAIN_ROW_Y, 112, MAIN_ROW_H);
     lv_obj_add_event_cb(h->dial, on_dial, LV_EVENT_CLICKED, NULL);
+    h->con = ui_icon_btn_create(scr, UI_BTN_NEUTRAL, LV_SYMBOL_DIRECTORY, &lv_font_montserrat_24, 0,
+                                "Contacts", &lv_font_montserrat_14, 6, SUB_ROW_Y, 112, SUB_ROW_H);
+    lv_obj_add_event_cb(h->con, on_contacts, LV_EVENT_CLICKED, NULL);
+    h->hist = ui_icon_btn_create(scr, UI_BTN_NEUTRAL, LV_SYMBOL_LIST, &lv_font_montserrat_24, 0,
+                                 "History", &lv_font_montserrat_14, 122, SUB_ROW_Y, 112, SUB_ROW_H);
+    lv_obj_add_event_cb(h->hist, on_history, LV_EVENT_CLICKED, NULL);
+    h->badge = ui_box_create(h->hist, 0, 0, 22, 20);
+    lv_obj_set_floating(h->badge, true);
+    lv_obj_align(h->badge, LV_ALIGN_TOP_RIGHT, 0, 0);
+    lv_obj_set_style_bg_color(h->badge, UI_COL_RED, 0);
+    lv_obj_set_style_bg_opa(h->badge, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(h->badge, 10, 0);
+    h->badge_lbl = ui_label_create(h->badge, &lv_font_montserrat_14, UI_COL_TEXT, "");
+    lv_obj_center(h->badge_lbl);
+    lv_obj_set_hidden(h->badge, true);
     h->set = ui_icon_btn_create(scr, UI_BTN_NEUTRAL, LV_SYMBOL_SETTINGS, &lv_font_montserrat_24, 0,
-                                "Settings", &lv_font_montserrat_14, 122, 250, 112, 64);
+                                "Settings", &lv_font_montserrat_14, 122, MAIN_ROW_Y, 112, MAIN_ROW_H);
     lv_obj_add_event_cb(h->set, on_settings, LV_EVENT_CLICKED, NULL);
     h->vm = ui_icon_btn_create(scr, UI_BTN_NEUTRAL, LV_SYMBOL_ENVELOPE, &lv_font_montserrat_24, 0, "",
                                &lv_font_montserrat_14, 84, BTN_ROW_Y, 72, BTN_ROW_H);
@@ -258,6 +295,44 @@ static void set_y(lv_obj_t *o, int32_t y, bool show)
     lv_obj_set_y(o, y);
 }
 
+/* BLF mode bottom row: Dial, Contacts, History, [Voicemail], Settings, icon-only (the
+ * captions would not fit 4 or 5 buttons). */
+static void place_row(home_t *h, int32_t y, int32_t bh, bool vm)
+{
+    lv_obj_t *b[5] = {h->dial, h->con, h->hist, h->vm, h->set};
+    int cnt = vm ? 5 : 4;
+    int32_t gap = 4, w = (UI_W - 12 - gap * (cnt - 1)) / cnt;
+    int32_t x = 6;
+    for (int i = 0; i < 5; i++) {
+        if (i == 3 && !vm) {
+            lv_obj_set_hidden(h->vm, true);
+            continue;
+        }
+        lv_obj_set_pos(b[i], x, y);
+        lv_obj_set_size(b[i], w, bh);
+        if (i != 3) {
+            lv_obj_set_hidden(lv_obj_get_child(b[i], 1), true);   /* caption */
+        }
+        lv_obj_set_hidden(b[i], false);
+        x += w + gap;
+    }
+}
+
+/* No BLF keys: Contacts | History above Dial | Settings with their captions. */
+static void place_wide(home_t *h)
+{
+    lv_obj_t *b[4] = {h->con, h->hist, h->dial, h->set};
+    const int32_t y[4] = {SUB_ROW_Y, SUB_ROW_Y, MAIN_ROW_Y, MAIN_ROW_Y};
+    const int32_t bh[4] = {SUB_ROW_H, SUB_ROW_H, MAIN_ROW_H, MAIN_ROW_H};
+    for (int i = 0; i < 4; i++) {
+        lv_obj_set_pos(b[i], (i % 2) ? 122 : 6, y[i]);
+        lv_obj_set_size(b[i], 112, bh[i]);
+        lv_obj_set_hidden(lv_obj_get_child(b[i], 1), false);
+        lv_obj_set_hidden(b[i], false);
+    }
+    lv_obj_set_hidden(h->vm, true);
+}
+
 /* Place everything for `n` BLF keys and the voicemail button. */
 static void home_layout(home_t *h, int n, bool mwi)
 {
@@ -284,24 +359,22 @@ static void home_layout(home_t *h, int n, bool mwi)
 
     if (n == 0) {
         if (!mwi) {
-            set_y(h->crow, 44, true);
-            set_y(h->name, 108, true);
-            set_y(h->id, 142, true);
-            set_y(h->state, 176, true);
-            set_y(h->sub, 212, true);
+            set_y(h->crow, 28, true);
+            set_y(h->name, 80, true);
+            set_y(h->id, 114, true);
+            set_y(h->state, 138, true);
+            set_y(h->sub, 170, true);
         } else {
-            set_y(h->crow, 30, true);
-            set_y(h->name, 86, true);
-            set_y(h->id, 120, true);
-            set_y(h->state, 146, true);
-            set_y(h->sub, 178, true);
+            set_y(h->crow, 26, true);
+            set_y(h->name, 76, true);
+            set_y(h->id, 0, false);
+            set_y(h->state, 112, true);
+            set_y(h->sub, 0, false);
         }
+        lv_obj_set_pos(h->mwi_btn, 12, 148);
+        lv_obj_set_size(h->mwi_btn, 216, 46);
         lv_obj_set_hidden(h->mwi_btn, !mwi);
-        lv_obj_set_pos(h->dial, 6, 250);
-        lv_obj_set_size(h->dial, 112, 64);
-        lv_obj_set_pos(h->set, 122, 250);
-        lv_obj_set_size(h->set, 112, 64);
-        lv_obj_set_hidden(h->vm, true);
+        place_wide(h);
     } else {
         int32_t top = GRID_BOTTOM - (rows * TILE_H + (rows - 1) * TILE_GAP);
         switch (rows) {
@@ -343,12 +416,7 @@ static void home_layout(home_t *h, int n, bool mwi)
             tile_set_width(t, wide ? 2 * TILE_W + 6 : TILE_W);
         }
         lv_obj_set_hidden(h->mwi_btn, true);
-        int32_t w = mwi ? 72 : 111;
-        lv_obj_set_pos(h->dial, 6, BTN_ROW_Y);
-        lv_obj_set_size(h->dial, w, BTN_ROW_H);
-        lv_obj_set_pos(h->set, UI_W - 6 - w, BTN_ROW_Y);
-        lv_obj_set_size(h->set, w, BTN_ROW_H);
-        lv_obj_set_hidden(h->vm, !mwi);
+        place_row(h, BTN_ROW_Y, BTN_ROW_H, mwi);
     }
     for (int i = 0; i < h->n_tiles; i++) {
         lv_obj_set_hidden(h->tile[i].btn, i >= n);
@@ -454,6 +522,21 @@ static void home_update(const ui_model_t *m)
 
     for (int i = 0; i < n; i++) {
         tile_update(h, &h->tile[i], &m->blf[i]);
+    }
+
+    /* missed-call badge on History */
+    if (m->missed_unseen > 0) {
+        lv_label_set_text(h->badge_lbl, m->missed_unseen > 9 ? "9+" : "");
+        if (m->missed_unseen <= 9) {
+            lv_label_set_text_fmt(h->badge_lbl, "%u", (unsigned)m->missed_unseen);
+        }
+        lv_obj_set_width(h->badge, m->missed_unseen > 9 ? 26 : 20);
+        lv_obj_align(h->badge, LV_ALIGN_TOP_RIGHT, 0, 0);
+        lv_obj_set_hidden(h->badge, false);
+        lv_obj_set_style_text_color(lv_obj_get_child(h->hist, 0), UI_COL_BAD, 0);
+    } else {
+        lv_obj_set_hidden(h->badge, true);
+        lv_obj_set_style_text_color(lv_obj_get_child(h->hist, 0), UI_COL_TEXT, 0);
     }
 
     if (m->mwi_waiting) {

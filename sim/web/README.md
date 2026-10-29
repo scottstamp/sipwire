@@ -50,6 +50,15 @@ waits for the runtime, applies the scenario, waits 300 ms and screenshots only
 the canvas at native 240x320. Exits non-zero on page errors or
 `console.error`. The final model is printed as JSON.
 
+Directory / sounds scenarios: `home_missed`, `home_blf_missed`, `home_blf8_missed`, `history`,
+`history_scrolled`, `history_clear_confirm`, `history_empty`, `contacts_list`,
+`contacts_scrolled`, `contacts_search` (keyboard up), `contacts_edit`, `contacts_edit_keyboard`,
+`contacts_new`, `contacts_empty`, `dialer_matches`, `dialer_speed_hint`, `settings_sounds`,
+`settings_sounds_volumes`, `settings_features`. The mock keeps 14 contacts (speed dial 2, 3, 5), a
+week of calls (all seen: `sim.set_unseen(n)` marks the n newest missed calls new, which drives
+the home badge) and 5 ringtones; `sim.clear_directory(0|1)` empties the history / contacts. The
+mock wall clock is 2026-10-29 at the time set with `set_time` (history times and weekdays).
+
 ### Adding a scenario
 
 Add an entry to `SCENARIOS` in `screenshot.mjs`. It is a function of

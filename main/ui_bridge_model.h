@@ -38,6 +38,10 @@ typedef struct {
     uint8_t ota_percent;
     char ota_message[64];
     char vm_number[32];             /* settings vm_number */
+    /* sounds + call features (settings) */
+    uint8_t ringtone_count;
+    uint8_t ring_tone, ring_volume, call_volume, speaker_volume;
+    bool call_waiting, auto_answer, dnd;
 } ui_bridge_local_t;
 
 /** Fill the time/update settings of `loc` (Settings > Time and > Update prefill).
@@ -62,6 +66,11 @@ void ui_bridge_fill_settings(ui_bridge_local_t *loc, const char *wifi_ssid, cons
 
 /** Voicemail number (settings `vm_number`); NULL counts as empty. */
 void ui_bridge_fill_vm(ui_bridge_local_t *loc, const char *vm_number);
+
+/** Ringtone list size + stored sounds / call feature settings (Settings > Sounds, Call features). */
+void ui_bridge_fill_sounds(ui_bridge_local_t *loc, int ringtone_count, uint8_t ring_tone, uint8_t ring_volume,
+                           uint8_t call_volume, uint8_t speaker_volume, bool call_waiting, bool auto_answer,
+                           bool dnd);
 
 ui_blf_state_t ui_bridge_map_blf(blf_state_t st);
 

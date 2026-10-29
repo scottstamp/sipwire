@@ -346,7 +346,7 @@ static void keypad_event(lv_event_t *e)
         }
         const char *t = lv_buttonmatrix_get_button_text(m, id);
         if (t && t[0] && k->cb) {
-            k->cb(t[0], k->long_fired && t[0] == '0', k->user);
+            k->cb(t[0], k->long_fired, k->user);
         }
         k->long_fired = false;
         break;
@@ -390,6 +390,39 @@ void ui_style_textarea(lv_obj_t *ta)
     lv_obj_add_style(ta, &s_st_ta_cursor, LV_PART_CURSOR);
     lv_obj_add_style(ta, &s_st_ta_cursor_on, LV_PART_CURSOR | LV_STATE_FOCUSED);
     lv_obj_add_style(ta, &s_st_ta_ph, LV_PART_TEXTAREA_PLACEHOLDER);
+}
+
+void ui_style_dropdown(lv_obj_t *dd)
+{
+    lv_obj_set_style_bg_color(dd, UI_COL_SURFACE, 0);
+    lv_obj_set_style_bg_opa(dd, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(dd, UI_COL_SURFACE2, 0);
+    lv_obj_set_style_border_width(dd, 2, 0);
+    lv_obj_set_style_radius(dd, 8, 0);
+    lv_obj_set_style_text_color(dd, UI_COL_TEXT, 0);
+    lv_obj_set_style_text_font(dd, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_pad_hor(dd, 8, 0);
+    lv_obj_set_style_pad_ver(dd, 6, 0);
+    lv_obj_set_style_shadow_width(dd, 0, 0);
+    lv_obj_set_style_border_color(dd, UI_COL_BLUE, LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_width(dd, 0, LV_STATE_FOCUS_KEY);
+
+    /* The popup list lives on the screen, not inside the dropdown: style it separately.
+     * Line space makes every option a 44 px touch target. */
+    lv_obj_t *list = lv_dropdown_get_list(dd);
+    lv_obj_set_style_bg_color(list, UI_COL_SURFACE, 0);
+    lv_obj_set_style_bg_opa(list, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(list, UI_COL_BLUE, 0);
+    lv_obj_set_style_border_width(list, 2, 0);
+    lv_obj_set_style_radius(list, 8, 0);
+    lv_obj_set_style_pad_hor(list, 8, 0);
+    lv_obj_set_style_text_color(list, UI_COL_TEXT, 0);
+    lv_obj_set_style_text_font(list, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_line_space(list, 16, 0);
+    lv_obj_set_style_shadow_width(list, 0, 0);
+    lv_obj_set_style_bg_color(list, UI_COL_BLUE, LV_PART_SELECTED | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(list, UI_COL_SURFACE2, LV_PART_SELECTED | LV_STATE_PRESSED);
+    lv_obj_set_style_text_color(list, UI_COL_TEXT, LV_PART_SELECTED | LV_STATE_CHECKED);
 }
 
 void ui_fmt_duration(char *buf, size_t cap, uint32_t s)

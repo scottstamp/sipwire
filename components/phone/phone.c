@@ -20,9 +20,11 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <arpa/inet.h>
 
 #include "audio.h"
+#include "directory.h"
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -89,6 +91,7 @@ typedef struct {
     char number[64];
     char name[64];
     int64_t start_us;
+    bool rej;                           /* the user declined it (call log) */
     bool media_valid;
     sip_media_info_t media;
 } phone_line_t;
@@ -130,6 +133,7 @@ static struct {
     uint64_t ended_until;
     phone_dtmf_seq_t dtmf;
     uint8_t line;                       /* foreground line number, 0 = none */
+    bool rej;                           /* foreground: the user declined the ringing call (call log) */
     int answer_after;                   /* foreground: caller asked for auto answer, -1 = no */
     bool aa_pending;                    /* auto answer due at aa_at */
     uint64_t aa_at;
@@ -421,6 +425,7 @@ static void fg_save(phone_line_t *l)
     l->state = s.state;
     l->outgoing = s.outgoing;
     l->answer_after = s.answer_after;
+    l->rej = s.rej;
     l->line = s.line;
     l->media_valid = s.fg_media_valid;
     l->media = s.fg_media;
@@ -437,6 +442,7 @@ static void fg_load(const phone_line_t *l)
     s.state = l->state;
     s.outgoing = l->outgoing;
     s.answer_after = l->answer_after;
+    s.rej = l->rej;
     s.line = l->line;
     s.end_code = 0;
     s.fg_media_valid = l->media_valid;
@@ -563,9 +569,41 @@ static void promote_bg(void)
     publish_call_state();
 }
 
+/* ---- call log (directory history) ---- */
+
+_Static_assert((int)PHONE_LOG_ANSWERED == DIR_RES_ANSWERED && (int)PHONE_LOG_MISSED == DIR_RES_MISSED &&
+               (int)PHONE_LOG_REJECTED == DIR_RES_REJECTED && (int)PHONE_LOG_DND == DIR_RES_DND,
+               "phone_log_result_t must match dir_result_t");
+
+/* One history entry per ended call. Unnamed numbers are named from the contacts by
+ * dir_history_add(). `start_us` != 0: the call was answered (talk time since). */
+static void log_call(bool outgoing, const char *number, const char *name, int64_t start_us, bool rej, bool dnd)
+{
+    dir_call_t c;
+    memset(&c, 0, sizeof(c));
+    c.direction = outgoing ? DIR_CALL_OUT : DIR_CALL_IN;
+    c.result = (uint8_t)phone_log_result(outgoing, start_us != 0, rej, dnd);
+    c.duration_s = phone_log_duration_s(start_us, esp_timer_get_time());
+    c.start = (time_t)phone_log_start((int64_t)time(NULL) > 1700000000 ? (int64_t)time(NULL) : 0, c.duration_s);
+    strlcpy(c.number, number ? number : "", sizeof(c.number));
+    strlcpy(c.name, name ? name : "", sizeof(c.name));
+    if (c.number[0] == '\0') {
+        return;                         /* anonymous with no number: nothing to call back */
+    }
+    esp_err_t err = dir_history_add(&c);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "call log: %s", esp_err_to_name(err));
+    }
+}
+
 /* The call is over (UA said ENDED, or the UA went away under it). */
 static void call_ended(int end_code)
 {
+    st_lock();
+    int64_t start_us = s.st.call_start_us;
+    st_unlock();
+    log_call(s.outgoing, s.st.number, s.st.name, start_us, s.rej, false);   /* before promote_bg() */
+    s.rej = false;
     phone_media_teardown();
     phone_dtmf_seq_clear(&s.dtmf);
     reset_call_audio_prefs();
@@ -586,6 +624,7 @@ static void bg_ended(int end_code)
 {
     phone_line_t l = s.bg;
     memset(&s.bg, 0, sizeof(s.bg));
+    log_call(l.outgoing, l.number, l.name, l.start_us, l.rej, false);
     post_second(CALL_ENDED, end_code, l.number, l.name);
     publish_call_state();               /* stop the call-waiting beep */
 }
@@ -809,6 +848,7 @@ static void on_incoming(void *ctx, sip_call_handle_t call, const char *number, c
     s.outgoing = false;
     s.end_code = 0;
     s.line = 1;
+    s.rej = false;
     s.answer_after = -1;
     s.aa_pending = false;
     s.fg_media_valid = false;
@@ -951,6 +991,7 @@ static void on_rejected(void *ctx, const char *number, const char *name, int cod
     strlcpy(ev.name, name ? name : "", sizeof(ev.name));
     ev.code = code;
     ev.dnd = s.f_dnd;
+    log_call(false, ev.number, ev.name, 0, false, ev.dnd);
     ESP_LOGI(TAG, "missed call from %s \"%s\" (%s, %d)", ev.number, ev.name, ev.dnd ? "do not disturb" : "busy",
              code);
     esp_err_t err = esp_event_post(SIPWIRE_CALL_EVENT, CALL_EVENT_MISSED, &ev, sizeof(ev), EVENT_POST_TIMEOUT);
@@ -1260,6 +1301,7 @@ static void cmd_dial(const char *number)
         return;
     }
     s.outgoing = true;
+    s.rej = false;
     s.end_code = 0;
     s.line = 1;
     s.answer_after = -1;
@@ -1373,6 +1415,7 @@ static sip_err_t cmd_xfer_start(const char *target)
     uint8_t line = other_line();
     s.call = 0;
     s.outgoing = true;
+    s.rej = false;
     s.end_code = 0;
     s.line = line;
     s.answer_after = -1;
@@ -1442,6 +1485,7 @@ static void handle_cmd(const phone_cmd_t *c, uint64_t now)
         break;
     case CMD_REJECT_WAITING:
         if (s.ua && s.bg.h && s.bg.state == SIP_UA_CALL_RINGING_IN) {
+            s.bg.rej = true;
             err = sip_call_reject(s.ua, s.bg.h, WAITING_REJECT_CODE);
         } else {
             ESP_LOGW(TAG, "reject2: no waiting call");
@@ -1474,6 +1518,7 @@ static void handle_cmd(const phone_cmd_t *c, uint64_t now)
         break;
     case CMD_REJECT:
         if (s.ua && s.call && s.state == SIP_UA_CALL_RINGING_IN) {
+            s.rej = true;
             err = sip_call_reject(s.ua, s.call, c->code);
         } else {
             ESP_LOGW(TAG, "reject: no ringing call");
@@ -1481,6 +1526,7 @@ static void handle_cmd(const phone_cmd_t *c, uint64_t now)
         break;
     case CMD_HANGUP:
         if (s.ua && s.call) {
+            s.rej = s.rej || (s.state == SIP_UA_CALL_RINGING_IN && !s.outgoing);
             err = sip_call_hangup(s.ua, s.call);
         } else if (s.state == SIP_UA_CALL_ENDED) {
             go_idle();

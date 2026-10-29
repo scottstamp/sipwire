@@ -12,5 +12,9 @@ idf_component_register(
          "scr_settings.c"
          "scr_calibrate.c"
          "ui_touch_cal.c"
+         "ui_fmt.c"
+         "ui_vlist.c"
+         "scr_history.c"
+         "scr_contacts.c"
     INCLUDE_DIRS "include"
 )

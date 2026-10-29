@@ -194,6 +194,9 @@
     set_blf_count: function (n) { Module.ccall('sim_set_blf_count', null, ['number'], [n]); },
     set_blf: function (i, ext, label, st) { Module.ccall('sim_set_blf', null, ['number', 'string', 'string', 'number'], [i, ext || '', label || '', st || 0]); },
     set_mwi: function (w, nw, old) { Module.ccall('sim_set_mwi', null, ['number', 'number', 'number'], [w ? 1 : 0, nw || 0, old || 0]); },
+    // directory stubs: mark the n newest missed incoming calls unseen; clear_directory(0 history | 1 contacts)
+    set_unseen: function (n) { Module.ccall('sim_set_unseen', null, ['number'], [n]); },
+    clear_directory: function (w) { Module.ccall('sim_clear_directory', null, ['number'], [w]); },
     model: function () { return JSON.parse(getModelJson()); }
   };
 

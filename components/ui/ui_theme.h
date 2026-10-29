@@ -73,13 +73,16 @@ void ui_fit_set(lv_obj_t *fit, const char *txt, const lv_font_t *start, bool tai
 void ui_fit_set_color(lv_obj_t *fit, lv_color_t color);
 
 /** 3x4 phone keypad (button matrix). `cb` runs on release; `long_press` is
- *  set for a held '0' (touch equivalent of the long-0 '+'). */
+ *  set for a held key (touch equivalent of the physical long press: '0' -> '+', 2-9 -> speed dial). */
 typedef void (*ui_keypad_cb_t)(char key, bool long_press, void *user);
 lv_obj_t *ui_keypad_create(lv_obj_t *parent, int32_t x, int32_t y, int32_t w, int32_t h,
                            ui_keypad_cb_t cb, void *user);
 
 /** Apply the dark text field style (textarea). */
 void ui_style_textarea(lv_obj_t *ta);
+
+/** Apply the dark dropdown style (button and popup list). */
+void ui_style_dropdown(lv_obj_t *dd);
 
 /** Format seconds as mm:ss (or h:mm:ss). */
 void ui_fmt_duration(char *buf, size_t cap, uint32_t seconds);

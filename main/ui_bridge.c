@@ -15,6 +15,8 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "audio.h"
+#include "directory.h"
 #include "display.h"
 #include "net.h"
 #include "ota.h"
@@ -74,6 +76,10 @@ static struct {
     char blf[sizeof(((settings_t *)0)->blf)];
     bool vm_pending;
     char vm_number[sizeof(((settings_t *)0)->vm_number)];
+    bool snd_pending;               /* Settings > Sounds */
+    uint8_t snd_tone, snd_ring, snd_call, snd_spk;
+    bool feat_pending;              /* Settings > Call features */
+    bool feat_cw, feat_aa, feat_dnd;
 } b;
 
 /* What SNTP and the C library are using right now. The NTP buffer must stay valid
@@ -96,6 +102,8 @@ static void update_settings_locked(void)
                             st.sip_password, st.sip_display_name);
     ui_bridge_fill_time_ota(&b.loc, st.ntp_server, st.tz, st.clock_24h, st.ota_url);
     ui_bridge_fill_vm(&b.loc, st.vm_number);
+    ui_bridge_fill_sounds(&b.loc, audio_ringtone_count(), st.ring_tone, st.ring_volume, st.call_volume,
+                          st.speaker_volume, st.call_waiting, st.auto_answer, st.dnd);
     memset(st.wifi_pass, 0, sizeof(st.wifi_pass));
     memset(st.sip_password, 0, sizeof(st.sip_password));
 }
@@ -288,6 +296,194 @@ static void act_save_vm_number(void *ctx, const char *number)
     kick();
 }
 
+/* ---- directory: the lists are read straight from the directory (in RAM, one mutex); saves
+ * write a small FAT file (tens of ms) because the screen refetches right after them. ---- */
+
+static size_t act_contacts_search(void *ctx, const char *query, ui_contact_t *out, size_t max)
+{
+    (void)ctx;
+    if (max > DIR_CONTACTS_MAX) {
+        max = DIR_CONTACTS_MAX;
+    }
+    dir_contact_t *tmp = malloc(max * sizeof(*tmp));    /* up to 12.8 KB, only while the screen refetches */
+    if (!tmp) {
+        return 0;
+    }
+    char speed[UI_SPEED_LAST + 1][DIR_NUMBER_MAX] = {{0}};
+    for (int d = UI_SPEED_FIRST; d <= UI_SPEED_LAST; d++) {
+        if (dir_speed_get(d, speed[d], sizeof(speed[d])) != ESP_OK) {
+            speed[d][0] = '\0';
+        }
+    }
+    size_t n = dir_contact_search(query, tmp, max);
+    for (size_t i = 0; i < n; i++) {
+        strlcpy(out[i].name, tmp[i].name, sizeof(out[i].name));
+        strlcpy(out[i].number, tmp[i].number, sizeof(out[i].number));
+        out[i].speed = 0;
+        for (int d = UI_SPEED_FIRST; d <= UI_SPEED_LAST; d++) {
+            if (speed[d][0] && strcmp(speed[d], tmp[i].number) == 0) {
+                out[i].speed = (uint8_t)d;
+                break;
+            }
+        }
+    }
+    free(tmp);
+    return n;
+}
+
+static const char *act_contact_save(void *ctx, const char *old_number, const char *name, const char *number,
+                                    uint8_t speed)
+{
+    (void)ctx;
+    char nn[DIR_NUMBER_MAX], on[DIR_NUMBER_MAX] = "";
+    dir_normalize(number ? number : "", nn, sizeof(nn));
+    if (!nn[0]) {
+        return "Invalid number";
+    }
+    if (!name || !name[0]) {
+        return "Enter a name";
+    }
+    if (old_number) {
+        dir_normalize(old_number, on, sizeof(on));
+    }
+    esp_err_t err = dir_contact_set(nn, name);           /* first: a full list loses nothing */
+    if (err != ESP_OK) {
+        return err == ESP_ERR_NO_MEM ? "Contact list is full" : "Could not save";
+    }
+    if (on[0] && strcmp(on, nn) != 0) {
+        dir_contact_del(on);
+    }
+    for (int d = UI_SPEED_FIRST; d <= UI_SPEED_LAST; d++) {   /* slots of this contact move or clear */
+        char cur[DIR_NUMBER_MAX];
+        if (dir_speed_get(d, cur, sizeof(cur)) == ESP_OK && (strcmp(cur, nn) == 0 || (on[0] && strcmp(cur, on) == 0))) {
+            dir_speed_set(d, NULL);
+        }
+    }
+    if (speed >= UI_SPEED_FIRST && speed <= UI_SPEED_LAST) {
+        err = dir_speed_set(speed, nn);
+        if (err != ESP_OK) {
+            return "Could not set the speed dial key";
+        }
+    }
+    return NULL;
+}
+
+static void act_contact_delete(void *ctx, const char *number)
+{
+    (void)ctx;
+    char nn[DIR_NUMBER_MAX];
+    dir_normalize(number, nn, sizeof(nn));
+    dir_contact_del(nn);
+    for (int d = UI_SPEED_FIRST; d <= UI_SPEED_LAST; d++) {
+        char cur[DIR_NUMBER_MAX];
+        if (dir_speed_get(d, cur, sizeof(cur)) == ESP_OK && strcmp(cur, nn) == 0) {
+            dir_speed_set(d, NULL);
+        }
+    }
+}
+
+static bool act_speed_get(void *ctx, int digit, ui_contact_t *out)
+{
+    (void)ctx;
+    memset(out, 0, sizeof(*out));
+    if (dir_speed_get(digit, out->number, sizeof(out->number)) != ESP_OK) {
+        return false;
+    }
+    dir_contact_lookup(out->number, out->name, sizeof(out->name));
+    out->speed = (uint8_t)digit;
+    return true;
+}
+
+static size_t act_history_list(void *ctx, ui_call_t *out, size_t max)
+{
+    (void)ctx;
+    dir_call_t chunk[16];                       /* 16 x ~80 B on the stack, paged */
+    size_t n = 0;
+    while (n < max) {
+        size_t want = max - n < 16 ? max - n : 16;
+        size_t got = dir_history_list(chunk, n, want);
+        for (size_t i = 0; i < got; i++) {
+            ui_call_t *o = &out[n + i];
+            o->direction = chunk[i].direction == DIR_CALL_OUT ? UI_CALLDIR_OUT : UI_CALLDIR_IN;
+            o->result = chunk[i].result <= DIR_RES_DND ? chunk[i].result : UI_CALLRES_MISSED;
+            o->seen = chunk[i].seen;
+            o->start = (int64_t)chunk[i].start;
+            o->duration_s = chunk[i].duration_s;
+            strlcpy(o->number, chunk[i].number, sizeof(o->number));
+            strlcpy(o->name, chunk[i].name, sizeof(o->name));
+        }
+        n += got;
+        if (got < want) {
+            break;
+        }
+    }
+    return n;
+}
+
+static void act_history_clear(void *ctx)
+{
+    (void)ctx;
+    dir_history_clear();
+    kick();
+}
+
+static void act_history_mark_seen(void *ctx)
+{
+    (void)ctx;
+    dir_history_mark_seen();
+    kick();                         /* the home badge follows */
+}
+
+/* ---- sounds / call features ---- */
+
+static const char *act_ringtone_name(void *ctx, int idx)
+{
+    (void)ctx;
+    return audio_ringtone_name(idx);
+}
+
+/* The phone owns the speaker while a call exists: no preview then, and a stop must not cut a
+ * ring that started after the preview (an incoming call pops over Settings). */
+static void act_ringtone_preview(void *ctx, int idx)
+{
+    (void)ctx;
+    phone_status_t ph;
+    phone_get_status(&ph);
+    if (ph.call != CALL_IDLE || ph.second.call != CALL_IDLE) {
+        return;
+    }
+    if (idx < 0) {
+        audio_stop_ringtone();
+    } else {
+        audio_play_ringtone(idx);
+    }
+}
+
+static void act_save_sounds(void *ctx, uint8_t tone, uint8_t ring, uint8_t call, uint8_t spk)
+{
+    (void)ctx;
+    xSemaphoreTake(b.mtx, portMAX_DELAY);
+    b.snd_tone = tone;
+    b.snd_ring = ring > 100 ? 100 : ring;
+    b.snd_call = call > 100 ? 100 : call;
+    b.snd_spk = spk > 100 ? 100 : spk;
+    b.snd_pending = true;
+    xSemaphoreGive(b.mtx);
+    kick();
+}
+
+static void act_save_call_features(void *ctx, bool cw, bool aa, bool dnd)
+{
+    (void)ctx;
+    xSemaphoreTake(b.mtx, portMAX_DELAY);
+    b.feat_cw = cw;
+    b.feat_aa = aa;
+    b.feat_dnd = dnd;
+    b.feat_pending = true;
+    xSemaphoreGive(b.mtx);
+    kick();
+}
+
 static const ui_actions_t s_actions = {
     .dial = act_dial,
     .answer = act_answer,
@@ -305,6 +501,17 @@ static const ui_actions_t s_actions = {
     .ota_start = act_ota_start,
     .save_blf = act_save_blf,
     .save_vm_number = act_save_vm_number,
+    .contacts_search = act_contacts_search,
+    .contact_save = act_contact_save,
+    .contact_delete = act_contact_delete,
+    .speed_get = act_speed_get,
+    .history_list = act_history_list,
+    .history_clear = act_history_clear,
+    .history_mark_seen = act_history_mark_seen,
+    .ringtone_name = act_ringtone_name,
+    .ringtone_preview = act_ringtone_preview,
+    .save_sounds = act_save_sounds,
+    .save_call_features = act_save_call_features,
 };
 
 /* ------------------------------------------------------------------ */
@@ -441,7 +648,7 @@ static void do_saves(void)
 {
     static settings_t st;           /* bridge task only */
     static char ota_url[sizeof(b.ota_url)];
-    bool wifi, acc, cal, tm, ota, blf, vm;
+    bool wifi, acc, cal, tm, ota, blf, vm, snd, feat;
 
     xSemaphoreTake(b.mtx, portMAX_DELAY);
     wifi = b.wifi_pending;
@@ -451,7 +658,9 @@ static void do_saves(void)
     ota = b.ota_pending;
     blf = b.blf_pending;
     vm = b.vm_pending;
-    if (!wifi && !acc && !cal && !tm && !ota && !blf && !vm) {
+    snd = b.snd_pending;
+    feat = b.feat_pending;
+    if (!wifi && !acc && !cal && !tm && !ota && !blf && !vm && !snd && !feat) {
         xSemaphoreGive(b.mtx);
         return;
     }
@@ -489,6 +698,17 @@ static void do_saves(void)
     if (vm) {
         strlcpy(st.vm_number, b.vm_number, sizeof(st.vm_number));
     }
+    if (snd) {
+        st.ring_tone = b.snd_tone;
+        st.ring_volume = b.snd_ring;
+        st.call_volume = b.snd_call;
+        st.speaker_volume = b.snd_spk;
+    }
+    if (feat) {
+        st.call_waiting = b.feat_cw;
+        st.auto_answer = b.feat_aa;
+        st.dnd = b.feat_dnd;
+    }
     if (ota) {
         strlcpy(ota_url, b.ota_url, sizeof(ota_url));
         strlcpy(st.ota_url, ota_url, sizeof(st.ota_url));   /* remember what was installed from */
@@ -500,6 +720,8 @@ static void do_saves(void)
     b.ota_pending = false;
     b.blf_pending = false;
     b.vm_pending = false;
+    b.snd_pending = false;
+    b.feat_pending = false;
     memset(b.wpass, 0, sizeof(b.wpass));
     memset(b.apass, 0, sizeof(b.apass));
     xSemaphoreGive(b.mtx);
@@ -509,9 +731,10 @@ static void do_saves(void)
     memset(st.sip_password, 0, sizeof(st.sip_password));
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "saving settings: %s", esp_err_to_name(err));
-    } else if (wifi || acc || cal || tm || blf || vm) {
-        ESP_LOGI(TAG, "settings saved from the UI:%s%s%s%s%s%s", wifi ? " wifi" : "", acc ? " account" : "",
-                 cal ? " touch-calibration" : "", tm ? " time" : "", blf ? " blf" : "", vm ? " vm_number" : "");
+    } else if (wifi || acc || cal || tm || blf || vm || snd || feat) {
+        ESP_LOGI(TAG, "settings saved from the UI:%s%s%s%s%s%s%s%s", wifi ? " wifi" : "", acc ? " account" : "",
+                 cal ? " touch-calibration" : "", tm ? " time" : "", blf ? " blf" : "", vm ? " vm_number" : "",
+                 snd ? " sounds" : "", feat ? " call-features" : "");
     }
     if (ota) {
         /* Progress and refusals (e.g. a call is active) come back through ota_get_status(). */
@@ -545,6 +768,14 @@ static void refresh(void)
 
     phone_get_status(&ph);
     ui_bridge_build_model(&loc, &ph, esp_timer_get_time(), &model);
+    unsigned missed = dir_history_unseen_missed();
+    model.missed_unseen = (uint8_t)(missed > 99 ? 99 : missed);
+    model.now = loc.time_valid ? (int64_t)(now / 60) * 60 : 0;
+    if (model.call != UI_CALL_IDLE && !model.remote_name[0] && model.remote_number[0]) {
+        /* caller ID from the contacts when the far end sent no display name (and for outgoing
+         * calls to a contact) */
+        dir_contact_lookup(model.remote_number, model.remote_name, sizeof(model.remote_name));
+    }
     if (have_last && memcmp(&model, &last, sizeof(model)) == 0) {
         return;
     }
