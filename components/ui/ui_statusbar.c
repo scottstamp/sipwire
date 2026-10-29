@@ -1,6 +1,7 @@
 /* Status bar shown at the top of every screen: Wi-Fi bars, SIP registration
  * dot, clock, battery. While voicemail is waiting an amber envelope (with the
- * number of new messages) takes the place of the "SIP" caption. Each screen owns its own bar; only the newest one is
+ * number of new messages) takes the place of the "SIP" caption. Do not disturb: a dim bell left of
+ * the battery (tap = on) or a red "DND" badge (tap = off). Each screen owns its own bar; only the newest one is
  * kept up to date. */
 
 #include "ui_priv.h"
@@ -19,6 +20,8 @@ typedef struct {
     lv_obj_t *mwi;
     lv_obj_t *time;
     lv_obj_t *batt;
+    lv_obj_t *dnd;      /* tap target: bell (off) / "DND" badge (on) */
+    lv_obj_t *dnd_lbl;
     /* last applied values, to avoid needless redraws */
     bool valid;
     int lit;
@@ -29,9 +32,16 @@ typedef struct {
     char time_hhmm[UI_TIME_STR_LEN];
     bool mwi_waiting;
     uint16_t mwi_new;
+    bool dnd_on;
 } statusbar_t;
 
 static statusbar_t *s_sb;
+
+static void on_dnd(lv_event_t *e)
+{
+    (void)e;
+    ui_act_set_dnd(!ui_model()->dnd);
+}
 
 static void sb_deleted(lv_event_t *e)
 {
@@ -76,10 +86,22 @@ lv_obj_t *ui_statusbar_create(lv_obj_t *screen)
     lv_obj_set_hidden(sb->mwi, true);
 
     sb->time = ui_label_create(bar, &lv_font_montserrat_14, UI_COL_TEXT, "");
-    lv_obj_align(sb->time, LV_ALIGN_TOP_MID, 0, 3);
+    lv_obj_set_pos(sb->time, 96, 3);
 
     sb->batt = ui_label_create(bar, &lv_font_montserrat_14, UI_COL_TEXT, "");
     lv_obj_align(sb->batt, LV_ALIGN_TOP_RIGHT, -6, 3);
+
+    /* do not disturb toggle: small, so the click area reaches past the visible badge */
+    sb->dnd = lv_obj_create(bar);
+    lv_obj_remove_style_all(sb->dnd);
+    lv_obj_set_size(sb->dnd, 18, 18);
+    lv_obj_set_style_radius(sb->dnd, 4, 0);
+    lv_obj_set_scrollable(sb->dnd, false);
+    lv_obj_set_clickable(sb->dnd, true);
+    lv_obj_set_ext_click_area(sb->dnd, 10);
+    lv_obj_add_event_cb(sb->dnd, on_dnd, LV_EVENT_CLICKED, NULL);
+    sb->dnd_lbl = ui_label_create(sb->dnd, &lv_font_montserrat_14, UI_COL_DIM, LV_SYMBOL_BELL);
+    lv_obj_center(sb->dnd_lbl);
 
     s_sb = sb;
     return bar;
@@ -159,8 +181,9 @@ void ui_statusbar_update(const ui_model_t *m)
         sb->reg = m->reg;
     }
 
+    bool dnd_changed = !sb->valid || m->dnd != sb->dnd_on;
     bool mwi_changed = !sb->valid || m->mwi_waiting != sb->mwi_waiting || m->mwi_new != sb->mwi_new;
-    if (mwi_changed) {
+    if (mwi_changed || dnd_changed) {
         if (m->mwi_waiting) {
             if (m->mwi_new > 0) {
                 lv_label_set_text_fmt(sb->mwi, LV_SYMBOL_ENVELOPE "%u", m->mwi_new > 99 ? 99u : (unsigned)m->mwi_new);
@@ -168,25 +191,21 @@ void ui_statusbar_update(const ui_model_t *m)
                 lv_label_set_text(sb->mwi, LV_SYMBOL_ENVELOPE);
             }
         }
-        lv_obj_set_hidden(sb->mwi, !m->mwi_waiting);
-        lv_obj_set_hidden(sb->reg_lbl, m->mwi_waiting);
+        /* with DND on the badge needs the room: caption and envelope make way */
+        lv_obj_set_hidden(sb->mwi, !m->mwi_waiting || m->dnd);
+        lv_obj_set_hidden(sb->reg_lbl, m->mwi_waiting || m->dnd);
         sb->mwi_waiting = m->mwi_waiting;
         sb->mwi_new = m->mwi_new;
     }
 
-    if (!sb->valid || strncmp(m->time_hhmm, sb->time_hhmm, sizeof(sb->time_hhmm)) != 0 || mwi_changed) {
+    bool time_changed = !sb->valid || strncmp(m->time_hhmm, sb->time_hhmm, sizeof(sb->time_hhmm)) != 0;
+    if (time_changed) {
         lv_label_set_text(sb->time, m->time_hhmm);
-        /* "3:07 PM" is wider: sit a little right of centre, clear of the SIP
-         * label; further right still next to a two-digit envelope count */
-        int32_t dx = strchr(m->time_hhmm, ' ') ? 8 : 0;
-        if (m->mwi_waiting && m->mwi_new >= 10) {
-            dx += 8;
-        }
-        lv_obj_align(sb->time, LV_ALIGN_TOP_MID, dx, 3);
         snprintf(sb->time_hhmm, sizeof(sb->time_hhmm), "%s", m->time_hhmm);
     }
 
-    if (!sb->valid || m->battery_pct != sb->battery_pct || m->charging != sb->charging) {
+    bool batt_changed = !sb->valid || m->battery_pct != sb->battery_pct || m->charging != sb->charging;
+    if (batt_changed) {
         if (m->battery_pct < 0) {
             lv_obj_set_hidden(sb->batt, true);
         } else {
@@ -199,6 +218,41 @@ void ui_statusbar_update(const ui_model_t *m)
         }
         sb->battery_pct = m->battery_pct;
         sb->charging = m->charging;
+    }
+
+    if (dnd_changed) {
+        lv_label_set_text(sb->dnd_lbl, m->dnd ? "DND" : LV_SYMBOL_BELL);
+        lv_obj_set_style_text_color(sb->dnd_lbl, m->dnd ? UI_COL_TEXT : lv_color_hex(0x7D8996), 0);
+        lv_obj_set_style_bg_color(sb->dnd, UI_COL_RED, 0);
+        lv_obj_set_style_bg_opa(sb->dnd, m->dnd ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        lv_obj_set_width(sb->dnd, m->dnd ? 34 : 18);
+        lv_obj_center(sb->dnd_lbl);
+        sb->dnd_on = m->dnd;
+    }
+
+    /* Right to left: battery at the edge, the DND bell / badge left of it, the clock centred
+     * but kept clear of both (and of the SIP caption / envelope on the left). */
+    if (dnd_changed || batt_changed || time_changed || mwi_changed) {
+        int32_t right = UI_W - 6;
+        if (!lv_obj_is_hidden(sb->batt)) {
+            lv_obj_update_layout(sb->batt);
+            right -= lv_obj_get_width(sb->batt) + 4;
+        }
+        lv_obj_update_layout(sb->dnd);
+        int32_t dnd_x = right - lv_obj_get_width(sb->dnd);
+        lv_obj_set_pos(sb->dnd, dnd_x, 2);
+
+        lv_obj_update_layout(sb->time);
+        int32_t tw = lv_obj_get_width(sb->time);
+        int32_t left = m->dnd ? 68 : (m->mwi_waiting ? (m->mwi_new >= 10 ? 104 : 96) : 96);
+        int32_t x = UI_W / 2 - tw / 2 + (strchr(m->time_hhmm, ' ') ? 8 : 0);
+        if (x + tw > dnd_x - 6) {
+            x = dnd_x - 6 - tw;
+        }
+        if (x < left) {
+            x = left;
+        }
+        lv_obj_set_pos(sb->time, x, 3);
     }
     sb->valid = true;
 }

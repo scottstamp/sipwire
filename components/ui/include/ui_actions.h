@@ -52,4 +52,14 @@ typedef struct {
     void (*save_blf)(void *ctx, const char *list);
     /* Settings > BLF keys: number the voicemail button dials ("" = none). */
     void (*save_vm_number)(void *ctx, const char *number);
+
+    /* call features (any member may be NULL) */
+    void (*answer_waiting)(void *ctx);   /* hold the current call, answer the waiting one */
+    void (*reject_waiting)(void *ctx);   /* refuse the waiting call */
+    void (*swap)(void *ctx);             /* hold the foreground call, resume the held one */
+    void (*transfer_blind)(void *ctx, const char *target);
+    void (*transfer_attended_start)(void *ctx, const char *target);  /* hold + consult call */
+    void (*transfer_attended_complete)(void *ctx);
+    void (*transfer_attended_cancel)(void *ctx);
+    void (*set_dnd)(void *ctx, bool on);
 } ui_actions_t;

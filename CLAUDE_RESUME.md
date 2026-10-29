@@ -53,7 +53,7 @@ Open development work (see `docs/PLAN.md` for the full list):
 - Known small gaps: https OTA untested. (SIP INFO DTMF fallback, 491 retry,
   RTP timestamps after hold and speaker-volume persistence are done.)
 - Call waiting / transfer / DND / page auto answer: phone + SIP done (see
-  ARCHITECTURE "Call features"); no UI screens for them yet. Incoming
+  ARCHITECTURE "Call features"); UI done (transfer picker, call waiting overlay, swap, DND toggle in the status bar, page indicator). Incoming
   INVITE with Replaces and incoming REFER are not supported (REFER → 603).
 - QEMU emulator faults (segfault / LoadStorePIFAddrError on valid MMIO
   around OTA, only with the host CPU saturated) are QEMU's multi-threaded

@@ -8,6 +8,7 @@ typedef struct {
     lv_obj_t *reason;
     lv_obj_t *who;
     lv_obj_t *dur;
+    lv_obj_t *avatar;
 } ended_t;
 
 static ended_t *s_e;
@@ -48,7 +49,7 @@ static lv_obj_t *ended_create(const char *arg)
     lv_obj_add_event_cb(scr, on_delete, LV_EVENT_DELETE, x);
     ui_statusbar_create(scr);
 
-    ui_avatar_create(scr, LV_SYMBOL_CLOSE, UI_COL_BAD, 50);
+    x->avatar = ui_avatar_create(scr, LV_SYMBOL_CLOSE, UI_COL_BAD, 50);
 
     lv_obj_t *title = ui_label_create(scr, &lv_font_montserrat_32, UI_COL_TEXT, "Call ended");
     lv_obj_set_width(title, UI_W);
@@ -70,15 +71,24 @@ static void ended_update(const ui_model_t *m)
         return;
     }
     char buf[24];
-    ui_fit_set(x->reason, reason_text(m->end_code, buf, sizeof(buf)), &lv_font_montserrat_24,
-               false);
-    ui_fit_set_color(x->reason, m->end_code == 0 ? UI_COL_DIM : UI_COL_WARN);
+    bool xferred = m->xfer == UI_XFER_DONE; /* call features: the call was transferred away */
+    ui_fit_set(x->reason, xferred ? "Transferred" : reason_text(m->end_code, buf, sizeof(buf)),
+               &lv_font_montserrat_24, false);
+    lv_obj_t *sym = lv_obj_get_child(x->avatar, 0);
+    lv_label_set_text(sym, xferred ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE);
+    lv_obj_set_style_text_color(sym, xferred ? UI_COL_OK : UI_COL_BAD, 0);
+    lv_obj_set_style_border_color(x->avatar, xferred ? UI_COL_OK : UI_COL_BAD, 0);
+    ui_fit_set_color(x->reason, xferred ? UI_COL_OK : (m->end_code == 0 ? UI_COL_DIM : UI_COL_WARN));
 
     const char *main_txt, *sub_txt;
     ui_remote_texts(m, &main_txt, &sub_txt);
     ui_fit_set(x->who, main_txt, &lv_font_montserrat_24, !m->remote_name[0]);
 
-    if (m->call_seconds > 0) {
+    if (xferred) {
+        char line[96];
+        snprintf(line, sizeof(line), "to %s", ui_target_name(m, m->xfer_target));
+        ui_fit_set(x->dur, line, &lv_font_montserrat_14, true);
+    } else if (m->call_seconds > 0) {
         char t[16];
         char line[40];
         ui_fmt_duration(t, sizeof(t), m->call_seconds);

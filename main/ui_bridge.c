@@ -73,6 +73,8 @@ static struct {
     bool blf_pending;
     char blf[sizeof(((settings_t *)0)->blf)];
     bool vm_pending;
+    bool dnd_pending;
+    bool dnd_value;
     char vm_number[sizeof(((settings_t *)0)->vm_number)];
 } b;
 
@@ -96,6 +98,7 @@ static void update_settings_locked(void)
                             st.sip_password, st.sip_display_name);
     ui_bridge_fill_time_ota(&b.loc, st.ntp_server, st.tz, st.clock_24h, st.ota_url);
     ui_bridge_fill_vm(&b.loc, st.vm_number);
+    ui_bridge_fill_dnd(&b.loc, st.dnd);
     memset(st.wifi_pass, 0, sizeof(st.wifi_pass));
     memset(st.sip_password, 0, sizeof(st.sip_password));
 }
@@ -288,6 +291,60 @@ static void act_save_vm_number(void *ctx, const char *number)
     kick();
 }
 
+/* call features: all of these are queued commands in the phone, non-blocking */
+static void act_answer_waiting(void *ctx)
+{
+    (void)ctx;
+    phone_answer_waiting();
+}
+
+static void act_reject_waiting(void *ctx)
+{
+    (void)ctx;
+    phone_reject_waiting();
+}
+
+static void act_swap(void *ctx)
+{
+    (void)ctx;
+    phone_swap();
+}
+
+static void act_transfer_blind(void *ctx, const char *target)
+{
+    (void)ctx;
+    phone_transfer_blind(target);
+}
+
+static void act_transfer_attended_start(void *ctx, const char *target)
+{
+    (void)ctx;
+    phone_transfer_attended_start(target);
+}
+
+static void act_transfer_attended_complete(void *ctx)
+{
+    (void)ctx;
+    phone_transfer_attended_complete();
+}
+
+static void act_transfer_attended_cancel(void *ctx)
+{
+    (void)ctx;
+    phone_transfer_attended_cancel();
+}
+
+static void act_set_dnd(void *ctx, bool on)
+{
+    (void)ctx;
+    /* persists setting `dnd` (NVS: not on the LVGL task); the bridge task applies it */
+    xSemaphoreTake(b.mtx, portMAX_DELAY);
+    b.dnd_value = on;
+    b.dnd_pending = true;
+    xSemaphoreGive(b.mtx);
+    kick();
+}
+
 static const ui_actions_t s_actions = {
     .dial = act_dial,
     .answer = act_answer,
@@ -305,6 +362,14 @@ static const ui_actions_t s_actions = {
     .ota_start = act_ota_start,
     .save_blf = act_save_blf,
     .save_vm_number = act_save_vm_number,
+    .answer_waiting = act_answer_waiting,
+    .reject_waiting = act_reject_waiting,
+    .swap = act_swap,
+    .transfer_blind = act_transfer_blind,
+    .transfer_attended_start = act_transfer_attended_start,
+    .transfer_attended_complete = act_transfer_attended_complete,
+    .transfer_attended_cancel = act_transfer_attended_cancel,
+    .set_dnd = act_set_dnd,
 };
 
 /* ------------------------------------------------------------------ */
@@ -442,6 +507,15 @@ static void do_saves(void)
     static settings_t st;           /* bridge task only */
     static char ota_url[sizeof(b.ota_url)];
     bool wifi, acc, cal, tm, ota, blf, vm;
+
+    xSemaphoreTake(b.mtx, portMAX_DELAY);
+    bool dnd_set = b.dnd_pending;
+    bool dnd_val = b.dnd_value;
+    b.dnd_pending = false;
+    xSemaphoreGive(b.mtx);
+    if (dnd_set) {
+        phone_set_dnd(dnd_val);         /* persists the setting, applied live by the sip task */
+    }
 
     xSemaphoreTake(b.mtx, portMAX_DELAY);
     wifi = b.wifi_pending;

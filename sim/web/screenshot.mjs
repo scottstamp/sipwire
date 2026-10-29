@@ -490,6 +490,164 @@ const SCENARIOS = {
       await hold(150, 120, 200);   // test touch; the dot stays where it was lifted
     },
   },
+
+  // ---- call features (transfer, call waiting, DND, page) ----
+  call_transfer_button: (sim) => {   // in-call screen with the Transfer button
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    sim.set_call(4, '1001', 'Bob Example', 42);
+  },
+  transfer_list: {   // BLF targets with live lamps (idle / busy / ringing / unknown)
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.set_blf(0, '1002', 'Carol', 1);
+      sim.set_blf(1, '1003', 'Dave Reception', 3);
+      sim.set_blf(2, '1004', '', 2);
+      sim.set_blf(3, '1005', 'Warehouse', 0);
+      sim.set_blf(4, '1006', 'Support', 1);
+      sim.set_call(4, '1001', 'Bob Example', 42);
+    },
+    steps: async (page, click) => {
+      await click(108, 231);   // Transfer
+      await page.waitForTimeout(250);
+    },
+  },
+  transfer_list_empty: {   // no BLF keys: only "Other number..."
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.set_call(4, '1001', 'Bob Example', 42);
+    },
+    steps: async (page, click) => {
+      await click(108, 231);
+      await page.waitForTimeout(250);
+    },
+  },
+  transfer_entry: {   // numeric entry for "Other number..."
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.set_blf(0, '1002', 'Carol', 1);
+      sim.set_call(4, '1001', 'Bob Example', 42);
+    },
+    steps: async (page, click) => {
+      await click(108, 231);
+      await page.waitForTimeout(250);
+      await click(120, 292);   // Other number...
+      await page.evaluate(() => { for (const k of '0155512') window.sim.key(k, 0); });
+    },
+  },
+  transfer_choice: {   // Transfer now / Talk first
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.set_blf(0, '1002', 'Carol', 1);
+      sim.set_blf(1, '1003', 'Dave Reception', 3);
+      sim.set_call(4, '1001', 'Bob Example', 42);
+    },
+    steps: async (page, click) => {
+      await click(108, 231);
+      await page.waitForTimeout(250);
+      await click(120, 144);   // second row (busy)
+    },
+  },
+  transfer_blind_progress: {   // after "Transfer now": trying...
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.set_blf(0, '1002', 'Carol', 1);
+      sim.set_call(4, '1001', 'Bob Example', 42);
+    },
+    steps: async (page, click) => {
+      await click(108, 231);
+      await page.waitForTimeout(250);
+      await click(120, 96);    // Carol
+      await click(120, 200);   // Transfer now
+      await page.waitForTimeout(1000);   // mock: accepted
+    },
+  },
+  transfer_failed: {   // failure shown on the call screen, call kept
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.set_call(4, '1001', 'Bob Example', 42);
+      sim.set_xfer(6, 0, 486, '1003');
+    },
+  },
+  attended_consult: {   // consult call to Dave, Bob on hold; Complete / Cancel
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.set_call(4, '1003', 'Dave Reception', 9);
+      sim.set_second(5, '1001', 'Bob Example', 63);
+      sim.set_xfer(1, 1, 0, '1003');
+    },
+  },
+  attended_consult_ringing: {   // consultation call still ringing: Complete disabled
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.set_call(2, '1003', '', 0);
+      sim.set_second(5, '1001', 'Bob Example', 63);
+      sim.set_xfer(1, 1, 0, '1003');
+    },
+  },
+  call_waiting: {   // second call rings during a call
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.set_call(4, '1001', 'Bob Example', 42);
+      sim.set_second(3, '1002', 'Carol Test', 0);
+    },
+  },
+  call_waiting_number: {   // unknown caller, long number
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.set_call(4, '1001', 'Bob Example', 42);
+      sim.set_second(3, '+4915112345678', '', 0);
+    },
+  },
+  two_calls: {   // active call + held call, Swap
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.set_call(4, '1002', 'Carol Test', 17);
+      sim.set_second(5, '1001', 'Bob Example', 125);
+    },
+  },
+  dnd_on: (sim) => {   // DND badge in the status bar (home, 12 h clock, battery)
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    sim.set_battery(100, true);
+    sim.set_dnd(1);
+  },
+  dnd_on_nobattery: (sim) => {
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    sim.set_dnd(1);
+  },
+  dnd_off_bell: (sim) => {   // the tap target when DND is off
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    sim.set_battery(80, false);
+  },
+  dnd_tap: {   // tapping the bell turns DND on (round trip through the mock)
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    },
+    steps: async (page, click) => {
+      await click(224, 11);
+    },
+  },
+  dnd_mwi_battery_worst: (sim) => {   // widest status bar: 12 h clock, 2-digit voicemail, charging battery, DND
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    sim.set_battery(100, true);
+    sim.set_mwi(1, 12, 0);
+    sim.set_dnd(1);
+  },
+  page_call: {   // auto-answered page on the loudspeaker
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.set_call(4, '650', 'Reception Page', 4);
+      sim.set_page(1);
+    },
+    steps: async (page, click) => {
+      await click(108, 167);   // Speaker on
+    },
+  },
+  ended_transferred: (sim) => {
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    sim.set_blf(0, '1003', 'Dave Reception', 1);
+    sim.set_call(6, '1001', 'Bob Example', 73);
+    sim.set_xfer(5, 0, 200, '1003');
+  },
 };
 
 const args = process.argv.slice(2);

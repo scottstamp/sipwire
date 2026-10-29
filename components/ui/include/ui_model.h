@@ -43,6 +43,17 @@ typedef enum {
     UI_BLF_BUSY,               /* red */
 } ui_blf_state_t;
 
+/* call features: transfer progress (mirrors the phone's xfer_state_t) */
+typedef enum {
+    UI_XFER_IDLE,
+    UI_XFER_CONSULT,           /* attended: consultation call placed, original on hold */
+    UI_XFER_TRYING,            /* REFER sent */
+    UI_XFER_ACCEPTED,
+    UI_XFER_PROGRESS,          /* target is being called */
+    UI_XFER_DONE,              /* transferred; the calls are hung up */
+    UI_XFER_FAILED,            /* xfer_code says why; the call is kept */
+} ui_xfer_state_t;
+
 #define UI_BLF_MAX       8
 #define UI_BLF_EXT_LEN   32    /* incl. NUL */
 #define UI_BLF_LABEL_LEN 24    /* incl. NUL */
@@ -108,4 +119,18 @@ typedef struct {
     uint16_t mwi_new;          /* new / old voice messages (0 if unknown) */
     uint16_t mwi_old;
     char vm_number[32];        /* dialled by the voicemail button ("*97"); may be empty */
+
+    /* call features. The call fields above describe the foreground call; the
+     * background call is a waiting incoming call (UI_CALL_RINGING_IN) or a
+     * held one (UI_CALL_HELD); UI_CALL_IDLE = none. */
+    bool dnd;                  /* do not disturb on */
+    bool auto_answered;        /* foreground call was answered automatically (page / intercom) */
+    ui_call_state_t second_call;
+    char second_number[64];
+    char second_name[64];      /* may be empty */
+    uint32_t second_seconds;   /* elapsed while held */
+    ui_xfer_state_t xfer;      /* transfer in progress / last result (until the phone is idle) */
+    bool xfer_attended;
+    int xfer_code;             /* SIP status for UI_XFER_FAILED / DONE, 0 = none */
+    char xfer_target[64];
 } ui_model_t;

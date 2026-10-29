@@ -387,6 +387,84 @@ static void test_build_model(void)
     TEST_ASSERT_EQUAL_STRING("", m.time_hhmm);
 }
 
+/* call features: second call, transfer, dnd, page */
+static void test_model_call_features(void)
+{
+    ui_bridge_local_t loc;
+    memset(&loc, 0, sizeof(loc));
+    phone_status_t ph;
+    memset(&ph, 0, sizeof(ph));
+    ui_model_t m;
+
+    ph.call = CALL_ACTIVE;
+    ph.call_start_us = 10 * 1000000LL;
+    strcpy(ph.number, "600");
+    ph.auto_answered = true;
+    ph.second.call = CALL_RINGING_IN;
+    strcpy(ph.second.number, "1002");
+    strcpy(ph.second.name, "Carol");
+    ph.second.call_start_us = 0;
+    ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
+    TEST_ASSERT_TRUE(m.auto_answered);
+    TEST_ASSERT_EQUAL(UI_CALL_RINGING_IN, m.second_call);
+    TEST_ASSERT_EQUAL_STRING("1002", m.second_number);
+    TEST_ASSERT_EQUAL_STRING("Carol", m.second_name);
+    TEST_ASSERT_EQUAL_UINT32(0, m.second_seconds);
+    TEST_ASSERT_FALSE(m.dnd);
+    TEST_ASSERT_EQUAL(UI_XFER_IDLE, m.xfer);
+
+    /* held background call: elapsed time; a background ACTIVE (hold unconfirmed) counts as held */
+    ph.second.call = CALL_ACTIVE;
+    ph.second.call_start_us = 40 * 1000000LL;
+    ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
+    TEST_ASSERT_EQUAL(UI_CALL_HELD, m.second_call);
+    TEST_ASSERT_EQUAL_UINT32(32, m.second_seconds);
+    ph.second.call = CALL_HELD;
+    ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
+    TEST_ASSERT_EQUAL(UI_CALL_HELD, m.second_call);
+
+    /* no second call: no leftovers */
+    ph.second.call = CALL_IDLE;
+    ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
+    TEST_ASSERT_EQUAL(UI_CALL_IDLE, m.second_call);
+    TEST_ASSERT_EQUAL_STRING("", m.second_number);
+    TEST_ASSERT_EQUAL_UINT32(0, m.second_seconds);
+
+    /* auto answer flag only with a call */
+    ph.call = CALL_IDLE;
+    ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
+    TEST_ASSERT_FALSE(m.auto_answered);
+
+    /* transfer states, attended flag, code and target */
+    ph.xfer.state = XFER_FAILED;
+    ph.xfer.attended = false;
+    ph.xfer.code = 486;
+    strcpy(ph.xfer.target, "1003");
+    ui_bridge_build_model(&loc, &ph, 0, &m);
+    TEST_ASSERT_EQUAL(UI_XFER_FAILED, m.xfer);
+    TEST_ASSERT_EQUAL(486, m.xfer_code);
+    TEST_ASSERT_EQUAL_STRING("1003", m.xfer_target);
+    TEST_ASSERT_FALSE(m.xfer_attended);
+    ph.xfer.state = XFER_CONSULT;
+    ph.xfer.attended = true;
+    ui_bridge_build_model(&loc, &ph, 0, &m);
+    TEST_ASSERT_EQUAL(UI_XFER_CONSULT, m.xfer);
+    TEST_ASSERT_TRUE(m.xfer_attended);
+    TEST_ASSERT_EQUAL(UI_XFER_TRYING, ui_bridge_map_xfer(XFER_TRYING));
+    TEST_ASSERT_EQUAL(UI_XFER_ACCEPTED, ui_bridge_map_xfer(XFER_ACCEPTED));
+    TEST_ASSERT_EQUAL(UI_XFER_PROGRESS, ui_bridge_map_xfer(XFER_PROGRESS));
+    TEST_ASSERT_EQUAL(UI_XFER_DONE, ui_bridge_map_xfer(XFER_DONE));
+    ph.xfer.state = XFER_IDLE;
+    ui_bridge_build_model(&loc, &ph, 0, &m);
+    TEST_ASSERT_EQUAL_STRING("", m.xfer_target);
+    TEST_ASSERT_EQUAL(0, m.xfer_code);
+
+    /* dnd follows the setting copy in loc */
+    ui_bridge_fill_dnd(&loc, true);
+    ui_bridge_build_model(&loc, &ph, 0, &m);
+    TEST_ASSERT_TRUE(m.dnd);
+}
+
 static void test_fill_settings(void)
 {
     ui_bridge_local_t loc;
@@ -691,5 +769,6 @@ int main(void)
     RUN_TEST(test_blf_format_roundtrip);
     RUN_TEST(test_blf_plan);
     RUN_TEST(test_build_model_blf_mwi);
+    RUN_TEST(test_model_call_features);
     return UNITY_END();
 }

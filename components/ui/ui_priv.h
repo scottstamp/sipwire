@@ -14,6 +14,7 @@ typedef enum {
     UI_SCR_ENDED,
     UI_SCR_SETTINGS,
     UI_SCR_CALIBRATE,
+    UI_SCR_TRANSFER, /* call features: pick a transfer target */
     UI_SCR_COUNT
 } ui_screen_t;
 
@@ -38,6 +39,7 @@ extern const ui_screen_ops_t ui_ops_call;
 extern const ui_screen_ops_t ui_ops_ended;
 extern const ui_screen_ops_t ui_ops_settings;
 extern const ui_screen_ops_t ui_ops_calibrate;
+extern const ui_screen_ops_t ui_ops_transfer;
 
 /** User initiated navigation (animated). Safe to call from event callbacks. */
 void ui_goto(ui_screen_t screen, const char *arg);
@@ -67,6 +69,23 @@ void ui_act_save_blf(const char *list);
 void ui_act_save_vm_number(const char *number);
 void ui_act_touch_cal_begin(void);
 void ui_act_touch_cal_end(const ui_touch_cal_t *cal_or_null);
+
+/* call features */
+void ui_act_answer_waiting(void);
+void ui_act_reject_waiting(void);
+void ui_act_swap(void);
+void ui_act_transfer_blind(const char *target);
+void ui_act_transfer_attended_start(const char *target);
+void ui_act_transfer_attended_complete(void);
+void ui_act_transfer_attended_cancel(void);
+void ui_act_set_dnd(bool on);
+
+/** Display name of a transfer target: the BLF label for `ext`, else `ext`. */
+const char *ui_target_name(const ui_model_t *m, const char *ext);
+
+/** Text for the transfer state ("Transferring... trying", "Transfer failed: 486") or NULL
+ *  for UI_XFER_IDLE / CONSULT. `bad` is set for a failure. */
+const char *ui_xfer_text(const ui_model_t *m, char *buf, size_t cap, bool *bad);
 
 /* ---- helpers shared by call screens ---- */
 
