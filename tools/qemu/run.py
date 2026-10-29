@@ -61,7 +61,7 @@ args = [qemu, '-M', 'esp32s3', '-m', '8M',             # PSRAM size, as on the N
         '-global', 'driver=nvram.esp32s3.efuse,property=drive,value=efuse',
         '-global', 'driver=timer.esp32s3.timg,property=wdt_disable,value=true',
         '-nic', 'user,model=open_eth',
-        '-display', 'none', '-monitor', 'none', '-serial', 'stdio']
+        '-display', 'none', '-monitor', 'none', '-serial', 'stdio'] + os.environ.get('QEMU_EXTRA', '').split()
 p = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 buf = []            # completed lines (ANSI colours stripped)
@@ -80,6 +80,15 @@ class QemuDied(Exception):
     pass
 
 
+# Emulator faults, not firmware failures: QEMU's multi-threaded TCG occasionally (seen only with
+# the host CPU saturated) faults on valid MMIO (systimer 0x6002304c, 0x60020050) or segfaults
+# itself, around the OTA write/verify/reboot. Such a run exits with EMU_FAULT_RC and smoke.sh
+# re-runs the shard once. See README "Emulator faults".
+EMU_FAULT_RC = 3
+EMU_FAULT_RE = re.compile(r'LoadStorePIFAddrError|Bad ram pointer')
+emu_fault = False
+
+
 def check_alive():
     """A QEMU that exited can never answer: fail now instead of at the step's timeout."""
     if eof.is_set():
@@ -96,7 +105,7 @@ def out(text):
 
 
 def reader():
-    global prompts, sent, first_boot
+    global prompts, sent, first_boot, emu_fault
     fd = p.stdout.fileno()
     part = b''              # incomplete line
     tail = b''              # last bytes of the stream, so a prompt split across reads still counts
@@ -123,6 +132,8 @@ def reader():
             buf.extend(lines)
         for line in lines:
             out(line)
+            if EMU_FAULT_RE.search(line):
+                emu_fault = True
     if part:
         out(part.decode('utf-8', 'replace'))
     eof.set()
@@ -301,6 +312,8 @@ try:
 except QemuDied as e:
     out(f'### [{time.monotonic() - T0:6.1f}s] {e}')
     rc = 1
+    if p.wait() < 0:                # killed by a signal (segfault): the emulator, not the guest
+        emu_fault = True
 finally:
     p.kill()
     p.wait()
@@ -312,5 +325,8 @@ finally:
 slow = sorted(timing, reverse=True)[:5]
 out('### slowest steps: ' + '; '.join(f'{d:.1f}s {l[:50]}' for d, l in slow))
 out(f'### total {time.monotonic() - T0:.1f}s')
+if rc != 0 and emu_fault:
+    out('RESULT FAIL (emulator fault)')
+    sys.exit(EMU_FAULT_RC)
 out('RESULT ' + ('OK' if rc == 0 else 'FAIL'))
 sys.exit(rc)

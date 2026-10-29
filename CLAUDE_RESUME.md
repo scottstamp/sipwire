@@ -55,10 +55,10 @@ Open development work (see `docs/PLAN.md` for the full list):
 - Call waiting / transfer / DND / page auto answer: phone + SIP done (see
   ARCHITECTURE "Call features"); no UI screens for them yet. Incoming
   INVITE with Replaces and incoming REFER are not supported (REFER → 603).
-- QEMU flake seen again (2026-10-29, full smoke): 40-ota, right after the
-  OTA reboot core 1 panicked (LoadStorePIFAddrError) in SysTickIsrHandler
-  reading the systimer counter (0x6002304c) from the idle task. Under
-  investigation.
+- QEMU emulator faults (segfault / LoadStorePIFAddrError on valid MMIO
+  around OTA, only with the host CPU saturated) are QEMU's multi-threaded
+  TCG; smoke.sh re-runs such a shard once (tools/qemu/README.md "Emulator
+  faults"). Any other failure is real.
 
 ## Hardware (details in docs/HARDWARE.md)
 

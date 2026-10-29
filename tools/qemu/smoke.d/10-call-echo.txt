@@ -2,10 +2,9 @@
 include _account.inc
 
 # echo canceller: off by default; switch it on (allocates it) for the calls below.
-# The reply and the audio component's log line race: expect both, any order.
+# The reply and the audio component's log line race and can share a line: expect the log line.
 do cfg set aec true
-expect (\baec\s+= |audio: aec: SpeexDSP, tail 1280) 5
-expect (\baec\s+= |audio: aec: SpeexDSP, tail 1280) 5
+expect audio: aec: SpeexDSP, tail 1280 5
 
 # 1: echo test (G.722 negotiated), hold/resume, dtmf, local hangup
 do call 600

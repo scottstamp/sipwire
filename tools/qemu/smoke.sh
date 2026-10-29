@@ -150,6 +150,21 @@ run_shard() {
     exit "$rc"
 }
 
+# shard_with_retry <index> <name> <scenario>: run_shard, and once more if run.py reported an
+# emulator fault (exit 3: QEMU crashed or faulted on valid MMIO, see README "Emulator faults").
+# A failed step is never retried.
+shard_with_retry() {
+    local rc=0
+    ( run_shard "$@" ) || rc=$?
+    if [ "$rc" -eq 3 ]; then
+        echo "### emulator fault: re-running shard $2 once"
+        touch "$RESDIR/$2.retried"
+        rc=0
+        ( run_shard "$@" ) || rc=$?
+    fi
+    return "$rc"
+}
+
 rm -f "$RESDIR"/* 2>/dev/null || true
 trap 'rm -rf "$OTA_SRC" "$RESDIR"' EXIT
 
@@ -162,7 +177,7 @@ if [ $# -ge 1 ]; then
     LOG="${2:-$BUILD/smoke-$NAME.log}"
     mkdir -p "$(dirname "$LOG")"
     set +e
-    ( run_shard 0 "$NAME" "$SCEN" ) 2>&1 | tee "$LOG"
+    shard_with_retry 0 "$NAME" "$SCEN" 2>&1 | tee "$LOG"
     rc=${PIPESTATUS[0]}
     set -e
     exit "$rc"
@@ -177,7 +192,7 @@ i=0
 for f in "${SHARDS[@]}"; do
     n="$(basename "$f" .txt)"
     NAMES+=("$n")
-    ( run_shard "$i" "$n" "$f" ) >"$BUILD/smoke-$n.log" 2>&1 &
+    shard_with_retry "$i" "$n" "$f" >"$BUILD/smoke-$n.log" 2>&1 &
     PIDS+=($!)
     i=$((i + 1))
 done
@@ -193,7 +208,9 @@ slowest="" slow_s=-1
 for n in "${NAMES[@]}"; do
     read -r rc secs < "$RESDIR/$n" 2>/dev/null || { rc=99; secs=0; }
     if [ "$rc" -eq 0 ]; then res=PASS; else res=FAIL; fail=1; fi
-    printf '%-18s %-5s %ss   (build_qemu/smoke-%s.log)\n' "$n" "$res" "$secs" "$n"
+    note=""
+    [ -f "$RESDIR/$n.retried" ] && note="  [re-run after emulator fault]"
+    printf '%-18s %-5s %ss   (build_qemu/smoke-%s.log)%s\n' "$n" "$res" "$secs" "$n" "$note"
     if [ "$secs" -gt "$slow_s" ]; then slow_s=$secs; slowest=$n; fi
     if [ "$rc" -ne 0 ]; then
         echo "--- tail of smoke-$n.log:"

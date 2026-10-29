@@ -103,5 +103,19 @@ device keeps the default; its console is UART0). Afterwards: `40-ota` 15/15, ful
 PSRAM was ruled out (no PSRAM: still 3 failures in 15). If it comes back, decode the panic PC
 with `xtensa-esp32s3-elf-addr2line -e build_qemu/sipwire.elf` first.
 
+## Emulator faults (retried once)
+
+Still seen after that fix, only with the host CPU saturated (8 shards next to 8 busy loops: 2
+failures in 16; 0 in 26 without the load): around the OTA write / verify / reboot QEMU either
+segfaults (`QEMU exited (rc=-11)`) or the guest takes a `LoadStorePIFAddrError` on a valid MMIO
+register (systimer `0x6002304c`, `0x60020050`) with no sipwire code on the stack. Guest code
+cannot crash the emulator, so this is QEMU (its multi-threaded TCG, one host thread per core).
+`-accel tcg,thread=single` is ~3x slower and breaks the post-OTA boot, so it is not used.
+`run.py` exits 3 on such a fault and `smoke.sh` re-runs that shard once (`[re-run after
+emulator fault]` in the summary; both attempts are in the shard log). Failed steps are never
+retried. A `Guru Meditation` with any other cause, or one in our code, is a real failure.
+
 A log line from another task can land in the middle of a console reply (`sip_port = I (..)
-phone: ... 5182`), so `expect` on a reply that follows a `cfg set` matches the key, not the value.
+phone: ... 5182`), so `expect` on a reply that follows a `cfg set` matches the key, not the value. The same
+interleaving can put a reply and a log line on one line: never `expect` the same alternation
+twice (`(reply|log)` x2); expect the log line once (`do` has already waited for the prompt).
