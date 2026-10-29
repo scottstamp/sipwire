@@ -32,7 +32,7 @@ flash = os.path.join(build, 'qemu_flash_run.bin')
 shutil.copyfile(os.path.join(build, 'qemu_flash.bin'), flash)
 
 qemu = os.environ.get('QEMU', 'qemu-system-xtensa')
-args = [qemu, '-M', 'esp32s3', '-m', '32M',
+args = [qemu, '-M', 'esp32s3', '-m', '8M',             # PSRAM size, as on the N16R8
         '-drive', f'file={flash},if=mtd,format=raw',
         '-drive', f'file={efuse},if=none,format=raw,id=efuse',
         '-global', 'driver=nvram.esp32s3.efuse,property=drive,value=efuse',

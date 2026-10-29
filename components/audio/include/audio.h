@@ -39,3 +39,43 @@ void audio_play_dtmf(char digit);
 
 void audio_set_volume(uint8_t volume);  /* 0-100, software gain */
 void audio_set_mic_mute(bool mute);
+
+/* ---- acoustic echo canceller (esp-sr AEC on the mic path) ---- */
+
+/** Switch the canceller live (setting `aec`). The first enable allocates it
+ *  (PSRAM when present); ESP_ERR_NOT_SUPPORTED when built without
+ *  CONFIG_SIPWIRE_AEC. Off = the mic path skips it entirely. */
+esp_err_t audio_set_aec(bool on);
+/** Reference delay in samples (speaker index -> mic index), or -1 for the
+ *  built-in default (the TX DMA depth). For tuning from the console. */
+esp_err_t audio_set_aec_delay(int samples);
+/** esp-sr residual echo suppression level, 0 normal .. 2 very aggressive. */
+esp_err_t audio_set_aec_nlp(int level);
+
+typedef struct {
+    bool built;                     /* CONFIG_SIPWIRE_AEC */
+    bool enabled;                   /* setting / audio_set_aec */
+    bool ready;                     /* instance allocated */
+    bool running;                   /* processing the current stream */
+    const char *mode;               /* esp-sr mode name */
+    bool bypassed;                  /* QEMU build: esp-sr not called (pass-through) */
+    int nlp_level;
+    uint32_t block_samples;         /* esp-sr frame size */
+    uint32_t latency_samples;       /* added by adapting 20 ms frames to blocks */
+    uint32_t delay_samples;         /* reference delay in use (incl. xrun shifts) */
+    bool delay_override;
+    uint32_t mem_internal, mem_psram;   /* heap taken by the instance + buffers */
+    /* since the canceller (re)started in the current / last stream */
+    uint32_t frames;                /* 20 ms mic frames processed */
+    uint32_t blocks;                /* esp-sr blocks processed */
+    uint32_t avg_us;                /* processing time per 20 ms frame */
+    uint32_t max_us;                /* worst single block */
+    uint32_t ref_late;              /* reference samples not yet written (delay too small) */
+    uint32_t tx_xruns, rx_xruns;    /* I2S queue overflows (each shifts the delay by 10 ms) */
+    /* echo estimates over blocks with far-end signal: dB, 0 = no data */
+    float erl_db;                   /* speaker reference -> mic (coupling) */
+    float erle_db;                  /* mic -> canceller output, whole run */
+    float erle_recent_db;           /* same, last ~2 s with far-end signal */
+} audio_aec_stats_t;
+
+void audio_get_aec_stats(audio_aec_stats_t *out);

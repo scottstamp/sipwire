@@ -63,6 +63,7 @@ static const field_t s_fields[] = {
     FIELD(ring_volume, F_U8, 0, 100),
     FIELD(call_volume, F_U8, 0, 100),
     FIELD(mic_gain, F_U8, 0, 100),
+    FIELD(aec, F_BOOL, 0, 1),
     FIELD(backlight, F_U8, 0, 100),
     FIELD(backlight_timeout_s, F_U16, 0, UINT16_MAX),
     STR_FIELD(ntp_server, F_STR),

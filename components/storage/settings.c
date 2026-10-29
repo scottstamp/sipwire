@@ -46,6 +46,7 @@ static const char *TAG = "storage";
 #define K_RING_VOL    "ring_vol"
 #define K_CALL_VOL    "call_vol"
 #define K_MIC_GAIN    "mic_gain"
+#define K_AEC         "aec"
 #define K_BACKLIGHT   "backlight"
 #define K_BL_TIMEOUT  "bl_timeout"
 #define K_NTP_SERVER  "ntp_server"
@@ -72,6 +73,7 @@ static void settings_defaults(settings_t *s)
     s->ring_volume = 70;
     s->call_volume = 60;
     s->mic_gain = 50;
+    s->aec = true;
     s->backlight = 80;
     s->backlight_timeout_s = 30;
     strcpy(s->ntp_server, CONFIG_SIPWIRE_NTP_SERVER);
@@ -154,6 +156,9 @@ static void load_all(nvs_handle_t h, settings_t *s)
     load_u8_max100(h, K_RING_VOL, &s->ring_volume);
     load_u8_max100(h, K_CALL_VOL, &s->call_volume);
     load_u8_max100(h, K_MIC_GAIN, &s->mic_gain);
+    if (nvs_get_u8(h, K_AEC, &u8) == ESP_OK) {
+        s->aec = u8 != 0;
+    }
     load_u8_max100(h, K_BACKLIGHT, &s->backlight);
     nvs_get_u16(h, K_BL_TIMEOUT, &s->backlight_timeout_s);
 
@@ -244,6 +249,9 @@ static esp_err_t store_changed(nvs_handle_t h, const settings_t *in)
     STORE_NUM(nvs_set_u8, K_RING_VOL, ring_volume);
     STORE_NUM(nvs_set_u8, K_CALL_VOL, call_volume);
     STORE_NUM(nvs_set_u8, K_MIC_GAIN, mic_gain);
+    if (in->aec != s_cur.aec) {
+        ESP_RETURN_ON_ERROR(nvs_set_u8(h, K_AEC, in->aec ? 1 : 0), TAG, K_AEC);
+    }
     STORE_NUM(nvs_set_u8, K_BACKLIGHT, backlight);
     STORE_NUM(nvs_set_u16, K_BL_TIMEOUT, backlight_timeout_s);
     if (in->touch_cal.valid != s_cur.touch_cal.valid) {

@@ -16,6 +16,10 @@ components/display/  ILI9341 + XPT2046 + PWM backlight via esp_lcd / esp_lvgl_po
   idf_component.yml  managed deps: lvgl/lvgl ~9.6, espressif/esp_lvgl_port ^2.9,
                      espressif/esp_lcd_ili9341 ^2.1, atanisoft/esp_lcd_touch_xpt2046 ^1.0.6
                      (which pulls espressif/esp_lcd_touch)
+components/audio/    I2S speaker + mic, tones, echo canceller (setting `aec`, console `aec`)
+  idf_component.yml  managed dep: espressif/esp-sr ~2.6 (AEC API only: no models, no
+                     model partition). Espressif MIT licence: free on Espressif chips only.
+                     Pulls espressif/esp-dl, dl_fft, cjson, esp-dsp (only AEC code is linked).
 components/ota/      firmware update over HTTP(S) (`ota <url>`, Settings > Update), rollback safety;
                      uses ESP-IDF's own esp_https_ota (no managed component added)
 components/sip/      own SIP UA incl. BLF (dialog) / MWI (message-summary) subscriptions;

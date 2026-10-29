@@ -7,7 +7,7 @@ components/
   board/             Kconfig pins, board_init(), bus bring-up (SPI, I2S, SDMMC)
   display/           ILI9341 + XPT2046 via esp_lcd + esp_lvgl_port
   keypad/            matrix scanner → key events (press/release/long/repeat)
-  audio/             I2S in/out tasks (16 kHz), gain, DC block, tone gen
+  audio/             I2S in/out tasks (16 kHz), gain, DC block, tone gen, echo canceller (esp-sr AEC)
   codec/             G.722 (64k), G.711 µ/A-law, 2:1 half-band resampler. Pure C, host-testable
   rtp/               RTP tx/rx, RFC 3550, RFC 2833 DTMF, adaptive jitter buffer
   sip/               minimal SIP UA: parser, digest auth, transactions, dialogs,
@@ -78,10 +78,33 @@ Write our own minimal UA in C (UDP first, TCP later). Rationale:
 ## Media path
 Everything between the I2S driver and `rtp` runs at 16 kHz, 20 ms frames
 (320 samples); `rtp` adapts to the negotiated codec.
-mic → I2S RX (16 kHz) → DC block → (AEC later) → rtp: G.722 enc
-                                                  or ↓2 → G.711 enc → RTP tx
+mic → I2S RX (16 kHz) → DC block → AEC → mute → rtp: G.722 enc
+                                    ↑            or ↓2 → G.711 enc → RTP tx
+                          reference ring (by sample index)
+                                    ↑
 RTP rx → jitter buf → G.722 dec, or G.711 dec → ↑2 → mixer (+ tones, 16 kHz)
        → gain/soft clip → I2S TX → amp
+
+### Echo canceller (`audio_aec.c`, setting `aec`, console `aec`)
+esp-sr's AEC (`esp_aec.h` only: no AFE, models or model partition), mode from
+Kconfig `SIPWIRE_AEC_MODE` (default FD low cost: linear filter + residual
+suppression, 512-sample / 32 ms blocks). Speaker and mic share one I2S clock, so
+there is no drift: `tx_write` stores every sample it hands to I2S (after volume,
+tones mixed, soft clip, i.e. exactly what plays) in a 4096-sample ring indexed by
+its running TX sample count; for mic frame [n, n+320) the RX task reads ring
+indices [n−D, n+320−D). D = `I2S_DMA_DESC_NUM × I2S_CHUNK_SAMPLES` = 640 (40 ms):
+the TX queue starts empty, so the first buffer written plays after the whole DMA
+ring, while RX index 0 is captured as both channels start. Converter, I2S FIFO and
+acoustic delay (≤ ~2 ms) put the echo slightly *after* n−D, inside the adaptive
+filter. An I2S queue overflow (task > 30 ms late, driver drops a buffer) moves D
+by 160 (TX +, RX −); `aec delay <samples>` overrides it for tuning. 20 ms frames
+are adapted to esp-sr blocks by `dsp_blockfifo` (output pre-filled with
+block − gcd(320, block) zeros: +448 samples = 28 ms on the mic path for 512, +12 ms
+for the 256-sample VoIP modes). Off (or no mic consumer) = one branch, no copy.
+The instance is allocated on first enable and kept (~19 KB internal incl. our block
+buffers, ~117 KB PSRAM incl. the ring; esp-sr insists on PSRAM). Toggling on
+re-primes the FIFO, the filter keeps what it learned. QEMU: `aec_process` is
+replaced by a copy (Espressif's QEMU segfaults in it); the rest runs.
 Codec preference (settings `codec_pref`): G.722 > PCMU > PCMA. On the wire all
 three are 64 kbit/s with an 8000 Hz RTP clock (RFC 3551, G.722 included).
 
@@ -89,7 +112,8 @@ three are 64 kbit/s with an 8000 Hz RTP clock (RFC 3551, G.722 included).
 wifi ssid/pass, sip server/port/transport, user, auth user, password,
 display name, codec prefs, ring volume, call volume, touch calibration,
 `ntp_server` (default CONFIG_SIPWIRE_NTP_SERVER), `tz` (POSIX TZ, default
-CONFIG_SIPWIRE_TZ), `clock_24h` (default false = 12 h), `ota_url` (default
+CONFIG_SIPWIRE_TZ), `clock_24h` (default false = 12 h), `aec` (echo canceller,
+default true, applied live), `ota_url` (default
 CONFIG_SIPWIRE_OTA_URL), `blf` (BLF keys, default none), `vm_number` (default `*97`).
 Set via UI settings, serial console (`sipwire>` REPL), or `config.json` on SD.
 

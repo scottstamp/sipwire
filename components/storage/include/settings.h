@@ -31,6 +31,7 @@ typedef struct {
     uint8_t ring_volume;       /* 0-100 */
     uint8_t call_volume;       /* 0-100 */
     uint8_t mic_gain;          /* 0-100 */
+    bool aec;                  /* acoustic echo canceller on the mic path, default true */
     /* display */
     uint8_t backlight;         /* 0-100 */
     uint16_t backlight_timeout_s;

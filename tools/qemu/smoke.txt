@@ -33,7 +33,23 @@ sleep 2
 send rtp
 expect ^active, pt 9 \(G722\), local 5
 expect ^rx [1-9]\d* lost 5
-send dtmf 12#
+# echo canceller on the call's mic path (esp-sr itself is pass-through under QEMU), toggled live
+send aec
+expect ^aec: on, running 5
+expect ^frames [1-9]\d*, blocks [1-9]\d*, avg \d+ us/frame 5
+expect ^ref late 0, i2s xruns tx 0 rx 0 5
+send cfg set aec false
+expect aec\s+= false 5
+sleep 1
+send aec
+expect ^aec: off, idle 5
+send cfg set aec true
+expect aec\s+= true 5
+sleep 1
+send aec
+expect ^aec: on, running 5
+# no "#": it ends Asterisk's Echo() and races the local hangup below
+send dtmf 12
 sleep 1
 send rtp
 expect ^tx [1-9]\d* \(errors 0\) 5
@@ -122,13 +138,14 @@ send cpu 1
 expect ^IDLE0\s+0\s+\d+\.\d 5
 
 # 7b: time settings apply live (TZ + SNTP server, no reboot) and persist
+# The reply and the applied-live log line race (event loop task): expect both, any order.
 send cfg set tz CET-1CEST,M3.5.0,M10.5.0/3
-expect tz\s+= CET-1CEST
-expect ui_bridge: time zone: CET-1CEST 5
+expect (^tz\s+= |ui_bridge: time zone: )CET-1CEST 5
+expect (^tz\s+= |ui_bridge: time zone: )CET-1CEST 5
 sleep 1
 send cfg set ntp_server 10.0.2.2
-expect ntp_server\s+= 10.0.2.2
-expect ui_bridge: ntp server: 10.0.2.2 5
+expect (^ntp_server\s+= |ui_bridge: ntp server: )10.0.2.2 5
+expect (^ntp_server\s+= |ui_bridge: ntp server: )10.0.2.2 5
 sleep 1
 send cfg set clock_24h true
 expect clock_24h\s+= true
@@ -156,9 +173,10 @@ absent Guru Meditation
 
 # 9: OTA, the real update: progress -> done -> reboot -> boots from ota_1 -> marked valid.
 send ota ${OTA_BASE}/sipwire.bin
-expect update started from
-expect ota: version .* -> 20
-expect ota: progress 0% 60
+# the reply and the OTA task's first log lines race: all three, any order
+expect (^update started from|ota: version .* ->|ota: progress 0%) 60
+expect (^update started from|ota: version .* ->|ota: progress 0%) 60
+expect (^update started from|ota: version .* ->|ota: progress 0%) 60
 expect ota: progress 5\d% 300
 expect ota: progress 100% 300
 expect ota: update done, rebooting in 3 s 60

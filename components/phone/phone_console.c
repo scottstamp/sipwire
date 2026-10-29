@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "audio.h"
 #include "console.h"
 #include "esp_check.h"
 #include "esp_timer.h"
@@ -198,6 +199,49 @@ static int cmd_mwi(int argc, char **argv)
     return 0;
 }
 
+/* dB with one decimal, without printf float support */
+static void print_db(const char *label, float db)
+{
+    int t = (int)(db * 10.0f + (db < 0 ? -0.5f : 0.5f));
+    printf("%s %s%d.%d dB", label, t < 0 ? "-" : "", abs(t) / 10, abs(t) % 10);
+}
+
+static int cmd_aec(int argc, char **argv)
+{
+    if (argc == 3 && strcmp(argv[1], "delay") == 0) {
+        int d = strcmp(argv[2], "default") == 0 ? -1 : atoi(argv[2]);
+        return report(audio_set_aec_delay(d), "aec delay");
+    }
+    if (argc == 3 && strcmp(argv[1], "nlp") == 0) {
+        return report(audio_set_aec_nlp(atoi(argv[2])), "aec nlp");
+    }
+    if (argc != 1) {
+        printf("usage: aec | aec delay <samples>|default | aec nlp <0-2>\n");
+        return 1;
+    }
+
+    audio_aec_stats_t a;
+    audio_get_aec_stats(&a);
+    if (!a.built) {
+        printf("aec: not built (CONFIG_SIPWIRE_AEC)\n");
+        return 0;
+    }
+    printf("aec: %s, %s (setting aec; `cfg set aec false` to compare)\n", a.enabled ? "on" : "off",
+           a.running ? "running" : a.ready ? "idle" : "not allocated");
+    printf("mode %s%s, nlp %d, block %" PRIu32 " samples (+%" PRIu32 " latency), delay %" PRIu32 " samples%s\n",
+           a.mode ? a.mode : "?", a.bypassed ? " (QEMU: pass-through)" : "", a.nlp_level, a.block_samples,
+           a.latency_samples, a.delay_samples, a.delay_override ? " (override)" : "");
+    printf("frames %" PRIu32 ", blocks %" PRIu32 ", avg %" PRIu32 " us/frame, max %" PRIu32 " us/block\n",
+           a.frames, a.blocks, a.avg_us, a.max_us);
+    printf("ref late %" PRIu32 ", i2s xruns tx %" PRIu32 " rx %" PRIu32 ", heap internal %" PRIu32
+           " B psram %" PRIu32 " B\n", a.ref_late, a.tx_xruns, a.rx_xruns, a.mem_internal, a.mem_psram);
+    print_db("erl", a.erl_db);
+    print_db(", erle", a.erle_db);
+    print_db(", erle (2 s)", a.erle_recent_db);
+    printf(" (far-end speech only; 0 = no data)\n");
+    return 0;
+}
+
 esp_err_t phone_console_register(void)
 {
     static const esp_console_cmd_t cmds[] = {
@@ -214,6 +258,9 @@ esp_err_t phone_console_register(void)
         { .command = "vol", .help = "Show/set the current output volume", .hint = "[0-100]", .func = cmd_vol },
         { .command = "sip", .help = "SIP registration and call status", .func = cmd_sip },
         { .command = "rtp", .help = "RTP statistics of the current/last call", .func = cmd_rtp },
+        { .command = "aec", .help = "Echo canceller state and statistics of the current/last call; "
+                                    "tune the reference delay / suppression level",
+          .hint = "[delay <samples>|default | nlp <0-2>]", .func = cmd_aec },
         { .command = "blf", .help = "BLF keys (setting blf) and their state", .func = cmd_blf },
         { .command = "mwi", .help = "Message waiting (voicemail) state", .func = cmd_mwi },
     };

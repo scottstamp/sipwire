@@ -11,6 +11,8 @@ The build uses `sdkconfig.qemu` on top of `sdkconfig.defaults`, which sets
 |---|---|---|
 | Network | Wi-Fi STA | OpenCores Ethernet (slirp, guest 10.0.2.15, host 10.0.2.2) |
 | Audio | I2S speaker + mic | paced silence (same 10 ms cadence) |
+| Echo canceller | esp-sr AEC | instance created (PSRAM), reference/frame plumbing and stats run, `aec_process` skipped: Espressif's QEMU segfaults executing it |
+| PSRAM | 8 MB octal | 8 MB quad (`-m 8M`; QEMU has no octal mode) |
 | Display | ILI9341 + XPT2046 | LVGL renders into a discarding display |
 | Keypad | matrix scan | disabled (floating GPIOs read as "pressed") |
 

@@ -134,6 +134,41 @@ menu "Sipwire board"
             default 14
     endmenu
 
+    menu "Echo cancellation (esp-sr AEC)"
+        config SIPWIRE_AEC
+            bool "Acoustic echo canceller on the mic path"
+            default y
+            help
+                Cancels the speaker-to-mic echo with esp-sr's AEC (linear
+                filter + residual suppression). Switched live by the `aec`
+                setting; off, the mic path is untouched.
+        choice SIPWIRE_AEC_MODE
+            prompt "AEC mode"
+            depends on SIPWIRE_AEC
+            default SIPWIRE_AEC_MODE_FD_LOW_COST
+            help
+                FD (full duplex) modes work on 32 ms blocks (+28 ms mic-path
+                latency), VoIP modes on 16 ms blocks (+12 ms) at about twice
+                the CPU. Low cost is what esp-sr recommends.
+            config SIPWIRE_AEC_MODE_FD_LOW_COST
+                bool "Full duplex, low cost"
+            config SIPWIRE_AEC_MODE_FD_HIGH_PERF
+                bool "Full duplex, high performance"
+            config SIPWIRE_AEC_MODE_VOIP_LOW_COST
+                bool "VoIP, low cost"
+            config SIPWIRE_AEC_MODE_VOIP_HIGH_PERF
+                bool "VoIP, high performance"
+        endchoice
+        config SIPWIRE_AEC_FILTER_LEN
+            int "Filter length (esp-sr filter_length)"
+            depends on SIPWIRE_AEC
+            range 1 8
+            default 4
+            help
+                Echo tail the adaptive filter covers, in esp-sr's units
+                (4 is its recommendation). Longer costs more CPU.
+    endmenu
+
     menu "Keypad (3x4 matrix)"
         config SIPWIRE_KP_ROW0
             int "Row 0 (1 2 3)"

@@ -14,6 +14,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "audio_aec.h"
 #include "audio_dsp.h"
 
 static const char *TAG = "audio";
@@ -109,6 +110,26 @@ static void release_channels(void)
     }
 }
 
+/* I2S queue overflow = a task fell 30 ms behind and the driver dropped a DMA
+ * buffer, which shifts the speaker->mic sample offset the AEC relies on. */
+static bool on_tx_q_ovf(i2s_chan_handle_t handle, i2s_event_data_t *event, void *user_ctx)
+{
+    (void)handle;
+    (void)event;
+    (void)user_ctx;
+    audio_aec_xrun(true);
+    return false;
+}
+
+static bool on_rx_q_ovf(i2s_chan_handle_t handle, i2s_event_data_t *event, void *user_ctx)
+{
+    (void)handle;
+    (void)event;
+    (void)user_ctx;
+    audio_aec_xrun(false);
+    return false;
+}
+
 static esp_err_t i2s_setup(void)
 {
     const board_cfg_t *c = s.cfg;
@@ -165,6 +186,13 @@ static esp_err_t i2s_setup(void)
             ESP_GOTO_ON_ERROR(i2s_channel_init_std_mode(s.rx, &rx_cfg), err, TAG, "init rx");
         }
     }
+
+    const i2s_event_callbacks_t tx_cbs = { .on_send_q_ovf = on_tx_q_ovf };
+    ESP_GOTO_ON_ERROR(i2s_channel_register_event_callback(s.tx, &tx_cbs, NULL), err, TAG, "tx callbacks");
+    if (s.rx) {
+        const i2s_event_callbacks_t rx_cbs = { .on_recv_q_ovf = on_rx_q_ovf };
+        ESP_GOTO_ON_ERROR(i2s_channel_register_event_callback(s.rx, &rx_cbs, NULL), err, TAG, "rx callbacks");
+    }
     return ESP_OK;
 err:
     release_channels();
@@ -208,7 +236,7 @@ static void tx_write(const int16_t *buf, size_t n)
 {
 #if CONFIG_SIPWIRE_QEMU
     /* QEMU has no I2S: discard, paced like the DMA would be. */
-    (void)buf;
+    audio_aec_tx(buf, n);
     vTaskDelay(pdMS_TO_TICKS(n * 1000 / AUDIO_I2S_RATE));
     return;
 #endif
@@ -226,6 +254,7 @@ static void tx_write(const int16_t *buf, size_t n)
             return;
         }
         written /= sizeof(int16_t);
+        audio_aec_tx(buf, written);     /* AEC reference: exactly what the speaker plays */
         buf += written;
         n -= written;
     }
@@ -345,7 +374,11 @@ static void rx_task(void *arg)
         if (warmup > 0) {
             warmup--;
             memset(pcm16, 0, sizeof(pcm16));
-        } else if (atomic_load(&s.mic_mute)) {
+        }
+        /* echo canceller (no-op when off or nobody takes the mic); s.sink is
+         * only a hint here, a stale read costs one frame of (non-)processing */
+        audio_aec_rx(pcm16, s.sink != NULL);
+        if (atomic_load(&s.mic_mute)) {
             memset(pcm16, 0, sizeof(pcm16));
         }
 
@@ -376,6 +409,8 @@ static esp_err_t stream_start_locked(void)
 
     atomic_store(&s.stop, false);
     xEventGroupClearBits(s.done, EVT_TX_DONE | EVT_RX_DONE);
+
+    audio_aec_session_start();          /* I2S sample indices restart with the channels */
 
     /* a tone request left over from a previous session must not fire now */
     portENTER_CRITICAL(&s.req_mux);
@@ -434,6 +469,7 @@ static void stream_stop_locked(void)
 
     atomic_store(&s.stop, true);        /* TX fades out over 20 ms, then both exit */
     xEventGroupWaitBits(s.done, bits, pdTRUE, pdTRUE, portMAX_DELAY);
+    audio_aec_session_end();
 
     if (s.rx) {
         i2s_channel_disable(s.rx);
@@ -463,6 +499,9 @@ esp_err_t audio_init(void)
     s.done = xEventGroupCreate();
     ESP_GOTO_ON_FALSE(s.api_mtx && s.cb_mtx && s.done, ESP_ERR_NO_MEM, err, TAG, "no memory");
 
+    /* speaker sample i is heard at mic sample i + one full TX DMA ring (see audio_aec.h) */
+    ESP_GOTO_ON_ERROR(audio_aec_init(I2S_DMA_DESC_NUM * I2S_CHUNK_SAMPLES, I2S_CHUNK_SAMPLES), err, TAG,
+                      "aec init");
     ESP_GOTO_ON_ERROR(amp_init(), err, TAG, "amp init");
     ESP_GOTO_ON_ERROR(i2s_setup(), err, TAG, "i2s setup");
 
