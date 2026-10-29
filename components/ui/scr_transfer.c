@@ -344,9 +344,10 @@ static void list_build(xfer_t *x, const ui_model_t *m)
         lv_obj_set_style_bg_opa(r->lamp, LV_OPA_COVER, 0);
 
         const char *name = b->label[0] ? b->label : b->ext;
-        lv_obj_t *nl = ui_fit_create(btn, 32, 6, b->label[0] ? 128 : 190, 32, UI_COL_TEXT);
-        ui_fit_set(nl, name, &lv_font_montserrat_24, false);
-        lv_obj_set_style_text_align(lv_obj_get_child(nl, 0), LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_t *nl = ui_label_create(btn, &lv_font_montserrat_24, UI_COL_TEXT, name);
+        lv_label_set_long_mode(nl, LV_LABEL_LONG_DOT);
+        lv_obj_set_size(nl, b->label[0] ? 128 : 190, lv_font_get_line_height(&lv_font_montserrat_24));
+        lv_obj_set_pos(nl, 32, 8);
         if (b->label[0]) {
             lv_obj_t *el = ui_fit_create(btn, 164, 13, 58, 18, UI_COL_DIM);
             ui_fit_set(el, b->ext, &lv_font_montserrat_14, true);
