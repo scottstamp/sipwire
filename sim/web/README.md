@@ -69,14 +69,17 @@ name, seconds)` (jump to a call state without the mock's timers),
 `key(char, action)` (0 press, 1 long, 2 repeat), `set_time('HH:MM')` (24 h local
 time; the mock formats it as 12 h "3:07 PM" or 24 h like the bridge does),
 `set_clock24(bool)`, `set_ota(state, percent, message)` (0 idle, 1 running, 2 done,
-3 failed; jump to an update state without the fake download) and `model()`. Enum values follow `components/ui/include/ui_model.h`. Anything
+3 failed; jump to an update state without the fake download), `set_blf_count(n)`,
+`set_blf(i, ext, label, state)` (0 unknown, 1 idle, 2 ringing, 3 busy; extends the
+count), `set_mwi(waiting, new, old)` and `model()`. Enum values follow `components/ui/include/ui_model.h`. Anything
 else the screen needs (new model fields) should get a new `sim_*` function
 there, added to `SIM_EXPORTS` in `CMakeLists.txt` and wrapped in `shell.html`.
 
 ## Side panel
 
 Keypad (click = PRESS on release, hold 600 ms = LONG; keyboard 0-9 * # work
-too), network state + RSSI, registration state, battery + charging, clock,
+too), network state + RSSI, registration state, battery + charging, clock, BLF keys
+(0-8 demo tiles, per-tile state) and voicemail (waiting + count),
 incoming call (number/name), remote hangup (with SIP code), action log (every
 `ui_actions_t` call and mock event) and a live JSON view of the model. Mouse
 clicks on the canvas are touch input.
@@ -92,6 +95,12 @@ with mock values so the forms open prefilled.
 
 Mock call flow: `dial` -> DIALING -> 1 s -> RINGING_OUT -> 2 s -> ACTIVE (timer
 ticks); `hangup` -> ENDED -> 1.5 s -> IDLE; `answer` from RINGING_IN -> ACTIVE.
+`save_blf` replaces the tiles (kept extensions keep their state, new ones are idle),
+`save_vm_number` the voicemail number (`*97` at start).
+
+BLF / voicemail screenshot scenarios: `idle_blf1`, `idle_blf2`, `idle_blf3`,
+`idle_blf5_mwi`, `idle_blf8`, `idle_mwi`, `idle_blf8_mwi_ringing`, `idle_blf8_offline`,
+`blf_tap_dials`, `settings_blf`, `settings_blf_add_keypad`, `settings_blf_saved`.
 
 ## Troubleshooting
 

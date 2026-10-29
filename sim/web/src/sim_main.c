@@ -26,7 +26,7 @@
 static ui_model_t s_model;
 static ui_actions_t s_actions;
 static lv_timer_t *s_phase_timer;   /* one-shot call state transitions */
-static char s_json[3072];
+static char s_json[6144];
 static int s_hour = -1, s_minute;   /* mock clock (local time), hour < 0 = not set */
 static lv_timer_t *s_ota_timer;     /* fake update progress */
 static lv_indev_t *s_mouse;         /* disabled while the calibration screen is open */
@@ -315,6 +315,52 @@ static void act_ota_start(void *ctx, const char *url)
     push_model();
 }
 
+/* "1002:Bob,1003" -> model tiles; kept extensions keep their state, new ones
+ * come up idle (the device would show UNKNOWN until the first NOTIFY). */
+static void act_save_blf(void *ctx, const char *list)
+{
+    (void)ctx;
+    sim_log("action save_blf(\"%s\")", list ? list : "");
+    ui_blf_t old[UI_BLF_MAX];
+    int n_old = s_model.blf_count;
+    memcpy(old, s_model.blf, sizeof(old));
+    int n = 0;
+    const char *p = list ? list : "";
+    while (*p && n < UI_BLF_MAX) {
+        const char *end = strchr(p, ',');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        char item[64];
+        snprintf(item, sizeof(item), "%.*s", (int)len, p);
+        p += len + (end ? 1 : 0);
+        if (!item[0]) {
+            continue;
+        }
+        char *colon = strchr(item, ':');
+        if (colon) {
+            *colon = '\0';
+        }
+        ui_blf_t *b = &s_model.blf[n++];
+        snprintf(b->ext, sizeof(b->ext), "%s", item);
+        snprintf(b->label, sizeof(b->label), "%s", colon ? colon + 1 : "");
+        b->state = UI_BLF_IDLE;
+        for (int k = 0; k < n_old; k++) {
+            if (strcmp(old[k].ext, b->ext) == 0) {
+                b->state = old[k].state;
+            }
+        }
+    }
+    s_model.blf_count = (uint8_t)n;
+    push_model();
+}
+
+static void act_save_vm_number(void *ctx, const char *number)
+{
+    (void)ctx;
+    sim_log("action save_vm_number(\"%s\")", number ? number : "");
+    snprintf(s_model.vm_number, sizeof(s_model.vm_number), "%s", number ? number : "");
+    push_model();
+}
+
 static void act_touch_cal_begin(void *ctx)
 {
     (void)ctx;
@@ -486,9 +532,41 @@ EMSCRIPTEN_KEEPALIVE void sim_set_ota(int state, int percent, const char *messag
     push_model();
 }
 
+/* BLF tiles for screenshots / the panel: count first, then each entry
+ * (state: 0 unknown, 1 idle, 2 ringing, 3 busy). */
+EMSCRIPTEN_KEEPALIVE void sim_set_blf_count(int n)
+{
+    s_model.blf_count = (uint8_t)(n < 0 ? 0 : n > UI_BLF_MAX ? UI_BLF_MAX : n);
+    push_model();
+}
+
+EMSCRIPTEN_KEEPALIVE void sim_set_blf(int i, const char *ext, const char *label, int state)
+{
+    if (i < 0 || i >= UI_BLF_MAX || state < UI_BLF_UNKNOWN || state > UI_BLF_BUSY) {
+        return;
+    }
+    ui_blf_t *b = &s_model.blf[i];
+    snprintf(b->ext, sizeof(b->ext), "%s", ext ? ext : "");
+    snprintf(b->label, sizeof(b->label), "%s", label ? label : "");
+    b->state = (ui_blf_state_t)state;
+    if (i >= s_model.blf_count) {
+        s_model.blf_count = (uint8_t)(i + 1);
+    }
+    push_model();
+}
+
+EMSCRIPTEN_KEEPALIVE void sim_set_mwi(int waiting, int new_msgs, int old_msgs)
+{
+    s_model.mwi_waiting = waiting != 0;
+    s_model.mwi_new = (uint16_t)(new_msgs < 0 ? 0 : new_msgs);
+    s_model.mwi_old = (uint16_t)(old_msgs < 0 ? 0 : old_msgs);
+    push_model();
+}
+
 static const char *const NET_NAMES[] = {"OFF", "CONNECTING", "CONNECTED"};
 static const char *const REG_NAMES[] = {"NONE", "REGISTERING", "REGISTERED", "FAILED"};
 static const char *const OTA_NAMES[] = {"IDLE", "RUNNING", "DONE", "FAILED"};
+static const char *const BLF_NAMES[] = {"UNKNOWN", "IDLE", "RINGING", "BUSY"};
 static const char *const CALL_NAMES[] = {"IDLE",        "DIALING", "RINGING_OUT", "RINGING_IN",
                                          "ACTIVE",      "HELD",    "ENDED"};
 
@@ -564,7 +642,18 @@ EMSCRIPTEN_KEEPALIVE const char *sim_get_model_json(void)
     PUT(",\"ota_state\":\"%s\",\"ota_percent\":%u,\"ota_message\":", OTA_NAMES[m->ota_state],
         (unsigned)m->ota_percent);
     PUTS(m->ota_message);
-    PUT("}");
+    PUT(",\"vm_number\":");
+    PUTS(m->vm_number);
+    PUT(",\"mwi_waiting\":%s,\"mwi_new\":%u,\"mwi_old\":%u,\"blf\":[", m->mwi_waiting ? "true" : "false",
+        (unsigned)m->mwi_new, (unsigned)m->mwi_old);
+    for (int i = 0; i < m->blf_count && i < UI_BLF_MAX; i++) {
+        PUT("%s{\"ext\":", i ? "," : "");
+        PUTS(m->blf[i].ext);
+        PUT(",\"label\":");
+        PUTS(m->blf[i].label);
+        PUT(",\"state\":\"%s\"}", BLF_NAMES[m->blf[i].state]);
+    }
+    PUT("]}");
 #undef PUT
 #undef PUTS
     return s_json;
@@ -609,6 +698,7 @@ int main(void)
     snprintf(s_model.fw_version, sizeof(s_model.fw_version), "v0.4.0-12-gabc1234");
     snprintf(s_model.fw_partition, sizeof(s_model.fw_partition), "ota_0");
     snprintf(s_model.ota_url, sizeof(s_model.ota_url), "http://192.168.2.154:8090/ota.bin");
+    snprintf(s_model.vm_number, sizeof(s_model.vm_number), "*97");
 
     s_actions = (ui_actions_t){
         .ctx = NULL,
@@ -626,6 +716,8 @@ int main(void)
         .touch_cal_end = act_touch_cal_end,
         .save_time = act_save_time,
         .ota_start = act_ota_start,
+        .save_blf = act_save_blf,
+        .save_vm_number = act_save_vm_number,
     };
 
     ui_init(disp, &s_actions);

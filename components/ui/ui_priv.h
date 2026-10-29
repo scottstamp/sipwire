@@ -63,6 +63,8 @@ void ui_act_save_account(const char *server, uint16_t port, const char *user,
                          const char *password, const char *display_name);
 void ui_act_save_time(const char *ntp, const char *tz_posix, bool clock_24h);
 void ui_act_ota_start(const char *url);
+void ui_act_save_blf(const char *list);
+void ui_act_save_vm_number(const char *number);
 void ui_act_touch_cal_begin(void);
 void ui_act_touch_cal_end(const ui_touch_cal_t *cal_or_null);
 

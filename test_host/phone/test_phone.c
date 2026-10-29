@@ -507,6 +507,120 @@ static void test_codec_pref_parse(void)
     TEST_ASSERT_EQUAL_INT(0, phone_codec_pref_parse("g722,pcmu,pcma", pts, 2));             /* too many */
 }
 
+/* ---- BLF list / plan / model ---- */
+
+static void test_blf_parse(void)
+{
+    sipwire_blf_entry_t e[SIPWIRE_BLF_MAX];
+    TEST_ASSERT_EQUAL(0, sipwire_blf_parse("", e, SIPWIRE_BLF_MAX));
+    TEST_ASSERT_EQUAL(0, sipwire_blf_parse(NULL, e, SIPWIRE_BLF_MAX));
+    TEST_ASSERT_EQUAL(0, sipwire_blf_parse(" , ,", e, SIPWIRE_BLF_MAX));
+    TEST_ASSERT_EQUAL(3, sipwire_blf_parse("1002:Bob, 1003 : Front desk ,*8#1,", e, SIPWIRE_BLF_MAX));
+    TEST_ASSERT_EQUAL_STRING("1002", e[0].ext);
+    TEST_ASSERT_EQUAL_STRING("Bob", e[0].label);
+    TEST_ASSERT_EQUAL_STRING("1003", e[1].ext);
+    TEST_ASSERT_EQUAL_STRING("Front desk", e[1].label);
+    TEST_ASSERT_EQUAL_STRING("*8#1", e[2].ext);
+    TEST_ASSERT_EQUAL_STRING("", e[2].label);
+    TEST_ASSERT_EQUAL(1, sipwire_blf_parse("1004:", e, SIPWIRE_BLF_MAX));
+    TEST_ASSERT_EQUAL(1, sipwire_blf_parse("alice.b_c-d+1", NULL, SIPWIRE_BLF_MAX));
+    TEST_ASSERT_EQUAL(8, sipwire_blf_parse("1,2,3,4,5,6,7,8", e, SIPWIRE_BLF_MAX));
+    /* invalid */
+    TEST_ASSERT_EQUAL(-1, sipwire_blf_parse("1,2,3,4,5,6,7,8,9", e, SIPWIRE_BLF_MAX));
+    TEST_ASSERT_EQUAL(-1, sipwire_blf_parse("1,2,3", e, 2));
+    TEST_ASSERT_EQUAL(-1, sipwire_blf_parse(":Bob", e, SIPWIRE_BLF_MAX));
+    TEST_ASSERT_EQUAL(-1, sipwire_blf_parse("10 02", e, SIPWIRE_BLF_MAX));
+    TEST_ASSERT_EQUAL(-1, sipwire_blf_parse("1002:a:b", e, SIPWIRE_BLF_MAX));
+    TEST_ASSERT_EQUAL(-1, sipwire_blf_parse("1002,1003,1002", e, SIPWIRE_BLF_MAX));
+    TEST_ASSERT_EQUAL(-1, sipwire_blf_parse("1002:tab\there", e, SIPWIRE_BLF_MAX));
+    TEST_ASSERT_EQUAL(-1, sipwire_blf_parse("1002:123456789012345678901234", e, SIPWIRE_BLF_MAX));
+    TEST_ASSERT_EQUAL(1, sipwire_blf_parse("1002:12345678901234567890123", e, SIPWIRE_BLF_MAX));
+    TEST_ASSERT_EQUAL(-1, sipwire_blf_parse("12345678901234567890123456789012", e, SIPWIRE_BLF_MAX));
+    TEST_ASSERT_EQUAL(1, sipwire_blf_parse("1234567890123456789012345678901", e, SIPWIRE_BLF_MAX));
+}
+
+static void test_blf_format_roundtrip(void)
+{
+    sipwire_blf_entry_t e[SIPWIRE_BLF_MAX], f[SIPWIRE_BLF_MAX];
+    char out[SIPWIRE_BLF_LIST_MAX];
+    TEST_ASSERT_EQUAL(3, sipwire_blf_parse(" 1002 : Bob ,1003,1004:Front desk", e, SIPWIRE_BLF_MAX));
+    TEST_ASSERT_TRUE(sipwire_blf_format(e, 3, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("1002:Bob,1003,1004:Front desk", out);
+    TEST_ASSERT_EQUAL(3, sipwire_blf_parse(out, f, SIPWIRE_BLF_MAX));
+    TEST_ASSERT_EQUAL_MEMORY(e, f, 3 * sizeof(e[0]));
+    TEST_ASSERT_FALSE(sipwire_blf_format(e, 3, out, 10));
+    TEST_ASSERT_EQUAL_STRING("", out);
+    /* 8 entries with the longest extension and label still fit the setting */
+    for (int i = 0; i < SIPWIRE_BLF_MAX; i++) {
+        memset(e[i].ext, '0' + i, SIPWIRE_BLF_EXT_MAX - 1);
+        e[i].ext[SIPWIRE_BLF_EXT_MAX - 1] = '\0';
+        memset(e[i].label, 'a' + i, SIPWIRE_BLF_LABEL_MAX - 1);
+        e[i].label[SIPWIRE_BLF_LABEL_MAX - 1] = '\0';
+    }
+    TEST_ASSERT_TRUE(sipwire_blf_format(e, SIPWIRE_BLF_MAX, out, sizeof(out)));
+    TEST_ASSERT_EQUAL(SIPWIRE_BLF_MAX, sipwire_blf_parse(out, f, SIPWIRE_BLF_MAX));
+}
+
+static void test_blf_plan(void)
+{
+    sipwire_blf_entry_t old[SIPWIRE_BLF_MAX], nw[SIPWIRE_BLF_MAX];
+    int keep[SIPWIRE_BLF_MAX];
+    int no = sipwire_blf_parse("1002:Bob,1003,1004", old, SIPWIRE_BLF_MAX);
+    int nn = sipwire_blf_parse("1004,1005,1002:Robert", nw, SIPWIRE_BLF_MAX);
+    uint32_t drop = phone_blf_plan(old, no, nw, nn, keep);
+    TEST_ASSERT_EQUAL_HEX32(0x2, drop);                 /* 1003 removed */
+    TEST_ASSERT_EQUAL(2, keep[0]);                      /* 1004 kept */
+    TEST_ASSERT_EQUAL(-1, keep[1]);                     /* 1005 new */
+    TEST_ASSERT_EQUAL(0, keep[2]);                      /* 1002 kept, label changed */
+    TEST_ASSERT_EQUAL_HEX32(0x7, phone_blf_plan(old, no, nw, 0, keep));
+    TEST_ASSERT_EQUAL_HEX32(0x0, phone_blf_plan(old, 0, nw, nn, keep));
+    TEST_ASSERT_EQUAL(-1, keep[0]);
+    TEST_ASSERT_EQUAL(BLF_RINGING, phone_blf_map(SIP_BLF_RINGING));
+    TEST_ASSERT_EQUAL(BLF_UNKNOWN, phone_blf_map((sip_blf_state_t)42));
+    TEST_ASSERT_EQUAL_STRING("busy", phone_blf_state_name(BLF_BUSY));
+}
+
+static void test_build_model_blf_mwi(void)
+{
+    ui_bridge_local_t loc;
+    memset(&loc, 0, sizeof(loc));
+    ui_bridge_fill_vm(&loc, "*97");
+    phone_status_t ph;
+    memset(&ph, 0, sizeof(ph));
+    ph.blf_count = 3;
+    strcpy(ph.blf[0].ext, "1002");
+    strcpy(ph.blf[0].label, "Bob");
+    ph.blf[0].state = BLF_RINGING;
+    strcpy(ph.blf[1].ext, "1003");
+    ph.blf[1].state = BLF_BUSY;
+    strcpy(ph.blf[2].ext, "1004");
+    ph.blf[2].state = BLF_UNKNOWN;
+    ph.mwi = (sip_event_mwi_t){ .known = true, .waiting = true, .new_msgs = 3, .old_msgs = 7 };
+    ui_model_t m;
+    ui_bridge_build_model(&loc, &ph, 0, &m);
+    TEST_ASSERT_EQUAL(3, m.blf_count);
+    TEST_ASSERT_EQUAL_STRING("1002", m.blf[0].ext);
+    TEST_ASSERT_EQUAL_STRING("Bob", m.blf[0].label);
+    TEST_ASSERT_EQUAL(UI_BLF_RINGING, m.blf[0].state);
+    TEST_ASSERT_EQUAL(UI_BLF_BUSY, m.blf[1].state);
+    TEST_ASSERT_EQUAL_STRING("", m.blf[1].label);
+    TEST_ASSERT_EQUAL(UI_BLF_UNKNOWN, m.blf[2].state);
+    TEST_ASSERT_TRUE(m.mwi_waiting);
+    TEST_ASSERT_EQUAL_UINT16(3, m.mwi_new);
+    TEST_ASSERT_EQUAL_UINT16(7, m.mwi_old);
+    TEST_ASSERT_EQUAL_STRING("*97", m.vm_number);
+    /* unknown MWI shows nothing; too many entries are capped */
+    ph.mwi.known = false;
+    ph.blf_count = 200;
+    ui_bridge_build_model(&loc, &ph, 0, &m);
+    TEST_ASSERT_FALSE(m.mwi_waiting);
+    TEST_ASSERT_EQUAL_UINT16(0, m.mwi_new);
+    TEST_ASSERT_EQUAL(UI_BLF_MAX, m.blf_count);
+    TEST_ASSERT_EQUAL(UI_BLF_IDLE, ui_bridge_map_blf(BLF_IDLE));
+    ui_bridge_fill_vm(&loc, NULL);
+    TEST_ASSERT_EQUAL_STRING("", loc.vm_number);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -535,5 +649,9 @@ int main(void)
     RUN_TEST(test_build_model);
     RUN_TEST(test_fill_settings);
     RUN_TEST(test_build_model_is_deterministic);
+    RUN_TEST(test_blf_parse);
+    RUN_TEST(test_blf_format_roundtrip);
+    RUN_TEST(test_blf_plan);
+    RUN_TEST(test_build_model_blf_mwi);
     return UNITY_END();
 }

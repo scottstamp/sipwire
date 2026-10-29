@@ -70,6 +70,10 @@ static struct {
     bool clock_24h;
     bool ota_pending;
     char ota_url[sizeof(((settings_t *)0)->ota_url)];
+    bool blf_pending;
+    char blf[sizeof(((settings_t *)0)->blf)];
+    bool vm_pending;
+    char vm_number[sizeof(((settings_t *)0)->vm_number)];
 } b;
 
 /* What SNTP and the C library are using right now. The NTP buffer must stay valid
@@ -91,6 +95,7 @@ static void update_settings_locked(void)
     ui_bridge_fill_settings(&b.loc, st.wifi_ssid, st.wifi_pass, st.sip_server, st.sip_port, st.sip_user,
                             st.sip_password, st.sip_display_name);
     ui_bridge_fill_time_ota(&b.loc, st.ntp_server, st.tz, st.clock_24h, st.ota_url);
+    ui_bridge_fill_vm(&b.loc, st.vm_number);
     memset(st.wifi_pass, 0, sizeof(st.wifi_pass));
     memset(st.sip_password, 0, sizeof(st.sip_password));
 }
@@ -254,6 +259,35 @@ static void act_ota_start(void *ctx, const char *url)
     kick();
 }
 
+/* Settings > BLF keys: validated here, stored (and applied live) by the bridge task. */
+static void act_save_blf(void *ctx, const char *list)
+{
+    (void)ctx;
+    if (!list || !fits(list, sizeof(b.blf)) || sipwire_blf_parse(list, NULL, SIPWIRE_BLF_MAX) < 0) {
+        ESP_LOGW(TAG, "blf list invalid or too long");
+        return;
+    }
+    xSemaphoreTake(b.mtx, portMAX_DELAY);
+    strlcpy(b.blf, list, sizeof(b.blf));
+    b.blf_pending = true;
+    xSemaphoreGive(b.mtx);
+    kick();
+}
+
+static void act_save_vm_number(void *ctx, const char *number)
+{
+    (void)ctx;
+    if (!number || !fits(number, sizeof(b.vm_number))) {
+        ESP_LOGW(TAG, "voicemail number too long");
+        return;
+    }
+    xSemaphoreTake(b.mtx, portMAX_DELAY);
+    strlcpy(b.vm_number, number, sizeof(b.vm_number));
+    b.vm_pending = true;
+    xSemaphoreGive(b.mtx);
+    kick();
+}
+
 static const ui_actions_t s_actions = {
     .dial = act_dial,
     .answer = act_answer,
@@ -269,6 +303,8 @@ static const ui_actions_t s_actions = {
     .touch_cal_end = act_touch_cal_end,
     .save_time = act_save_time,
     .ota_start = act_ota_start,
+    .save_blf = act_save_blf,
+    .save_vm_number = act_save_vm_number,
 };
 
 /* ------------------------------------------------------------------ */
@@ -385,7 +421,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     } else if (base == SIPWIRE_SETTINGS_EVENT) {
         update_settings_locked();
     }
-    /* SIP / CALL events: the phone status already holds the news */
+    /* SIP / CALL / BLF events: the phone status already holds the news */
     xSemaphoreGive(b.mtx);
 
     if (base == SIPWIRE_NET_EVENT && id == NET_EVENT_GOT_IP) {
@@ -405,7 +441,7 @@ static void do_saves(void)
 {
     static settings_t st;           /* bridge task only */
     static char ota_url[sizeof(b.ota_url)];
-    bool wifi, acc, cal, tm, ota;
+    bool wifi, acc, cal, tm, ota, blf, vm;
 
     xSemaphoreTake(b.mtx, portMAX_DELAY);
     wifi = b.wifi_pending;
@@ -413,7 +449,9 @@ static void do_saves(void)
     cal = b.cal_pending;
     tm = b.time_pending;
     ota = b.ota_pending;
-    if (!wifi && !acc && !cal && !tm && !ota) {
+    blf = b.blf_pending;
+    vm = b.vm_pending;
+    if (!wifi && !acc && !cal && !tm && !ota && !blf && !vm) {
         xSemaphoreGive(b.mtx);
         return;
     }
@@ -445,6 +483,12 @@ static void do_saves(void)
         strlcpy(st.tz, b.tz, sizeof(st.tz));
         st.clock_24h = b.clock_24h;
     }
+    if (blf) {
+        strlcpy(st.blf, b.blf, sizeof(st.blf));
+    }
+    if (vm) {
+        strlcpy(st.vm_number, b.vm_number, sizeof(st.vm_number));
+    }
     if (ota) {
         strlcpy(ota_url, b.ota_url, sizeof(ota_url));
         strlcpy(st.ota_url, ota_url, sizeof(st.ota_url));   /* remember what was installed from */
@@ -454,6 +498,8 @@ static void do_saves(void)
     b.cal_pending = false;
     b.time_pending = false;
     b.ota_pending = false;
+    b.blf_pending = false;
+    b.vm_pending = false;
     memset(b.wpass, 0, sizeof(b.wpass));
     memset(b.apass, 0, sizeof(b.apass));
     xSemaphoreGive(b.mtx);
@@ -463,11 +509,9 @@ static void do_saves(void)
     memset(st.sip_password, 0, sizeof(st.sip_password));
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "saving settings: %s", esp_err_to_name(err));
-    } else if (wifi || acc || cal || tm) {
-        ESP_LOGI(TAG, "settings saved from the UI (%s%s%s%s%s%s%s)", wifi ? "wifi" : "",
-                 wifi && (acc || cal || tm) ? ", " : "", acc ? "account" : "",
-                 acc && (cal || tm) ? ", " : "", cal ? "touch calibration" : "", cal && tm ? ", " : "",
-                 tm ? "time" : "");
+    } else if (wifi || acc || cal || tm || blf || vm) {
+        ESP_LOGI(TAG, "settings saved from the UI:%s%s%s%s%s%s", wifi ? " wifi" : "", acc ? " account" : "",
+                 cal ? " touch-calibration" : "", tm ? " time" : "", blf ? " blf" : "", vm ? " vm_number" : "");
     }
     if (ota) {
         /* Progress and refusals (e.g. a call is active) come back through ota_get_status(). */
@@ -563,7 +607,7 @@ esp_err_t ui_bridge_init(lv_display_t *disp)
 
     static const esp_event_base_t *const bases[] = {
         &SIPWIRE_NET_EVENT, &SIPWIRE_SIP_EVENT, &SIPWIRE_CALL_EVENT, &SIPWIRE_KEY_EVENT, &SIPWIRE_SETTINGS_EVENT,
-        &SIPWIRE_OTA_EVENT,
+        &SIPWIRE_OTA_EVENT, &SIPWIRE_BLF_EVENT,
     };
     for (size_t i = 0; i < sizeof(bases) / sizeof(bases[0]); i++) {
         ESP_RETURN_ON_ERROR(esp_event_handler_register(*bases[i], ESP_EVENT_ANY_ID, on_event, NULL), TAG,

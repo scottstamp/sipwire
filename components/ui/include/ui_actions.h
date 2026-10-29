@@ -46,4 +46,10 @@ typedef struct {
      * The device stores the URL if it changed. Progress comes back through the
      * model's ota_* fields. Not called while a call is active. */
     void (*ota_start)(void *ctx, const char *url);
+    /* Settings > BLF keys: the whole list "ext[:label],..." (at most
+     * UI_BLF_MAX entries, extensions unique, no ',' or ':' in labels; "" =
+     * none) replaces the stored one; subscriptions follow live. */
+    void (*save_blf)(void *ctx, const char *list);
+    /* Settings > BLF keys: number the voicemail button dials ("" = none). */
+    void (*save_vm_number)(void *ctx, const char *number);
 } ui_actions_t;

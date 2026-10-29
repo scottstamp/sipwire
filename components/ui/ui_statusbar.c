@@ -1,5 +1,6 @@
 /* Status bar shown at the top of every screen: Wi-Fi bars, SIP registration
- * dot, clock, battery. Each screen owns its own bar; only the newest one is
+ * dot, clock, battery. While voicemail is waiting an amber envelope (with the
+ * number of new messages) takes the place of the "SIP" caption. Each screen owns its own bar; only the newest one is
  * kept up to date. */
 
 #include "ui_priv.h"
@@ -15,6 +16,7 @@ typedef struct {
     lv_obj_t *wifi_off;
     lv_obj_t *reg_dot;
     lv_obj_t *reg_lbl;
+    lv_obj_t *mwi;
     lv_obj_t *time;
     lv_obj_t *batt;
     /* last applied values, to avoid needless redraws */
@@ -25,6 +27,8 @@ typedef struct {
     int8_t battery_pct;
     bool charging;
     char time_hhmm[UI_TIME_STR_LEN];
+    bool mwi_waiting;
+    uint16_t mwi_new;
 } statusbar_t;
 
 static statusbar_t *s_sb;
@@ -67,6 +71,9 @@ lv_obj_t *ui_statusbar_create(lv_obj_t *screen)
     lv_obj_set_style_bg_opa(sb->reg_dot, LV_OPA_COVER, 0);
     sb->reg_lbl = ui_label_create(bar, &lv_font_montserrat_14, UI_COL_DIM, "SIP");
     lv_obj_set_pos(sb->reg_lbl, 67, 3);
+    sb->mwi = ui_label_create(bar, &lv_font_montserrat_14, UI_COL_WARN, "");
+    lv_obj_set_pos(sb->mwi, 67, 3);
+    lv_obj_set_hidden(sb->mwi, true);
 
     sb->time = ui_label_create(bar, &lv_font_montserrat_14, UI_COL_TEXT, "");
     lv_obj_align(sb->time, LV_ALIGN_TOP_MID, 0, 3);
@@ -152,10 +159,30 @@ void ui_statusbar_update(const ui_model_t *m)
         sb->reg = m->reg;
     }
 
-    if (!sb->valid || strncmp(m->time_hhmm, sb->time_hhmm, sizeof(sb->time_hhmm)) != 0) {
+    bool mwi_changed = !sb->valid || m->mwi_waiting != sb->mwi_waiting || m->mwi_new != sb->mwi_new;
+    if (mwi_changed) {
+        if (m->mwi_waiting) {
+            if (m->mwi_new > 0) {
+                lv_label_set_text_fmt(sb->mwi, LV_SYMBOL_ENVELOPE "%u", m->mwi_new > 99 ? 99u : (unsigned)m->mwi_new);
+            } else {
+                lv_label_set_text(sb->mwi, LV_SYMBOL_ENVELOPE);
+            }
+        }
+        lv_obj_set_hidden(sb->mwi, !m->mwi_waiting);
+        lv_obj_set_hidden(sb->reg_lbl, m->mwi_waiting);
+        sb->mwi_waiting = m->mwi_waiting;
+        sb->mwi_new = m->mwi_new;
+    }
+
+    if (!sb->valid || strncmp(m->time_hhmm, sb->time_hhmm, sizeof(sb->time_hhmm)) != 0 || mwi_changed) {
         lv_label_set_text(sb->time, m->time_hhmm);
-        /* "3:07 PM" is wider: sit a little right of centre, clear of the SIP label */
-        lv_obj_align(sb->time, LV_ALIGN_TOP_MID, strchr(m->time_hhmm, ' ') ? 8 : 0, 3);
+        /* "3:07 PM" is wider: sit a little right of centre, clear of the SIP
+         * label; further right still next to a two-digit envelope count */
+        int32_t dx = strchr(m->time_hhmm, ' ') ? 8 : 0;
+        if (m->mwi_waiting && m->mwi_new >= 10) {
+            dx += 8;
+        }
+        lv_obj_align(sb->time, LV_ALIGN_TOP_MID, dx, 3);
         snprintf(sb->time_hhmm, sizeof(sb->time_hhmm), "%s", m->time_hhmm);
     }
 

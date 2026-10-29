@@ -1,5 +1,5 @@
-/* Settings: scrolling list -> Wi-Fi / SIP account / Time / Update forms
- * (on-screen keyboard) / About / touch calibration screen. The forms are prefilled from the model when opened
+/* Settings: scrolling list -> Wi-Fi / SIP account / BLF keys / Time / Update
+ * forms (on-screen keyboard) / About / touch calibration screen. The forms are prefilled from the model when opened
  * (passwords are never in the model: an empty field keeps the stored one).
  * All pages live in one screen and are switched by hiding; the keyboard is
  * shared and only shown while a field is being edited. */
@@ -17,7 +17,19 @@
 #define DEFAULT_SIP_PORT 5060
 #define OTA_URL_MAX_CHARS 191       /* ota.h OTA_URL_MAX - 1 */
 
-typedef enum { PG_LIST, PG_WIFI, PG_ACCOUNT, PG_TIME, PG_UPDATE, PG_ABOUT, PG_COUNT } page_t;
+typedef enum { PG_LIST, PG_WIFI, PG_ACCOUNT, PG_BLF, PG_TIME, PG_UPDATE, PG_ABOUT, PG_COUNT } page_t;
+
+/* Dial pad for extensions / the voicemail number (LVGL's number pad has no
+ * '*' or '#'); "abc" switches to letters for alphanumeric extensions. */
+static const char *const DIAL_KB_MAP[] = {"1", "2", "3", LV_SYMBOL_BACKSPACE, "\n",
+                                          "4", "5", "6", LV_SYMBOL_OK, "\n",
+                                          "7", "8", "9", "abc", "\n",
+                                          "*", "0", "#", LV_SYMBOL_LEFT, LV_SYMBOL_RIGHT, ""};
+static const lv_buttonmatrix_ctrl_t DIAL_KB_CTRL[] = {
+    1, 1, 1, LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2,
+    1, 1, 1, LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2,
+    1, 1, 1, LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2,
+    1, 1, 1, 1, 1};
 
 /* Time zones offered in Settings > Time: friendly name -> POSIX TZ string. The last
  * entry, "Custom", shows a text field for a raw POSIX TZ string instead. */
@@ -63,12 +75,18 @@ typedef struct {
     uint32_t tz_prev;               /* dropdown index before the last change */
     lv_obj_t *fw, *ota_url, *ota_btn, *ota_bar, *ota_msg;
 
+    /* BLF keys page: the entries being edited (saved as a whole) */
+    lv_obj_t *blf_cap, *blf_rows, *blf_ext, *blf_label, *blf_add, *vm;
+    ui_blf_t blf[UI_BLF_MAX];
+    int blf_n;
+
     lv_obj_t *about_ip, *about_acc, *about_reg, *about_wifi, *about_fw;
 } settings_t;
 
 static settings_t *s_s;
 
-static const char *const TITLES[PG_COUNT] = {"Settings", "Wi-Fi", "Account", "Time", "Update", "About"};
+static const char *const TITLES[PG_COUNT] = {"Settings", "Wi-Fi", "Account", "BLF", "Time", "Update",
+                                             "About"};
 
 static void on_delete(lv_event_t *e)
 {
@@ -83,7 +101,7 @@ static void on_delete(lv_event_t *e)
 
 static bool is_form(page_t p)
 {
-    return p == PG_WIFI || p == PG_ACCOUNT || p == PG_TIME || p == PG_UPDATE;
+    return p == PG_WIFI || p == PG_ACCOUNT || p == PG_BLF || p == PG_TIME || p == PG_UPDATE;
 }
 
 static void kb_hide(settings_t *s)
@@ -104,8 +122,9 @@ static void field_clicked(lv_event_t *e)
 {
     settings_t *s = lv_event_get_user_data(e);
     lv_obj_t *ta = lv_event_get_target_obj(e);
-    lv_keyboard_set_mode(s->kb, ta == s->port ? LV_KEYBOARD_MODE_NUMBER
-                                              : LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_keyboard_set_mode(s->kb, ta == s->port                        ? LV_KEYBOARD_MODE_NUMBER
+                                : (ta == s->blf_ext || ta == s->vm) ? LV_KEYBOARD_MODE_USER_1
+                                                                    : LV_KEYBOARD_MODE_TEXT_LOWER);
     lv_keyboard_set_textarea(s->kb, ta);
     lv_obj_set_hidden(s->kb, false);
     lv_obj_set_height(s->page[s->cur], BODY_H - KB_H);
@@ -177,11 +196,19 @@ static void prefill_time(settings_t *s, const ui_model_t *m)
 }
 
 static void update_ota(settings_t *s, const ui_model_t *m);
+static void blf_rebuild(settings_t *s);
 
 static void prefill(settings_t *s, page_t p)
 {
     const ui_model_t *m = ui_model();
-    if (p == PG_TIME) {
+    if (p == PG_BLF) {
+        s->blf_n = m->blf_count > UI_BLF_MAX ? UI_BLF_MAX : m->blf_count;
+        memcpy(s->blf, m->blf, sizeof(s->blf));
+        lv_textarea_set_text(s->blf_ext, "");
+        lv_textarea_set_text(s->blf_label, "");
+        lv_textarea_set_text(s->vm, m->vm_number);
+        blf_rebuild(s);
+    } else if (p == PG_TIME) {
         prefill_time(s, m);
     } else if (p == PG_UPDATE) {
         lv_textarea_set_text(s->ota_url, m->ota_url);
@@ -417,6 +444,132 @@ static void update_ota(settings_t *s, const ui_model_t *m)
     lv_obj_set_style_text_color(s->ota_msg, col, 0);
 }
 
+/* ---- BLF keys page ---------------------------------------------------------- */
+
+static void blf_remove_async(void *arg);
+
+static void blf_remove_clicked(lv_event_t *e)
+{
+    settings_t *s = s_s;
+    intptr_t i = (intptr_t)lv_event_get_user_data(e);
+    if (!s || i < 0 || i >= s->blf_n) {
+        return;
+    }
+    memmove(&s->blf[i], &s->blf[i + 1], (size_t)(s->blf_n - i - 1) * sizeof(s->blf[0]));
+    s->blf_n--;
+    /* the rows (this button included) are rebuilt after this callback returns */
+    lv_async_call(blf_remove_async, s);
+}
+
+static void blf_remove_async(void *arg)
+{
+    if (arg == s_s) {
+        blf_rebuild(s_s);
+    }
+}
+
+static void blf_rebuild(settings_t *s)
+{
+    lv_obj_clean(s->blf_rows);
+    for (int i = 0; i < s->blf_n; i++) {
+        lv_obj_t *row = ui_box_create(s->blf_rows, 0, 0, 228, FIELD_H);
+        lv_obj_set_style_bg_color(row, UI_COL_SURFACE, 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(row, 8, 0);
+        lv_obj_t *txt = ui_box_create(row, 10, 0, 228 - 10 - 52, FIELD_H);
+        lv_obj_set_flex_flow(txt, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(txt, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(txt, 8, 0);
+        lv_obj_t *ext = ui_label_create(txt, &lv_font_montserrat_24, UI_COL_TEXT, s->blf[i].ext);
+        lv_label_set_long_mode(ext, LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_set_style_max_width(ext, 228 - 10 - 52, 0);
+        lv_obj_t *lab = ui_label_create(txt, &lv_font_montserrat_14, UI_COL_DIM, s->blf[i].label);
+        lv_label_set_long_mode(lab, LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_set_flex_grow(lab, 1);
+        lv_obj_t *del = ui_btn_create(row, UI_BTN_RED, NULL, 228 - 44, 0, 44, FIELD_H);
+        ui_label_create(del, &lv_font_montserrat_24, UI_COL_TEXT, LV_SYMBOL_TRASH);
+        lv_obj_center(lv_obj_get_child(del, 0));
+        lv_obj_add_event_cb(del, blf_remove_clicked, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+    }
+    if (s->blf_n) {
+        lv_label_set_text_fmt(s->blf_cap, "Keys (%d of %d)", s->blf_n, UI_BLF_MAX);
+    } else {
+        lv_label_set_text(s->blf_cap, "No keys: the home screen shows no panel");
+    }
+    if (s->blf_n >= UI_BLF_MAX) {
+        lv_obj_add_state(s->blf_add, LV_STATE_DISABLED);
+    } else {
+        lv_obj_remove_state(s->blf_add, LV_STATE_DISABLED);
+    }
+}
+
+/* Same rules as the device's `blf` setting (components/common/sipwire_blf.h). */
+static bool blf_ext_ok(const char *t)
+{
+    if (!t[0] || strlen(t) >= UI_BLF_EXT_LEN) {
+        return false;
+    }
+    for (; *t; t++) {
+        char c = *t;
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || strchr("*#+._-", c))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool blf_label_ok(const char *t, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        if ((unsigned char)t[i] < 0x20 || t[i] == ',' || t[i] == ':') {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void blf_add_clicked(lv_event_t *e)
+{
+    settings_t *s = lv_event_get_user_data(e);
+    const char *ext = lv_textarea_get_text(s->blf_ext);
+    const char *lab = lv_textarea_get_text(s->blf_label);
+    /* labels keep inner spaces but not leading / trailing ones */
+    while (*lab == ' ') {
+        lab++;
+    }
+    size_t ll = strlen(lab);
+    while (ll > 0 && lab[ll - 1] == ' ') {
+        ll--;
+    }
+    if (s->blf_n >= UI_BLF_MAX) {
+        ui_toast("At most 8 keys");
+        return;
+    }
+    if (!blf_ext_ok(ext)) {
+        ui_toast("Extension: 0-9 a-z * # + . _ -");
+        return;
+    }
+    if (!blf_label_ok(lab, ll) || ll >= UI_BLF_LABEL_LEN) {
+        ui_toast("Label: up to 23 chars, no , or :");
+        return;
+    }
+    for (int i = 0; i < s->blf_n; i++) {
+        if (strcmp(s->blf[i].ext, ext) == 0) {
+            ui_toast("Already in the list");
+            return;
+        }
+    }
+    ui_blf_t *b = &s->blf[s->blf_n++];
+    memset(b, 0, sizeof(*b));
+    snprintf(b->ext, sizeof(b->ext), "%s", ext);
+    snprintf(b->label, sizeof(b->label), "%.*s", (int)ll, lab);
+    b->state = UI_BLF_UNKNOWN;
+    lv_textarea_set_text(s->blf_ext, "");
+    lv_textarea_set_text(s->blf_label, "");
+    kb_hide(s);
+    blf_rebuild(s);
+}
+
 static void settings_toast_back(settings_t *s, const char *msg)
 {
     ui_toast(msg);
@@ -450,6 +603,22 @@ static void on_save(lv_event_t *e)
         ui_act_save_account(server, (uint16_t)port, user, lv_textarea_get_text(s->apass),
                             lv_textarea_get_text(s->dname));
         settings_toast_back(s, "Account saved");
+    } else if (s->cur == PG_BLF) {
+        char list[UI_BLF_MAX * (UI_BLF_EXT_LEN + UI_BLF_LABEL_LEN + 1)];
+        size_t n = 0;
+        list[0] = '\0';
+        for (int i = 0; i < s->blf_n; i++) {
+            n += (size_t)snprintf(list + n, sizeof(list) - n, "%s%s%s%s", i ? "," : "", s->blf[i].ext,
+                                  s->blf[i].label[0] ? ":" : "", s->blf[i].label);
+        }
+        const char *vm = lv_textarea_get_text(s->vm);
+        if (vm[0] && !blf_ext_ok(vm)) {
+            ui_toast("Voicemail: 0-9 a-z * # + . _ -");
+            return;
+        }
+        ui_act_save_blf(list);
+        ui_act_save_vm_number(vm);
+        settings_toast_back(s, "BLF keys saved");
     } else if (s->cur == PG_TIME) {
         const char *ntp = lv_textarea_get_text(s->ntp);
         uint32_t idx = lv_dropdown_get_selected(s->tz_dd);
@@ -483,6 +652,7 @@ static lv_obj_t *settings_create(const char *arg)
     lv_obj_set_style_pad_row(list, 6, 0);
     list_row(list, PG_WIFI, LV_SYMBOL_WIFI, "Wi-Fi");
     list_row(list, PG_ACCOUNT, LV_SYMBOL_CALL, "SIP account");
+    list_row(list, PG_BLF, LV_SYMBOL_EYE_OPEN, "BLF keys");
     list_row(list, PG_COUNT, LV_SYMBOL_EDIT, "Calibrate");
     list_row(list, PG_TIME, LV_SYMBOL_BELL, "Time");
     list_row(list, PG_UPDATE, LV_SYMBOL_DOWNLOAD, "Update");
@@ -499,6 +669,24 @@ static lv_obj_t *settings_create(const char *arg)
     s->user = field_create(s, s->page[PG_ACCOUNT], "Username", "1001", 63, false);
     s->apass = field_create(s, s->page[PG_ACCOUNT], "Password", "SIP password", 63, true);
     s->dname = field_create(s, s->page[PG_ACCOUNT], "Display name", "Optional", 63, false);
+
+    static const char DIAL_CHARS[] = "0123456789*#+._-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    lv_obj_t *bf = form_create(s, scr);
+    s->page[PG_BLF] = bf;
+    s->blf_cap = ui_label_create(bf, &lv_font_montserrat_14, UI_COL_DIM, "");
+    lv_obj_set_style_pad_top(s->blf_cap, 4, 0);
+    s->blf_rows = ui_box_create(bf, 0, 0, 228, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s->blf_rows, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s->blf_rows, 4, 0);
+    s->blf_ext = field_create(s, bf, "Add: extension", "1002", UI_BLF_EXT_LEN - 1, false);
+    lv_textarea_set_accepted_chars(s->blf_ext, DIAL_CHARS);
+    s->blf_label = field_create(s, bf, "Label (optional)", "Bob", UI_BLF_LABEL_LEN - 1, false);
+    s->blf_add = ui_btn_create(bf, UI_BTN_BLUE, LV_SYMBOL_PLUS " Add key", 0, 0, 228, FIELD_H);
+    lv_obj_set_style_margin_top(s->blf_add, 8, 0);
+    lv_obj_set_style_opa(s->blf_add, LV_OPA_40, LV_STATE_DISABLED);
+    lv_obj_add_event_cb(s->blf_add, blf_add_clicked, LV_EVENT_CLICKED, s);
+    s->vm = field_create(s, bf, "Voicemail number", "*97", 31, false);
+    lv_textarea_set_accepted_chars(s->vm, DIAL_CHARS);
 
     lv_obj_t *tf = form_create(s, scr);
     s->page[PG_TIME] = tf;
@@ -589,6 +777,7 @@ static lv_obj_t *settings_create(const char *arg)
     lv_obj_set_style_bg_color(s->kb, UI_COL_BLUE, LV_PART_ITEMS | LV_STATE_PRESSED);
     lv_obj_set_style_bg_color(s->kb, UI_COL_SURFACE2, LV_PART_ITEMS | LV_STATE_CHECKED);
     lv_obj_set_style_text_color(s->kb, UI_COL_TEXT, LV_PART_ITEMS | LV_STATE_CHECKED);
+    lv_keyboard_set_map(s->kb, LV_KEYBOARD_MODE_USER_1, DIAL_KB_MAP, DIAL_KB_CTRL);
     lv_obj_add_event_cb(s->kb, kb_event, LV_EVENT_READY, s);
     lv_obj_add_event_cb(s->kb, kb_event, LV_EVENT_CANCEL, s);
 

@@ -1,17 +1,64 @@
-/* Idle screen: clock, account, registration state, Dial / Settings. */
+/* Idle screen: clock, account, registration state, Dial / Settings; with BLF
+ * keys configured a panel of up to 8 tiles (tap = dial that extension), and
+ * when voicemail is waiting a button that dials the voicemail number.
+ *
+ * Layout (240x320, status bar 0-21):
+ *   no BLF keys    as before: big clock, name, id, state; "N new voicemails"
+ *                  button above Dial / Settings (the rest moves up a little)
+ *   BLF keys       tiles 2 per row, 44 px high, bottom-aligned above a 48 px
+ *                  button row (Dial | [Voicemail] | Settings). The header
+ *                  shrinks with the number of rows: 1 row → clock, name, id,
+ *                  state; 2 → clock, name, state; 3 → clock, state;
+ *                  4 → one line: smaller clock left, short state right. */
 
 #include "ui_priv.h"
 
 #include <stdio.h>
 #include <string.h>
 
+#define TILE_H      44
+#define TILE_GAP    5
+#define TILE_W      111                 /* two per row: 6 + 111 + 6 + 111 + 6 */
+#define BTN_ROW_Y   266
+#define BTN_ROW_H   48
+#define GRID_BOTTOM (BTN_ROW_Y - 6)
+#define LAMP_D      12
+#define TILE_TXT_X  26                  /* text left of the lamp */
+#define BLINK_MS    450
+
 typedef struct {
+    lv_obj_t *btn;
+    lv_obj_t *lamp;
+    lv_obj_t *name;                     /* fit label: label, or ext */
+    lv_obj_t *ext;                      /* small ext under a label */
+    char ext_txt[UI_BLF_EXT_LEN];
+    ui_blf_state_t state;
+} tile_t;
+
+typedef struct {
+    lv_obj_t *crow;
     lv_obj_t *clock;
     lv_obj_t *ampm;             /* "AM"/"PM" next to the big clock; hidden in 24 h mode */
     lv_obj_t *name;
     lv_obj_t *id;
     lv_obj_t *state;
     lv_obj_t *sub;
+    lv_obj_t *mwi_btn;          /* "N new voicemails" (no BLF keys) */
+    lv_obj_t *mwi_lbl;          /* envelope + "N new", 24 pt */
+    lv_obj_t *mwi_lbl2;         /* "voicemails", 14 pt */
+    lv_obj_t *dial;
+    lv_obj_t *set;
+    lv_obj_t *vm;               /* voicemail button in the bottom row (BLF keys) */
+    lv_obj_t *vm_cap;
+    lv_obj_t *scr;
+    tile_t tile[UI_BLF_MAX];
+    int n_tiles;                /* created so far */
+    lv_timer_t *blink;
+    bool blink_on;
+    /* layout key: re-layout only when it changes */
+    int lay_n;
+    bool lay_mwi;
+    bool compact;               /* 4 rows: one-line header */
 } home_t;
 
 static home_t *s_h;
@@ -21,6 +68,9 @@ static void on_delete(lv_event_t *e)
     home_t *h = lv_event_get_user_data(e);
     if (s_h == h) {
         s_h = NULL;
+    }
+    if (h->blink) {
+        lv_timer_delete(h->blink);
     }
     lv_free(h);
 }
@@ -37,6 +87,80 @@ static void on_settings(lv_event_t *e)
     ui_goto(UI_SCR_SETTINGS, NULL);
 }
 
+static void on_voicemail(lv_event_t *e)
+{
+    (void)e;
+    const char *vm = ui_model()->vm_number;
+    if (!vm[0]) {
+        ui_toast("No voicemail number set");
+        return;
+    }
+    ui_act_dial(vm);
+}
+
+static void on_tile(lv_event_t *e)
+{
+    home_t *h = s_h;
+    intptr_t i = (intptr_t)lv_event_get_user_data(e);
+    if (h && i >= 0 && i < UI_BLF_MAX && h->tile[i].ext_txt[0]) {
+        ui_act_dial(h->tile[i].ext_txt);
+    }
+}
+
+static lv_color_t lamp_color(ui_blf_state_t st, bool blink_on)
+{
+    switch (st) {
+    case UI_BLF_IDLE:    return UI_COL_OK;
+    case UI_BLF_BUSY:    return UI_COL_RED;
+    case UI_BLF_RINGING: return blink_on ? UI_COL_RED : UI_COL_WARN;
+    case UI_BLF_UNKNOWN:
+    default:             return UI_COL_SURFACE2;
+    }
+}
+
+static void tile_paint(home_t *h, tile_t *t)
+{
+    lv_color_t c = lamp_color(t->state, h->blink_on);
+    lv_obj_set_style_bg_color(t->lamp, c, 0);
+    /* a ringing tile is outlined as well, so it catches the eye */
+    lv_obj_set_style_border_width(t->btn, t->state == UI_BLF_RINGING ? 2 : 0, 0);
+    lv_obj_set_style_border_color(t->btn, c, 0);
+}
+
+static void blink_cb(lv_timer_t *timer)
+{
+    home_t *h = lv_timer_get_user_data(timer);
+    h->blink_on = !h->blink_on;
+    for (int i = 0; i < h->lay_n; i++) {
+        if (h->tile[i].state == UI_BLF_RINGING) {
+            tile_paint(h, &h->tile[i]);
+        }
+    }
+}
+
+static void tile_create(home_t *h, lv_obj_t *scr, int i)
+{
+    tile_t *t = &h->tile[i];
+    t->btn = ui_btn_create(scr, UI_BTN_NEUTRAL, NULL, 0, 0, TILE_W, TILE_H);
+    lv_obj_set_style_border_side(t->btn, LV_BORDER_SIDE_FULL, 0);
+    lv_obj_add_event_cb(t->btn, on_tile, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+    t->lamp = ui_box_create(t->btn, 8, (TILE_H - LAMP_D) / 2, LAMP_D, LAMP_D);
+    lv_obj_set_style_radius(t->lamp, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(t->lamp, LV_OPA_COVER, 0);
+    t->name = ui_fit_create(t->btn, TILE_TXT_X, 0, TILE_W - TILE_TXT_X - 5, 26, UI_COL_TEXT);
+    lv_obj_set_style_text_align(lv_obj_get_child(t->name, 0), LV_TEXT_ALIGN_LEFT, 0);
+    t->ext = ui_label_create(t->btn, &lv_font_montserrat_14, UI_COL_DIM, "");
+    lv_obj_set_pos(t->ext, TILE_TXT_X, 25);
+    lv_obj_set_hidden(t->btn, true);
+}
+
+static void tile_set_width(tile_t *t, int32_t w)
+{
+    lv_obj_set_width(t->btn, w);
+    lv_obj_set_width(t->name, w - TILE_TXT_X - 5);
+    lv_obj_set_width(lv_obj_get_child(t->name, 0), w - TILE_TXT_X - 5);
+}
+
 static lv_obj_t *home_create(const char *arg)
 {
     (void)arg;
@@ -49,12 +173,12 @@ static lv_obj_t *home_create(const char *arg)
     ui_statusbar_create(scr);
 
     /* "3:07" in 40 pt with a 24 pt "PM" beside it, the pair centred as one. */
-    lv_obj_t *crow = ui_box_create(scr, 0, 44, UI_W, 48);
-    lv_obj_set_flex_flow(crow, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(crow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(crow, 6, 0);
-    h->clock = ui_label_create(crow, &lv_font_montserrat_40, UI_COL_TEXT, "");
-    h->ampm = ui_label_create(crow, &lv_font_montserrat_24, UI_COL_DIM, "");
+    h->crow = ui_box_create(scr, 0, 44, UI_W, 48);
+    lv_obj_set_flex_flow(h->crow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(h->crow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(h->crow, 6, 0);
+    h->clock = ui_label_create(h->crow, &lv_font_montserrat_40, UI_COL_TEXT, "");
+    h->ampm = ui_label_create(h->crow, &lv_font_montserrat_24, UI_COL_DIM, "");
     lv_obj_set_style_translate_y(h->ampm, -3, 0);
     lv_obj_set_hidden(h->ampm, true);
 
@@ -65,21 +189,43 @@ static lv_obj_t *home_create(const char *arg)
     lv_obj_set_style_text_font(h->state, &lv_font_montserrat_24, 0);
     lv_obj_set_width(h->state, 216);
     lv_obj_set_style_text_align(h->state, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(h->state, LV_ALIGN_TOP_MID, 0, 176);
+    lv_obj_set_pos(h->state, 12, 176);
 
     h->sub = ui_label_create(scr, &lv_font_montserrat_14, UI_COL_BAD, "");
     lv_obj_set_width(h->sub, 216);
     lv_obj_set_style_text_align(h->sub, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(h->sub, LV_ALIGN_TOP_MID, 0, 212);
+    lv_obj_set_pos(h->sub, 12, 212);
 
-    lv_obj_t *dial = ui_icon_btn_create(scr, UI_BTN_GREEN, LV_SYMBOL_CALL, &lv_font_montserrat_24,
-                                        0, "Dial", &lv_font_montserrat_14, 6, 250, 112, 64);
-    lv_obj_add_event_cb(dial, on_dial, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *set = ui_icon_btn_create(scr, UI_BTN_NEUTRAL, LV_SYMBOL_SETTINGS,
-                                       &lv_font_montserrat_24, 0, "Settings",
-                                       &lv_font_montserrat_14, 122, 250, 112, 64);
-    lv_obj_add_event_cb(set, on_settings, LV_EVENT_CLICKED, NULL);
+    h->scr = scr;                       /* tiles are created when first needed */
 
+    /* "[envelope] 3 new" in 24 pt + "voicemails" in 14 pt, centred as one */
+    h->mwi_btn = ui_btn_create(scr, UI_BTN_NEUTRAL, NULL, 12, 198, 216, 44);
+    lv_obj_set_style_border_width(h->mwi_btn, 2, 0);
+    lv_obj_set_style_border_color(h->mwi_btn, UI_COL_WARN, 0);
+    lv_obj_set_flex_flow(h->mwi_btn, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(h->mwi_btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(h->mwi_btn, 6, 0);
+    h->mwi_lbl = ui_label_create(h->mwi_btn, &lv_font_montserrat_24, UI_COL_WARN, "");
+    h->mwi_lbl2 = ui_label_create(h->mwi_btn, &lv_font_montserrat_14, UI_COL_WARN, "");
+    lv_obj_set_style_translate_y(h->mwi_lbl2, -3, 0);
+    lv_obj_add_event_cb(h->mwi_btn, on_voicemail, LV_EVENT_CLICKED, NULL);
+    lv_obj_set_hidden(h->mwi_btn, true);
+
+    h->dial = ui_icon_btn_create(scr, UI_BTN_GREEN, LV_SYMBOL_CALL, &lv_font_montserrat_24, 0, "Dial",
+                                 &lv_font_montserrat_14, 6, 250, 112, 64);
+    lv_obj_add_event_cb(h->dial, on_dial, LV_EVENT_CLICKED, NULL);
+    h->set = ui_icon_btn_create(scr, UI_BTN_NEUTRAL, LV_SYMBOL_SETTINGS, &lv_font_montserrat_24, 0,
+                                "Settings", &lv_font_montserrat_14, 122, 250, 112, 64);
+    lv_obj_add_event_cb(h->set, on_settings, LV_EVENT_CLICKED, NULL);
+    h->vm = ui_icon_btn_create(scr, UI_BTN_NEUTRAL, LV_SYMBOL_ENVELOPE, &lv_font_montserrat_24, 0, "",
+                               &lv_font_montserrat_14, 84, BTN_ROW_Y, 72, BTN_ROW_H);
+    lv_obj_set_style_text_color(lv_obj_get_child(h->vm, 0), UI_COL_WARN, 0);
+    h->vm_cap = lv_obj_get_child(h->vm, 1);
+    lv_obj_add_event_cb(h->vm, on_voicemail, LV_EVENT_CLICKED, NULL);
+    lv_obj_set_hidden(h->vm, true);
+
+    h->lay_n = -1;
+    h->blink = lv_timer_create(blink_cb, BLINK_MS, h);
     s_h = h;
     return scr;
 }
@@ -106,11 +252,138 @@ static void split_account(const char *acc, char *name, size_t ncap, char *id, si
     }
 }
 
+static void set_y(lv_obj_t *o, int32_t y, bool show)
+{
+    lv_obj_set_hidden(o, !show);
+    lv_obj_set_y(o, y);
+}
+
+/* Place everything for `n` BLF keys and the voicemail button. */
+static void home_layout(home_t *h, int n, bool mwi)
+{
+    h->lay_n = n;
+    h->lay_mwi = mwi;
+    for (; h->n_tiles < n; h->n_tiles++) {
+        tile_create(h, h->scr, h->n_tiles);
+    }
+    int rows = (n + 1) / 2;
+    h->compact = rows >= 4;
+
+    /* header */
+    lv_obj_set_flex_align(h->crow, h->compact ? LV_FLEX_ALIGN_START : LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_x(h->crow, h->compact ? 8 : 0);
+    lv_obj_set_size(h->crow, h->compact ? 140 : UI_W, h->compact ? 40 : 48);
+    lv_obj_set_style_text_font(h->clock, h->compact ? &lv_font_montserrat_32 : &lv_font_montserrat_40, 0);
+    lv_obj_set_style_text_font(h->ampm, h->compact ? &lv_font_montserrat_14 : &lv_font_montserrat_24, 0);
+    lv_obj_set_style_translate_y(h->ampm, h->compact ? -5 : -3, 0);
+    lv_obj_set_style_text_font(h->state, h->compact ? &lv_font_montserrat_14 : &lv_font_montserrat_24, 0);
+    lv_obj_set_width(h->state, h->compact ? 92 : 216);
+    lv_obj_set_x(h->state, h->compact ? 140 : 12);
+    lv_obj_set_style_text_align(h->state, h->compact ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_CENTER, 0);
+
+    if (n == 0) {
+        if (!mwi) {
+            set_y(h->crow, 44, true);
+            set_y(h->name, 108, true);
+            set_y(h->id, 142, true);
+            set_y(h->state, 176, true);
+            set_y(h->sub, 212, true);
+        } else {
+            set_y(h->crow, 30, true);
+            set_y(h->name, 86, true);
+            set_y(h->id, 120, true);
+            set_y(h->state, 146, true);
+            set_y(h->sub, 178, true);
+        }
+        lv_obj_set_hidden(h->mwi_btn, !mwi);
+        lv_obj_set_pos(h->dial, 6, 250);
+        lv_obj_set_size(h->dial, 112, 64);
+        lv_obj_set_pos(h->set, 122, 250);
+        lv_obj_set_size(h->set, 112, 64);
+        lv_obj_set_hidden(h->vm, true);
+    } else {
+        int32_t top = GRID_BOTTOM - (rows * TILE_H + (rows - 1) * TILE_GAP);
+        switch (rows) {
+        case 1: /* top 216 */
+            set_y(h->crow, 34, true);
+            set_y(h->name, 92, true);
+            set_y(h->id, 126, true);
+            set_y(h->state, 154, true);
+            set_y(h->sub, 186, true);
+            break;
+        case 2: /* top 167 */
+            set_y(h->crow, 28, true);
+            set_y(h->name, 82, true);
+            set_y(h->id, 0, false);
+            set_y(h->state, 124, true);
+            set_y(h->sub, 0, false);
+            break;
+        case 3: /* top 118 */
+            set_y(h->crow, 26, true);
+            set_y(h->name, 0, false);
+            set_y(h->id, 0, false);
+            set_y(h->state, 80, true);
+            set_y(h->sub, 0, false);
+            break;
+        default: /* 4 rows, top 69: one line */
+            set_y(h->crow, 24, true);
+            set_y(h->name, 0, false);
+            set_y(h->id, 0, false);
+            set_y(h->state, 37, true);
+            set_y(h->sub, 0, false);
+            break;
+        }
+        for (int i = 0; i < n; i++) {
+            tile_t *t = &h->tile[i];
+            bool wide = (i == n - 1) && (n % 2 == 1);
+            int32_t x = (i % 2 == 0) ? 6 : 6 + TILE_W + 6;
+            int32_t y = top + (i / 2) * (TILE_H + TILE_GAP);
+            lv_obj_set_pos(t->btn, x, y);
+            tile_set_width(t, wide ? 2 * TILE_W + 6 : TILE_W);
+        }
+        lv_obj_set_hidden(h->mwi_btn, true);
+        int32_t w = mwi ? 72 : 111;
+        lv_obj_set_pos(h->dial, 6, BTN_ROW_Y);
+        lv_obj_set_size(h->dial, w, BTN_ROW_H);
+        lv_obj_set_pos(h->set, UI_W - 6 - w, BTN_ROW_Y);
+        lv_obj_set_size(h->set, w, BTN_ROW_H);
+        lv_obj_set_hidden(h->vm, !mwi);
+    }
+    for (int i = 0; i < h->n_tiles; i++) {
+        lv_obj_set_hidden(h->tile[i].btn, i >= n);
+    }
+}
+
+static void tile_update(home_t *h, tile_t *t, const ui_blf_t *b)
+{
+    snprintf(t->ext_txt, sizeof(t->ext_txt), "%s", b->ext);
+    if (b->label[0]) {
+        /* label on top (24 pt, smaller if long), the extension under it */
+        lv_obj_set_y(t->name, 1);
+        lv_obj_set_height(t->name, 26);
+        ui_fit_set(t->name, b->label, &lv_font_montserrat_24, false);
+        lv_label_set_text(t->ext, b->ext);
+        lv_obj_set_hidden(t->ext, false);
+    } else {
+        lv_obj_set_y(t->name, (TILE_H - 30) / 2);
+        lv_obj_set_height(t->name, 30);
+        ui_fit_set(t->name, b->ext, &lv_font_montserrat_24, true);
+        lv_obj_set_hidden(t->ext, true);
+    }
+    t->state = b->state;
+    tile_paint(h, t);
+}
+
 static void home_update(const ui_model_t *m)
 {
     home_t *h = s_h;
     if (!h) {
         return;
+    }
+    int n = m->blf_count > UI_BLF_MAX ? UI_BLF_MAX : m->blf_count;
+    if (n != h->lay_n || m->mwi_waiting != h->lay_mwi) {
+        home_layout(h, n, m->mwi_waiting);
     }
 
     if (m->time_hhmm[0]) {
@@ -137,33 +410,37 @@ static void home_update(const ui_model_t *m)
 
     const char *icon;
     const char *txt;
+    const char *shrt;
     const char *sub = "";
     lv_color_t col;
     if (m->net == UI_NET_OFF) {
         icon = LV_SYMBOL_CLOSE;
         txt = "Offline";
+        shrt = "No Wi-Fi";
         sub = "No Wi-Fi";
         col = UI_COL_BAD;
     } else {
         switch (m->reg) {
         case UI_REG_REGISTERED:
             icon = LV_SYMBOL_OK;
-            txt = "Ready";
+            txt = shrt = "Ready";
             col = UI_COL_OK;
             break;
         case UI_REG_REGISTERING:
             icon = LV_SYMBOL_REFRESH;
             txt = "Registering...";
+            shrt = "Registering";
             col = UI_COL_WARN;
             break;
         case UI_REG_FAILED:
             icon = LV_SYMBOL_WARNING;
             txt = "Registration failed";
+            shrt = "Reg. failed";
             col = UI_COL_BAD;
             break;
         default:
             icon = LV_SYMBOL_CLOSE;
-            txt = "Offline";
+            txt = shrt = "Offline";
             col = UI_COL_DIM;
             break;
         }
@@ -171,9 +448,26 @@ static void home_update(const ui_model_t *m)
             sub = "Connecting to Wi-Fi...";
         }
     }
-    lv_label_set_text_fmt(h->state, "%s %s", icon, txt);
+    lv_label_set_text_fmt(h->state, "%s %s", icon, h->compact ? shrt : txt);
     lv_obj_set_style_text_color(h->state, col, 0);
     lv_label_set_text(h->sub, sub);
+
+    for (int i = 0; i < n; i++) {
+        tile_update(h, &h->tile[i], &m->blf[i]);
+    }
+
+    if (m->mwi_waiting) {
+        if (m->mwi_new > 0) {
+            unsigned nn = m->mwi_new > 999 ? 999u : (unsigned)m->mwi_new;
+            lv_label_set_text_fmt(h->mwi_lbl, LV_SYMBOL_ENVELOPE " %u new", nn);
+            lv_label_set_text(h->mwi_lbl2, nn == 1 ? "voicemail" : "voicemails");
+            lv_label_set_text_fmt(h->vm_cap, "%u new", nn);
+        } else {
+            lv_label_set_text(h->mwi_lbl, LV_SYMBOL_ENVELOPE " Voicemail");
+            lv_label_set_text(h->mwi_lbl2, "");
+            lv_label_set_text(h->vm_cap, "Voicemail");
+        }
+    }
 }
 
 static void home_key(char key, ui_key_action_t action)

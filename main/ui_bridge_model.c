@@ -13,6 +13,17 @@ ui_reg_state_t ui_bridge_map_reg(sip_reg_state_t st)
     }
 }
 
+ui_blf_state_t ui_bridge_map_blf(blf_state_t st)
+{
+    switch (st) {
+    case BLF_IDLE:    return UI_BLF_IDLE;
+    case BLF_RINGING: return UI_BLF_RINGING;
+    case BLF_BUSY:    return UI_BLF_BUSY;
+    case BLF_UNKNOWN:
+    default:          return UI_BLF_UNKNOWN;
+    }
+}
+
 ui_call_state_t ui_bridge_map_call(call_state_t st)
 {
     switch (st) {
@@ -138,6 +149,11 @@ void ui_bridge_fill_time_ota(ui_bridge_local_t *loc, const char *ntp_server, con
     copy_or_empty(loc->ota_url, sizeof(loc->ota_url), ota_url);
 }
 
+void ui_bridge_fill_vm(ui_bridge_local_t *loc, const char *vm_number)
+{
+    copy_or_empty(loc->vm_number, sizeof(loc->vm_number), vm_number);
+}
+
 void ui_bridge_fill_fw(ui_bridge_local_t *loc, const char *version, const char *partition)
 {
     copy_or_empty(loc->fw_version, sizeof(loc->fw_version), version);
@@ -204,4 +220,18 @@ void ui_bridge_build_model(const ui_bridge_local_t *loc, const phone_status_t *p
     out->ota_state = loc->ota_state;
     out->ota_percent = loc->ota_percent;
     copy(out->ota_message, sizeof(out->ota_message), loc->ota_message);
+
+    int n = ph->blf_count < UI_BLF_MAX ? ph->blf_count : UI_BLF_MAX;
+    for (int i = 0; i < n; i++) {
+        copy(out->blf[i].ext, sizeof(out->blf[i].ext), ph->blf[i].ext);
+        copy(out->blf[i].label, sizeof(out->blf[i].label), ph->blf[i].label);
+        out->blf[i].state = ui_bridge_map_blf(ph->blf[i].state);
+    }
+    out->blf_count = (uint8_t)n;
+    if (ph->mwi.known) {
+        out->mwi_waiting = ph->mwi.waiting;
+        out->mwi_new = ph->mwi.new_msgs;
+        out->mwi_old = ph->mwi.old_msgs;
+    }
+    copy(out->vm_number, sizeof(out->vm_number), loc->vm_number);
 }

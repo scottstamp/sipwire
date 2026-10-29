@@ -36,6 +36,23 @@ typedef enum {
     UI_OTA_FAILED,             /* ota_message says why */
 } ui_ota_state_t;
 
+typedef enum {
+    UI_BLF_UNKNOWN,            /* not subscribed / failed: grey lamp */
+    UI_BLF_IDLE,               /* green */
+    UI_BLF_RINGING,            /* blinking red/amber */
+    UI_BLF_BUSY,               /* red */
+} ui_blf_state_t;
+
+#define UI_BLF_MAX       8
+#define UI_BLF_EXT_LEN   32    /* incl. NUL */
+#define UI_BLF_LABEL_LEN 24    /* incl. NUL */
+
+typedef struct {
+    char ext[UI_BLF_EXT_LEN];      /* dialled when the tile is tapped */
+    char label[UI_BLF_LABEL_LEN];  /* shown instead of ext when set */
+    ui_blf_state_t state;
+} ui_blf_t;
+
 /* Longest preformatted clock text: "12:34 PM" (12 h, no leading zero) or "03:07"
  * (24 h); "" until the clock is set. The home screen splits off the AM/PM at the space. */
 #define UI_TIME_STR_LEN 12
@@ -83,4 +100,12 @@ typedef struct {
     ui_ota_state_t ota_state;
     uint8_t ota_percent;       /* 0-100 */
     char ota_message[64];      /* status line, e.g. "Downloading 42%"; may be empty */
+
+    /* BLF keys (settings `blf`, in order) and message waiting */
+    uint8_t blf_count;         /* 0 = no BLF panel, home screen as without */
+    ui_blf_t blf[UI_BLF_MAX];
+    bool mwi_waiting;          /* envelope in the status bar, voicemail button */
+    uint16_t mwi_new;          /* new / old voice messages (0 if unknown) */
+    uint16_t mwi_old;
+    char vm_number[32];        /* dialled by the voicemail button ("*97"); may be empty */
 } ui_model_t;

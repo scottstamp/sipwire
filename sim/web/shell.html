@@ -88,6 +88,24 @@
     </div>
 
     <div class="card">
+      <h2>BLF / voicemail</h2>
+      <div class="row"><label for="blfn">Keys</label>
+        <select id="blfn"><option>0</option><option>1</option><option>2</option><option selected>3</option><option>4</option>
+          <option>5</option><option>6</option><option>7</option><option>8</option></select>
+        <button id="blfset" type="button">set</button></div>
+      <div class="row"><label for="blfi">Key #</label>
+        <select id="blfi"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option>
+          <option>6</option><option>7</option><option>8</option></select>
+        <select id="blfst"><option value="0">unknown</option><option value="1" selected>idle</option>
+          <option value="2">ringing</option><option value="3">busy</option></select>
+        <button id="blfstate" type="button">apply</button></div>
+      <div class="row"><label for="mwin">Voicemail</label>
+        <input type="text" id="mwin" value="2" title="new messages" style="max-width:56px; flex:none">
+        <label style="width:auto"><input type="checkbox" id="mwiw"> waiting</label>
+        <button id="mwiset" type="button">set</button></div>
+    </div>
+
+    <div class="card">
       <h2>Call events</h2>
       <div class="row"><label for="inum">Number</label><input type="text" id="inum" value="1001"></div>
       <div class="row"><label for="iname">Name</label><input type="text" id="iname" value="Bob Example"></div>
@@ -172,6 +190,10 @@
     // state: 0 idle, 1 running, 2 done, 3 failed (no fake download; use Settings > Update for that)
     set_ota: function (st, pct, msg) { Module.ccall('sim_set_ota', null, ['number', 'number', 'string'], [st, pct || 0, msg || '']); },
     touch_raw: function (ax, ay, p) { Module.ccall('sim_touch_raw', null, ['number', 'number', 'number'], [ax, ay, p ? 1 : 0]); },
+    // BLF tiles: set_blf_count(n); set_blf(i, ext, label, state) with state 0 unknown, 1 idle, 2 ringing, 3 busy
+    set_blf_count: function (n) { Module.ccall('sim_set_blf_count', null, ['number'], [n]); },
+    set_blf: function (i, ext, label, st) { Module.ccall('sim_set_blf', null, ['number', 'string', 'string', 'number'], [i, ext || '', label || '', st || 0]); },
+    set_mwi: function (w, nw, old) { Module.ccall('sim_set_mwi', null, ['number', 'number', 'number'], [w ? 1 : 0, nw || 0, old || 0]); },
     model: function () { return JSON.parse(getModelJson()); }
   };
 
@@ -232,6 +254,20 @@
   });
   $('c24').addEventListener('change', function () { window.sim.set_clock24($('c24').checked); });
   $('clockclr').addEventListener('click', function () { $('clock').value = ''; window.sim.set_time(''); });
+  var BLF_DEMO = [['1002', 'Bob'], ['1003', 'Front desk'], ['1004', ''], ['1005', 'Carol'],
+                  ['1006', 'Dave'], ['1007', 'Reception'], ['1008', 'Eve'], ['1009', 'Lab']];
+  $('blfset').addEventListener('click', function () {
+    var n = +$('blfn').value;
+    window.sim.set_blf_count(0);
+    for (var i = 0; i < n; i++) window.sim.set_blf(i, BLF_DEMO[i][0], BLF_DEMO[i][1], 1);
+  });
+  $('blfstate').addEventListener('click', function () {
+    var i = +$('blfi').value - 1, m = window.sim.model();
+    if (i < m.blf.length) window.sim.set_blf(i, m.blf[i].ext, m.blf[i].label, +$('blfst').value);
+  });
+  $('mwiset').addEventListener('click', function () {
+    window.sim.set_mwi($('mwiw').checked, parseInt($('mwin').value, 10) || 0, 0);
+  });
   $('incoming').addEventListener('click', function () { window.sim.incoming($('inum').value, $('iname').value); });
   $('rhangup').addEventListener('click', function () { window.sim.remote_hangup(parseInt($('rcode').value, 10) || 0); });
   $('logclr').addEventListener('click', function () { $('log').textContent = ''; });

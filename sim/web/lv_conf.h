@@ -26,6 +26,11 @@
 
 #define LV_USE_PERF_MONITOR 0
 
+/* CONFIG_LV_USE_CLIB_MALLOC=y: lv_malloc from the C heap (the firmware's 64 KB
+ * builtin pool ran out; the simulator's did too once the home screen got BLF
+ * tiles) */
+#define LV_USE_STDLIB_MALLOC LV_STDLIB_CLIB
+
 /* ---- simulator only ---- */
 #define LV_USE_SDL 1
 #define LV_SDL_INCLUDE_PATH <SDL2/SDL.h>

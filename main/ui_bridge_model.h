@@ -37,6 +37,7 @@ typedef struct {
     ui_ota_state_t ota_state;
     uint8_t ota_percent;
     char ota_message[64];
+    char vm_number[32];             /* settings vm_number */
 } ui_bridge_local_t;
 
 /** Fill the time/update settings of `loc` (Settings > Time and > Update prefill).
@@ -59,6 +60,11 @@ void ui_bridge_fill_settings(ui_bridge_local_t *loc, const char *wifi_ssid, cons
                              const char *sip_server, uint16_t sip_port, const char *sip_user,
                              const char *sip_pass, const char *sip_display_name);
 
+/** Voicemail number (settings `vm_number`); NULL counts as empty. */
+void ui_bridge_fill_vm(ui_bridge_local_t *loc, const char *vm_number);
+
+ui_blf_state_t ui_bridge_map_blf(blf_state_t st);
+
 ui_reg_state_t ui_bridge_map_reg(sip_reg_state_t st);
 ui_call_state_t ui_bridge_map_call(call_state_t st);
 
@@ -75,5 +81,7 @@ uint32_t ui_bridge_call_seconds(call_state_t st, int64_t start_us, int64_t now_u
  *  ("3:07 PM"); midnight hour is 12 AM ("12:05 AM"), noon hour is 12 PM ("12:00 PM"). */
 void ui_bridge_format_time(bool valid, int hour, int minute, bool clock_24h, char out[UI_TIME_STR_LEN]);
 
+/** The whole model. BLF tiles and MWI come from the phone status (MWI counts
+ *  are 0 while unknown), the voicemail number from `loc`. */
 void ui_bridge_build_model(const ui_bridge_local_t *loc, const phone_status_t *ph, int64_t now_us,
                            ui_model_t *out);

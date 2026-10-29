@@ -156,7 +156,7 @@ const SCENARIOS = {
     steps: async (page, click, drag) => {
       await click(178, 282);   // Home -> Settings
       await page.waitForTimeout(250);
-      await drag(120, 250, 120, 150);   // list scrolls: About is the 6th row
+      await drag(120, 280, 120, 100);   // list scrolls to its end: About is the last row
       await click(120, 290);   // "About" row
     },
   },
@@ -233,7 +233,7 @@ const SCENARIOS = {
     steps: async (page, click, drag) => {
       await click(178, 282);   // Home -> Settings
       await page.waitForTimeout(250);
-      await drag(120, 250, 120, 150);
+      await drag(120, 280, 120, 100);   // scroll the list to its end
     },
   },
   settings_time: {
@@ -242,10 +242,11 @@ const SCENARIOS = {
       sim.set_reg(2);
       sim.set_time('15:07');
     },
-    steps: async (page, click) => {
+    steps: async (page, click, drag) => {
       await click(178, 282);   // Home -> Settings
       await page.waitForTimeout(250);
-      await click(120, 262);   // "Time" row
+      await drag(120, 280, 120, 100);   // scroll the list to its end
+      await click(120, 182);   // "Time" row
     },
   },
   settings_time_zones: {   // the zone dropdown open
@@ -254,10 +255,11 @@ const SCENARIOS = {
       sim.set_reg(2);
       sim.set_time('15:07');
     },
-    steps: async (page, click) => {
+    steps: async (page, click, drag) => {
       await click(178, 282);   // Home -> Settings
       await page.waitForTimeout(250);
-      await click(120, 262);   // "Time" row
+      await drag(120, 280, 120, 100);   // scroll the list to its end
+      await click(120, 182);   // "Time" row
       await page.waitForTimeout(100);
       await click(110, 190);   // time zone dropdown
       await page.waitForTimeout(200);
@@ -272,7 +274,8 @@ const SCENARIOS = {
     steps: async (page, click, drag) => {
       await click(178, 282);   // Home -> Settings
       await page.waitForTimeout(250);
-      await click(120, 262);   // "Time" row
+      await drag(120, 280, 120, 100);   // scroll the list to its end
+      await click(120, 182);   // "Time" row
       await page.waitForTimeout(100);
       await click(110, 190);   // time zone dropdown
       await page.waitForTimeout(200);
@@ -290,7 +293,7 @@ const SCENARIOS = {
     steps: async (page, click, drag) => {
       await click(178, 282);   // Home -> Settings
       await page.waitForTimeout(250);
-      await drag(120, 250, 120, 150);   // scroll the list
+      await drag(120, 280, 120, 100);   // scroll the list to its end
       await click(120, 236);   // "Update" row
     },
   },
@@ -303,7 +306,7 @@ const SCENARIOS = {
     steps: async (page, click, drag) => {
       await click(178, 282);   // Home -> Settings
       await page.waitForTimeout(250);
-      await drag(120, 250, 120, 150);
+      await drag(120, 280, 120, 100);   // scroll the list to its end
       await click(120, 236);   // "Update" row
       await page.waitForTimeout(100);
       await page.evaluate(() => window.sim.set_ota(1, 42, 'Downloading 42%'));
@@ -318,7 +321,7 @@ const SCENARIOS = {
     steps: async (page, click, drag) => {
       await click(178, 282);   // Home -> Settings
       await page.waitForTimeout(250);
-      await drag(120, 250, 120, 150);
+      await drag(120, 280, 120, 100);   // scroll the list to its end
       await click(120, 236);   // "Update" row
       await page.waitForTimeout(100);
       await click(110, 170);   // URL field -> keyboard
@@ -333,10 +336,124 @@ const SCENARIOS = {
     steps: async (page, click, drag) => {
       await click(178, 282);
       await page.waitForTimeout(250);
-      await drag(120, 250, 120, 150);
+      await drag(120, 280, 120, 100);   // scroll the list to its end
       await click(120, 236);
       await page.waitForTimeout(100);
       await page.evaluate(() => window.sim.set_ota(3, 0, 'Wrong firmware: otherapp'));
+    },
+  },
+  // ---- BLF panel / voicemail (state: 0 unknown, 1 idle, 2 ringing, 3 busy) ----
+  idle_blf1: (sim) => {
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+    sim.set_blf(0, '1002', 'Bob', 1);
+  },
+  idle_blf2: (sim) => {
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+    sim.set_blf(0, '1002', 'Bob', 1);
+    sim.set_blf(1, '1003', 'Front desk', 3);
+  },
+  idle_blf3: (sim) => {
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+    sim.set_blf(0, '1002', 'Bob', 1);
+    sim.set_blf(1, '1003', 'Front desk', 3);
+    sim.set_blf(2, '1004', '', 0);
+  },
+  idle_blf5_mwi: (sim) => {
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('15:07');
+    const keys = [['1002', 'Bob', 1], ['1003', 'Front desk', 3], ['1004', '', 2], ['1005', 'Carol', 1],
+                  ['1006', 'Dave', 0]];
+    keys.forEach((k, i) => sim.set_blf(i, k[0], k[1], k[2]));
+    sim.set_mwi(1, 2, 5);
+  },
+  idle_blf8: (sim) => {
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+    const keys = [['1002', 'Bob', 1], ['1003', 'Front desk', 3], ['1004', '', 1], ['1005', 'Carol', 1],
+                  ['1006', 'Dave', 0], ['1007', 'Reception', 3], ['1008', 'Eve', 1], ['+4915112345678', '', 1]];
+    keys.forEach((k, i) => sim.set_blf(i, k[0], k[1], k[2]));
+  },
+  idle_mwi: (sim) => {
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+    sim.set_mwi(1, 3, 1);
+  },
+  idle_blf8_mwi_ringing: (sim) => {
+    sim.set_net(2, -61); sim.set_reg(2); sim.set_time('12:59');
+    const keys = [['1002', 'Bob', 2], ['1003', 'Front desk', 3], ['1004', '', 1], ['1005', 'Carol', 2],
+                  ['1006', 'Dave', 0], ['1007', 'Reception', 3], ['1008', 'Eve', 1], ['1009', 'Lab', 1]];
+    keys.forEach((k, i) => sim.set_blf(i, k[0], k[1], k[2]));
+    sim.set_mwi(1, 12, 4);
+  },
+  idle_blf8_offline: (sim) => {
+    sim.set_net(0, 0); sim.set_reg(3);
+    const keys = [['1002', 'Bob', 0], ['1003', 'Front desk', 0], ['1004', '', 0], ['1005', 'Carol', 0],
+                  ['1006', 'Dave', 0], ['1007', 'Reception', 0], ['1008', 'Eve', 0], ['1009', 'Lab', 0]];
+    keys.forEach((k, i) => sim.set_blf(i, k[0], k[1], k[2]));
+  },
+  blf_tap_dials: {   // tapping a tile dials its extension
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.set_blf(0, '1002', 'Bob', 1);
+      sim.set_blf(1, '1003', 'Front desk', 3);
+      sim.set_blf(2, '1004', '', 0);
+    },
+    steps: async (page, click) => {
+      await click(178, 191);   // second tile ("Front desk")
+    },
+  },
+  // Settings > BLF keys, prefilled from the model (3 keys), then the dial pad for a new one
+  settings_blf: {
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.set_blf(0, '1002', 'Bob', 1);
+      sim.set_blf(1, '1003', 'Front desk', 3);
+      sim.set_blf(2, '1004', '', 0);
+    },
+    steps: async (page, click) => {
+      await click(178, 291);   // Home -> Settings (bottom row with BLF keys)
+      await page.waitForTimeout(250);
+      await click(120, 208);   // "BLF keys" row
+    },
+  },
+  settings_blf_add_keypad: {   // dial pad (with * and #) for the extension
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.set_blf(0, '1002', 'Bob', 1);
+    },
+    steps: async (page, click) => {
+      await click(178, 291);   // Home -> Settings
+      await page.waitForTimeout(250);
+      await click(120, 208);   // "BLF keys" row
+      await page.waitForTimeout(100);
+      await click(110, 172);   // "Add: extension" field -> dial pad
+      await page.waitForTimeout(150);
+      for (const [x, y] of [[26, 185], [72, 298], [72, 298], [121, 185]]) await click(x, y);   // "1003"
+    },
+  },
+  // add "1005" to two keys, remove "1002", save: back home there are two tiles
+  settings_blf_saved: {
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.set_blf(0, '1002', 'Bob', 1);
+      sim.set_blf(1, '1003', 'Front desk', 3);
+    },
+    steps: async (page, click, drag) => {
+      await click(178, 291);   // Home -> Settings
+      await page.waitForTimeout(250);
+      await click(120, 208);   // "BLF keys" row
+      await page.waitForTimeout(100);
+      await click(110, 238);   // "Add: extension" field -> dial pad
+      await page.waitForTimeout(150);
+      for (const [x, y] of [[26, 185], [72, 298], [72, 298], [72, 216]]) await click(x, y);   // "1005"
+      await click(190, 216);   // OK: keyboard closes
+      await page.waitForTimeout(150);
+      await click(120, 248);   // "Add key"
+      await page.waitForTimeout(100);
+      await drag(120, 100, 120, 300);   // back to the top of the form
+      await click(212, 122);   // trash on the first key (1002)
+      await page.waitForTimeout(150);
+      await click(202, 46);    // Save -> toast, back to the list
+      await page.waitForTimeout(300);
+      await click(26, 46);     // back home
+      await page.waitForTimeout(300);
     },
   },
   calibrate_target1: {
@@ -348,7 +465,7 @@ const SCENARIOS = {
     steps: async (page, click) => {
       await click(178, 282);   // Home -> Settings
       await page.waitForTimeout(250);
-      await click(120, 226);   // "Touch calibration" row
+      await click(120, 262);   // "Calibrate" row
       await page.waitForTimeout(400);
     },
   },
@@ -364,7 +481,7 @@ const SCENARIOS = {
     steps: async (page, click, drag, hold) => {
       await click(178, 282);   // Home -> Settings
       await page.waitForTimeout(250);
-      await click(120, 226);   // "Touch calibration" row
+      await click(120, 262);   // "Calibrate" row
       await page.waitForTimeout(500);
       for (const [x, y] of [[20, 20], [219, 20], [219, 299], [20, 299]]) {
         await hold(x, y, 200);

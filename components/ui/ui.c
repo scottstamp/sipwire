@@ -240,6 +240,20 @@ void ui_act_ota_start(const char *url)
     }
 }
 
+void ui_act_save_blf(const char *list)
+{
+    if (s_actions && s_actions->save_blf && list) {
+        s_actions->save_blf(s_actions->ctx, list);
+    }
+}
+
+void ui_act_save_vm_number(const char *number)
+{
+    if (s_actions && s_actions->save_vm_number && number) {
+        s_actions->save_vm_number(s_actions->ctx, number);
+    }
+}
+
 void ui_act_touch_cal_begin(void)
 {
     if (s_actions && s_actions->touch_cal_begin) {
