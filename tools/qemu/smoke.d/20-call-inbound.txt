@@ -1,0 +1,57 @@
+# Shard: OTA refusals, inbound answer/reject, unknown number, account change and removal.
+include _account.inc
+
+# 8: OTA, negative cases (run before any call: OTA is refused while a call is up or just
+# ended): each must be refused with a reason, no reboot, and we keep running from ota_0 (the first slot, flashed by the image). The real update is in 40-ota.
+do ota status
+expect ^running partition: ota_0
+expect ^app state: (valid|n/a|undefined)
+do ota ${OTA_BASE}/other.bin
+expect ota: update failed: Wrong firmware: otherapp 30
+do ota ${OTA_BASE}/junk.bin
+expect ota: update failed: Not a firmware image 30
+do ota ${OTA_BASE}/missing.bin
+expect ota: update failed: Download failed 30
+# the status follows the failure log line a moment later: poll
+poll 10 ^update: failed :: ota status
+expect ^running partition: ota_0
+expect ^update: failed
+# A successful update logs "update done, rebooting in 3 s" at once, so a short window proves
+# the refusals did not reboot (the lines since the last expect are checked too).
+absent (ota: update done|ESP-ROM:esp32s3|Guru Meditation) 1
+
+# 3: inbound call, answer, remote ends (Wait 1: Asterisk hangs up 1 s after we answer)
+shell ($ASTX 'channel originate PJSIP/1001 application Wait 1' >/dev/null 2>&1 &)
+expect call: ringing-in 10
+do answer
+expect call: active 5
+expect call: ended .*\(code 0\) 10
+expect call: idle 5
+
+# 4: inbound call rejected 486 by hangup (no busy tone for us)
+shell ($ASTX 'channel originate PJSIP/1001 application Wait 1' >/dev/null 2>&1 &)
+expect call: ringing-in 10
+do reject 486
+expect call: ended .*\(code 0\) 5
+expect call: idle 5
+
+# 5: unknown number -> rejected
+do call 777
+expect call: ended 777 \(code [45]\d\d\) 15
+
+# 6: account change -> unregister, re-register with new display name
+do cfg set sip_display_name QemuPhone
+expect SIP account changed 5
+expect registration: none 5
+expect registration: registered 15
+shell $ASTX 'pjsip show contacts' | grep -q '1001/sip:1001@'
+
+# 7: account removed -> unregistered, idle
+do cfg set sip_server
+expect registration: none 10
+shell ! $ASTX 'pjsip show contacts' | grep -q '1001/sip:1001@'
+do sip
+expect registration: not registered
+do tasks
+do cpu 1
+expect ^IDLE0\s+0\s+\d+\.\d 5

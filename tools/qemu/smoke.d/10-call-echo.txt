@@ -1,0 +1,50 @@
+# Shard: echo call (G.722, hold/resume, RTP, echo canceller, DTMF), remote hangup.
+include _account.inc
+
+# echo canceller: off by default; switch it on (allocates it) for the calls below.
+# The reply and the audio component's log line race: expect both, any order.
+do cfg set aec true
+expect (\baec\s+= |audio: aec: SpeexDSP, tail 1280) 5
+expect (\baec\s+= |audio: aec: SpeexDSP, tail 1280) 5
+
+# 1: echo test (G.722 negotiated), hold/resume, dtmf, local hangup
+do call 600
+expect call: active 600 15
+do hold
+expect call: held 10
+do resume
+expect call: active 10
+# wait for RTP to flow both ways (rx counter > 0) instead of a fixed time
+poll 10 ^rx [1-9]\d* lost :: rtp
+expect ^active, pt 9 \(G722\), local 5
+expect ^rx [1-9]\d* lost 5
+# echo canceller running on the call's mic path (the real SpeexDSP code; the
+# QEMU mic is silent), toggled live
+poll 10 ^frames [1-9]\d*, avg \d+ us/frame, max \d+ us/frame, resets 0 :: aec
+expect ^aec: on, running 5
+expect ^frames [1-9]\d*, avg \d+ us/frame, max \d+ us/frame, resets 0 5
+expect ^ref late 0, i2s xruns tx 0 rx 0, heap internal [1-9]\d* B 5
+# `aec` reports the canceller of the RX task, which follows the setting a frame or two
+# later than the "aec off/on" log line: poll until it shows the new state
+do cfg set aec false
+expect (\baec\s+= |audio: aec off) 5
+expect (\baec\s+= |audio: aec off) 5
+poll 10 ^aec: off, idle :: aec
+do cfg set aec true
+expect (\baec\s+= |audio: aec on) 5
+expect (\baec\s+= |audio: aec on) 5
+poll 10 ^aec: on, running :: aec
+# no "#": it ends Asterisk's Echo() and races the local hangup below
+do dtmf 12
+# time is the point: both digits (150 ms apart) must go out on the wire before the BYE
+sleep 0.5
+poll 10 ^tx [1-9]\d* \(errors 0\) :: rtp
+do hangup
+expect call: ended 600 \(code 0\) 10
+expect call: idle 5
+
+# 2: remote hangup
+do call 601
+expect call: active 601 15
+expect call: ended 601 \(code 0\) 10
+expect call: idle 5

@@ -1,0 +1,36 @@
+# Shard: time settings applied live and kept over the OTA reboot; the real OTA update.
+include _boot.inc
+
+# 7b: time settings apply live (TZ + SNTP server, no reboot) and persist
+# The reply and the applied-live log line race (event loop task): expect both, any order.
+# The log line carries the value (the reply may be split by a log line in its middle).
+do cfg set tz CET-1CEST,M3.5.0,M10.5.0/3
+expect (\btz\s+= |ui_bridge: time zone: CET-1CEST) 5
+expect (\btz\s+= |ui_bridge: time zone: CET-1CEST) 5
+do cfg set ntp_server 10.0.2.2
+expect (\bntp_server\s+= |ui_bridge: ntp server: 10.0.2.2) 5
+expect (\bntp_server\s+= |ui_bridge: ntp server: 10.0.2.2) 5
+do cfg set clock_24h true
+expect \bclock_24h\s+=
+
+# 9: OTA, the real update: progress -> done -> reboot -> boots from ota_1 -> marked valid.
+do ota status
+expect ^running partition: ota_0
+do ota ${OTA_BASE}/sipwire.bin
+# the reply and the OTA task's first log lines race: all three, any order
+expect (^update started from|ota: version .* ->|ota: progress 0%) 60
+expect (^update started from|ota: version .* ->|ota: progress 0%) 60
+expect (^update started from|ota: version .* ->|ota: progress 0%) 60
+expect ota: progress 5\d% 300
+expect ota: progress 100% 300
+expect ota: update done, rebooting in 3 s 60
+expect ESP-ROM:esp32s3 30
+expect boot: Loaded app from partition at offset 0x320000 30
+expect ota: new firmware on ota_1 is pending verification 60
+expect ui_bridge: time zone: CET-1CEST 30
+expect ota: new firmware marked valid \(UI started and network up\) 60
+do ota status
+expect ^running partition: ota_1
+expect ^app state: valid
+expect ^next slot: ota_0
+shell grep -c 'GET /sipwire.bin' ${HTTP_LOG}

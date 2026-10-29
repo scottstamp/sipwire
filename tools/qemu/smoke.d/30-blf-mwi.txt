@@ -1,0 +1,39 @@
+# Shard: BLF (dialog subscriptions) and MWI (message-summary, voicemail).
+include _account.inc
+
+# 4b: BLF + MWI. Watch our own extension (Asterisk hint PJSIP/1001) and 1002
+# (not registered: idle).
+do cfg set blf 1001:Me,1002:Bob
+expect blf: 2 keys 10
+expect blf 1001 \(Me\): idle 15
+expect blf 1002 \(Bob\): idle 15
+do blf
+expect ^blf 1: 1001\s+Me\s+idle
+expect ^blf 2: 1002\s+Bob\s+idle
+# The BLF NOTIFY and the INVITE may arrive in either order: expect both, any order,
+# before answering.
+shell ($ASTX 'channel originate PJSIP/1001 application Wait 3' >/dev/null 2>&1 &)
+expect (blf 1001 \(Me\): ringing|call: ringing-in) 10
+expect (blf 1001 \(Me\): ringing|call: ringing-in) 10
+do answer
+expect blf 1001 \(Me\): busy 10
+expect blf 1001 \(Me\): idle 15
+expect call: idle 10
+do sip
+expect ^call:\s+idle
+do mwi
+expect ^mwi: none, 0 new, 0 old
+# a voicemail for 1001 (empty message: the caller hangs up at once), then delete it
+shell $ASTX 'channel originate Local/7001@sipwire-test application Wait 2' >/dev/null
+expect mwi: waiting, 1 new / 0 old voice messages 20
+do mwi
+expect ^mwi: waiting, 1 new, 0 old
+shell ls $AST_SPOOL/voicemail/default/1001/INBOX/msg0000.txt && rm -f $AST_SPOOL/voicemail/default/1001/INBOX/*
+expect mwi: none, 0 new / 0 old voice messages 15
+# the list follows the setting live: 1001 is unsubscribed, 1002 kept
+do cfg set blf 1002:Bob
+expect blf: 1 key 10
+poll 10 ^blf 1: 1002\s+Bob\s+idle :: blf
+expect ^blf 1: 1002\s+Bob\s+idle
+# the whole reply is in by now (prompt seen): no window needed
+absent ^blf 2: 0

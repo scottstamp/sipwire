@@ -63,12 +63,11 @@ jobs:
         shell: bash
         run: |
           . "$IDF_PATH/export.sh"
-          tools/qemu/smoke.sh
+          tools/qemu/smoke.sh   # shards run in parallel, ~20 s
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: qemu-smoke-logs
           path: |
-            build_qemu/smoke.log
-            build_qemu/asterisk.log
+            build_qemu/smoke-*.log
           if-no-files-found: ignore
