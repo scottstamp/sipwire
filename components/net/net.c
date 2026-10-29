@@ -12,6 +12,7 @@
 #if CONFIG_SIPWIRE_QEMU
 #include "esp_eth.h"
 #include "esp_eth_mac_openeth.h"
+#include "esp_system.h"
 #endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -231,6 +232,20 @@ static void on_eth_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
     net_post(NET_EVENT_GOT_IP, &ev, sizeof(ev));
 }
 
+static esp_eth_handle_t s_eth;
+
+/* esp_restart() (e.g. after an OTA update): stop the emulated OpenCores EMAC
+ * first. Left running across the software reset it kept receiving while the
+ * next boot came up, which corrupted memory: a Guru Meditation in the new
+ * image or QEMU itself aborting ("malloc(): unsorted double linked list
+ * corrupted") right after the Ethernet driver started again. */
+static void net_qemu_shutdown(void)
+{
+    if (s_eth) {
+        esp_eth_stop(s_eth);
+    }
+}
+
 static esp_err_t net_init_qemu(void)
 {
     esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
@@ -248,6 +263,8 @@ static esp_err_t net_init_qemu(void)
     ESP_RETURN_ON_ERROR(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, on_eth_ip, NULL), TAG,
                         "register eth ip handler");
     net_post(NET_EVENT_CONNECTING, NULL, 0);
+    s_eth = eth;
+    ESP_RETURN_ON_ERROR(esp_register_shutdown_handler(net_qemu_shutdown), TAG, "shutdown handler");
     return esp_eth_start(eth);
 }
 #endif
