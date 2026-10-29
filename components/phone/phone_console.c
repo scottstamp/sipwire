@@ -11,6 +11,7 @@
 #include "esp_timer.h"
 #include "phone.h"
 #include "phone_priv.h"
+#include "settings.h"
 
 /* Command output goes straight to the console with printf (it is the user's
  * reply, not a log), as in components/cli. */
@@ -113,16 +114,78 @@ static int cmd_vol(int argc, char **argv)
     phone_status_t st;
     if (argc == 1) {
         phone_get_status(&st);
-        printf("volume %u%s\n", st.volume, st.speaker ? " (speaker)" : "");
+        settings_t cfg;
+        settings_get(&cfg);
+        printf("volume %u%s (saved: ring %u, call %u, speaker %u)\n", st.volume, st.speaker ? " (speaker)" : "",
+               cfg.ring_volume, cfg.call_volume, cfg.speaker_volume);
+        return 0;
+    }
+    /* vol ring|call|spk <0-100>: set one stored volume directly (persisted at once; the phone
+     * picks it up from the settings event) */
+    uint8_t *field = NULL;
+    settings_t cfg;
+    settings_get(&cfg);
+    if (argc == 3 && strcmp(argv[1], "ring") == 0) {
+        field = &cfg.ring_volume;
+    } else if (argc == 3 && strcmp(argv[1], "call") == 0) {
+        field = &cfg.call_volume;
+    } else if (argc == 3 && (strcmp(argv[1], "spk") == 0 || strcmp(argv[1], "speaker") == 0)) {
+        field = &cfg.speaker_volume;
+    }
+    const char *num = field ? argv[2] : argv[1];
+    char *end = NULL;
+    long v = strtol(num, &end, 10);
+    if ((!field && argc != 2) || *end != '\0' || v < 0 || v > 100) {
+        printf("usage: vol [0-100] | vol ring|call|spk <0-100>\n");
+        return 1;
+    }
+    if (field) {
+        *field = (uint8_t)v;
+        esp_err_t err = settings_set(&cfg);
+        if (err != ESP_OK) {
+            printf("save failed: %s\n", esp_err_to_name(err));
+            return 1;
+        }
+        return 0;
+    }
+    phone_set_volume((uint8_t)v);
+    return 0;
+}
+
+static int cmd_ring(int argc, char **argv)
+{
+    int n = audio_ringtone_count();
+    settings_t cfg;
+    settings_get(&cfg);
+    if (argc == 1 || strcmp(argv[1], "list") == 0) {
+        for (int i = 0; i < n; i++) {
+            printf("%d %s%s\n", i, audio_ringtone_name(i), i == cfg.ring_tone ? " *" : "");
+        }
+        printf("ring volume %u\n", cfg.ring_volume);
+        return 0;
+    }
+    if (strcmp(argv[1], "stop") == 0) {
+        audio_stop_ringtone();
         return 0;
     }
     char *end = NULL;
     long v = strtol(argv[1], &end, 10);
-    if (argc != 2 || *end != '\0' || v < 0 || v > 100) {
-        printf("usage: vol [0-100]\n");
+    if (argc != 2 || *end != '\0' || v < 0 || v >= n) {
+        printf("usage: ring [list] | ring <0-%d> | ring stop\n", n - 1);
         return 1;
     }
-    phone_set_volume((uint8_t)v);
+    cfg.ring_tone = (uint8_t)v;
+    esp_err_t err = settings_set(&cfg);
+    if (err != ESP_OK) {
+        printf("save failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    printf("ringtone %ld %s\n", v, audio_ringtone_name((int)v));
+    phone_status_t st;
+    phone_get_status(&st);
+    if (st.call == CALL_IDLE) {             /* volume is the ring volume only while idle/ringing */
+        audio_play_ringtone((int)v);
+    }
     return 0;
 }
 
@@ -256,7 +319,10 @@ esp_err_t phone_console_register(void)
         { .command = "resume", .help = "Resume a held call", .func = cmd_hold },
         { .command = "mute", .help = "Mute the microphone", .func = cmd_mute },
         { .command = "unmute", .help = "Unmute the microphone", .func = cmd_mute },
-        { .command = "vol", .help = "Show/set the current output volume", .hint = "[0-100]", .func = cmd_vol },
+        { .command = "vol", .help = "Show/set the current output volume; `vol ring|call|spk N` sets a stored one",
+          .hint = "[ring|call|spk] [0-100]", .func = cmd_vol },
+        { .command = "ring", .help = "List ringtones, select + preview one, or stop the preview",
+          .hint = "[list|<n>|stop]", .func = cmd_ring },
         { .command = "sip", .help = "SIP registration and call status", .func = cmd_sip },
         { .command = "rtp", .help = "RTP statistics of the current/last call", .func = cmd_rtp },
         { .command = "aec", .help = "Echo canceller state and statistics of the current/last call; "

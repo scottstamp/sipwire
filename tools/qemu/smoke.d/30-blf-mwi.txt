@@ -37,3 +37,20 @@ poll 10 ^blf 1: 1002\s+Bob\s+idle :: blf
 expect ^blf 1: 1002\s+Bob\s+idle
 # the whole reply is in by now (prompt seen): no window needed
 absent ^blf 2: 0
+
+# ringtones: list, select + preview (persisted), stop; stored volumes via `vol ring|spk`
+do ring list
+expect ^0 Classic \*
+expect ^5 Bell
+do ring 2
+expect ^ringtone 2 Chime 5
+do ring stop
+do ring 9
+expect ^usage: ring 5
+do vol ring 55
+do vol spk 77
+do vol
+expect ^volume \d+ \(saved: ring 55, call \d+, speaker 77\) 5
+do ring 0
+expect ^ringtone 0 Classic 5
+do ring stop

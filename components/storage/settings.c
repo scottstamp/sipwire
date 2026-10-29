@@ -55,6 +55,8 @@ static const char *TAG = "storage";
 #define K_TZ          "tz"
 #define K_CLOCK_24H   "clock_24h"
 #define K_OTA_URL     "ota_url"
+#define K_RING_TONE   "ring_tone"
+#define K_SPK_VOL     "spk_vol"
 #define K_TC_VALID    "tc_valid"
 #define K_TC_X_MIN    "tc_x_min"
 #define K_TC_X_MAX    "tc_x_max"
@@ -83,6 +85,8 @@ static void settings_defaults(settings_t *s)
     strcpy(s->ntp_server, CONFIG_SIPWIRE_NTP_SERVER);
     strcpy(s->tz, CONFIG_SIPWIRE_TZ);
     s->clock_24h = false;
+    s->ring_tone = 0;
+    s->speaker_volume = 90;
     strcpy(s->ota_url, CONFIG_SIPWIRE_OTA_URL);
 }
 
@@ -160,6 +164,8 @@ static void load_all(nvs_handle_t h, settings_t *s)
     load_u8_max100(h, K_RING_VOL, &s->ring_volume);
     load_u8_max100(h, K_CALL_VOL, &s->call_volume);
     load_u8_max100(h, K_MIC_GAIN, &s->mic_gain);
+    load_u8_max100(h, K_SPK_VOL, &s->speaker_volume);
+    nvs_get_u8(h, K_RING_TONE, &s->ring_tone);
     if (nvs_get_u8(h, K_AEC, &u8) == ESP_OK) {
         s->aec = u8 != 0;
     }
@@ -211,7 +217,7 @@ static esp_err_t validate(const settings_t *s)
                         "blf: up to %d entries ext[:label], comma separated, no repeats", SIPWIRE_BLF_MAX);
     ESP_RETURN_ON_FALSE((unsigned)s->sip_transport <= SIP_TRANSPORT_TCP, ESP_ERR_INVALID_ARG, TAG,
                         "bad sip_transport");
-    ESP_RETURN_ON_FALSE(s->ring_volume <= 100 && s->call_volume <= 100 && s->mic_gain <= 100 &&
+    ESP_RETURN_ON_FALSE(s->ring_volume <= 100 && s->call_volume <= 100 && s->speaker_volume <= 100 && s->mic_gain <= 100 &&
                         s->backlight <= 100, ESP_ERR_INVALID_ARG, TAG, "value out of range 0-100");
     ESP_RETURN_ON_FALSE(s->aec_suppress <= SETTINGS_AEC_SUPPRESS_MAX && s->aec_suppress_act <= SETTINGS_AEC_SUPPRESS_MAX,
                         ESP_ERR_INVALID_ARG, TAG, "aec_suppress: 0-%d dB", SETTINGS_AEC_SUPPRESS_MAX);
@@ -261,6 +267,8 @@ static esp_err_t store_changed(nvs_handle_t h, const settings_t *in)
     STORE_NUM(nvs_set_u8, K_RING_VOL, ring_volume);
     STORE_NUM(nvs_set_u8, K_CALL_VOL, call_volume);
     STORE_NUM(nvs_set_u8, K_MIC_GAIN, mic_gain);
+    STORE_NUM(nvs_set_u8, K_SPK_VOL, speaker_volume);
+    STORE_NUM(nvs_set_u8, K_RING_TONE, ring_tone);
     if (in->aec != s_cur.aec) {
         ESP_RETURN_ON_ERROR(nvs_set_u8(h, K_AEC, in->aec ? 1 : 0), TAG, K_AEC);
     }

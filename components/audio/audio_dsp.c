@@ -154,6 +154,64 @@ static const dsp_tone_def_t PRESETS[] = {
     [DSP_TONE_KEYCLICK] = { .f1 = 1000, .f2 = 2000, .on_ms = 30, .oneshot = true },
 };
 
+#define S(a, b, ms) { a, b, ms }
+#define R(ms) { 0, 0, ms }
+static const dsp_step_t RT_CLASSIC[] = { S(950, 1250, 400), R(200), S(950, 1250, 400), R(2000) };
+static const dsp_step_t RT_TRILL[] = {
+    S(1500, 0, 60), S(1900, 0, 60), S(1500, 0, 60), S(1900, 0, 60), S(1500, 0, 60), S(1900, 0, 60),
+    S(1500, 0, 60), S(1900, 0, 60), R(2000),
+};
+static const dsp_step_t RT_CHIME[] = { S(1047, 0, 300), S(1319, 0, 300), S(1568, 0, 500), R(1900) };
+static const dsp_step_t RT_ASCEND[] = {
+    S(523, 0, 150), R(10), S(659, 0, 150), R(10), S(784, 0, 150), R(10), S(1047, 0, 250), R(1500),
+};
+static const dsp_step_t RT_BEEPS[] = {
+    S(1400, 0, 100), R(100), S(1400, 0, 100), R(100), S(1400, 0, 100), R(1700),
+};
+static const dsp_step_t RT_BELL[] = { S(784, 1568, 600), R(300), S(659, 1319, 900), R(2000) };
+#undef S
+#undef R
+
+static const struct { const char *name; const dsp_step_t *steps; uint8_t n; } RINGTONES[] = {
+#define RT(nm, arr) { nm, arr, (uint8_t)(sizeof(arr) / sizeof(arr[0])) }
+    RT("Classic", RT_CLASSIC), RT("Trill", RT_TRILL), RT("Chime", RT_CHIME),
+    RT("Ascending", RT_ASCEND), RT("Beeps", RT_BEEPS), RT("Bell", RT_BELL),
+#undef RT
+};
+
+int dsp_ringtone_count(void)
+{
+    return (int)(sizeof(RINGTONES) / sizeof(RINGTONES[0]));
+}
+
+const char *dsp_ringtone_name(int idx)
+{
+    return idx >= 0 && idx < dsp_ringtone_count() ? RINGTONES[idx].name : NULL;
+}
+
+static void seq_load(dsp_tone_t *t)
+{
+    const dsp_step_t *st = &t->seq[t->seq_i];
+    t->inc1 = freq_to_inc(st->f1, t->rate);
+    t->inc2 = freq_to_inc(st->f2, t->rate);
+    t->single = st->f2 == 0;
+    t->seq_pos = 0;
+}
+
+void dsp_tone_start_ringtone(dsp_tone_t *t, int idx)
+{
+    if (idx < 0 || idx >= dsp_ringtone_count()) {
+        idx = 0;
+    }
+    dsp_tone_def_t d = { .f1 = 1000 };          /* resets cadence state; the sequence overrides */
+    dsp_tone_start_def(t, &d);
+    t->on_n = t->period_n = 0;
+    t->seq = RINGTONES[idx].steps;
+    t->seq_n = RINGTONES[idx].n;
+    t->seq_i = 0;
+    seq_load(t);
+}
+
 static const char DTMF_KEYS[16] = {
     '1', '2', '3', 'A', '4', '5', '6', 'B', '7', '8', '9', 'C', '*', '0', '#', 'D',
 };
@@ -206,6 +264,7 @@ void dsp_tone_start_def(dsp_tone_t *t, const dsp_tone_def_t *def)
     t->warble_pos = 0;
     t->warble_hi = false;
     t->pos = 0;
+    t->seq = NULL;
     t->stopping = false;
     t->active = true;
 }
@@ -246,6 +305,8 @@ void dsp_tone_add(dsp_tone_t *t, int32_t *acc, size_t n)
         bool on;
         if (t->stopping) {
             on = false;
+        } else if (t->seq) {
+            on = t->seq[t->seq_i].f1 != 0;
         } else if (t->on_n == 0) {
             on = true;                          /* continuous */
         } else {
@@ -286,7 +347,12 @@ void dsp_tone_add(dsp_tone_t *t, int32_t *acc, size_t n)
         }
 
         /* cadence position */
-        if (t->period_n > 0) {
+        if (t->seq) {
+            if (++t->seq_pos >= ms_to_n(t->seq[t->seq_i].ms, t->rate)) {
+                t->seq_i = (uint8_t)((t->seq_i + 1u) % t->seq_n);
+                seq_load(t);
+            }
+        } else if (t->period_n > 0) {
             if (++t->pos >= t->period_n) {
                 t->pos = 0;
             }

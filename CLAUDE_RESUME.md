@@ -46,12 +46,12 @@ Needs the user / hardware:
 Open development work (see `docs/PLAN.md` for the full list):
 - AEC / speakerphone echo (Phase 5, `[core]`).
 - Battery ADC (GPIO 4 reserved) once the divider exists; dock detect design.
-- Ringtones, contacts, call log (no SD card for now — user doesn't want it;
+- Contacts, call log (ringtones done: `ring` console cmd, setting ring_tone) (no SD card for now — user doesn't want it;
   use the 9.9 MB `storage` partition if storage is needed).
 - Review task priorities, DMA sizing, PSRAM placement (`[core]`).
 - SIP over TCP/TLS, SRTP, RTCP (optional).
 - Known small gaps: no SIP INFO DTMF fallback; RTP timestamps jump after
-  hold; speaker volume preset not persisted; re-INVITE glare (491) not
+  hold (fixed: rtp_tx_resume); speaker volume now persisted (settings speaker_volume); re-INVITE glare (491) not
   retried; https OTA untested.
 
 ## Hardware (details in docs/HARDWARE.md)

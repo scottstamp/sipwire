@@ -45,6 +45,9 @@ typedef struct {
     bool clock_24h;            /* false (default) = 12-hour display with AM/PM */
     /* firmware update */
     char ota_url[192];         /* default CONFIG_SIPWIRE_OTA_URL; "" = none */
+    /* ringer / loudspeaker (block: ring_volume and call_volume are in "audio" above) */
+    uint8_t ring_tone;         /* ringtone index (audio_ringtone_name), default 0; unknown = 0 */
+    uint8_t speaker_volume;    /* 0-100 loudspeaker-mode call volume, default 90 */
     /* touch calibration (raw XPT2046 → screen). valid=false → uncalibrated */
     struct {
         bool valid;

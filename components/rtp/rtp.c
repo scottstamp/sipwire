@@ -235,6 +235,28 @@ void rtp_session_destroy(rtp_session_t *s)
 
 /* ---- TX --------------------------------------------------------------- */
 
+/* After the app stopped calling rtp_build_audio() (hold, one-way media) the
+ * timestamp must follow the sampling clock, not the packet count (RFC 3550
+ * 5.1: it reflects the instant the first octet was sampled). A contiguous
+ * timestamp makes the peer's jitter estimator see a huge transit-time step and
+ * makes a jitter buffer that keys on timestamps (Asterisk's) believe the
+ * pause never happened. Sequence numbers stay contiguous (no loss is
+ * reported: nothing was lost) and the next audio packet carries M=1, which
+ * tells the peer it starts a talkspurt and may resync its playout. */
+void rtp_tx_resume(rtp_session_t *s, uint32_t gap_ms)
+{
+    if (!s) {
+        return;
+    }
+    /* gap_ms: time since the last packet was built; that packet already moved
+     * tx_ts on by one frame, so skip the remaining whole frames. */
+    uint32_t frames = (gap_ms + RTP_FRAME_MS / 2) / RTP_FRAME_MS;
+    if (frames > 1) {
+        s->tx_ts += (frames - 1) * RTP_FRAME_TS;
+    }
+    s->tx_marker = true;
+}
+
 static size_t rtp_build_dtmf_packet(rtp_session_t *s, uint8_t *out)
 {
     bool first = (s->dtmf_idx == 0);

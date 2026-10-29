@@ -59,7 +59,23 @@ typedef struct {
     bool oneshot, active, stopping, single;
     int32_t env, env_step;          /* Q15 attack/release envelope */
     int32_t amp;                    /* Q15 per component */
+    /* step sequence (ringtones): repeats forever, takes over from the cadence fields */
+    const struct dsp_step *seq;
+    uint8_t seq_n, seq_i;
+    uint32_t seq_pos;               /* samples into the current step */
 } dsp_tone_t;
+
+/** One note of a ringtone: f1 == 0 is silence; f2 == 0 a single sine. */
+typedef struct dsp_step {
+    uint16_t f1, f2;
+    uint16_t ms;
+} dsp_step_t;
+
+/** Built-in ringtones (each is a loop incl. its trailing pause). */
+int dsp_ringtone_count(void);
+const char *dsp_ringtone_name(int idx);
+/** Start ringtone idx (out of range -> 0). */
+void dsp_tone_start_ringtone(dsp_tone_t *t, int idx);
 
 void dsp_tone_init(dsp_tone_t *t, uint32_t rate);
 void dsp_tone_start_def(dsp_tone_t *t, const dsp_tone_def_t *def);

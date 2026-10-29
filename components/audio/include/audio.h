@@ -34,6 +34,15 @@ esp_err_t audio_stop(void);
 
 /** Tone mixed on top of the source (or alone when stopped → auto-start). */
 void audio_play_tone(audio_tone_t tone);
+/** Built-in synthesized ringtones, indices 0..count-1 (setting `ring_tone`). */
+int audio_ringtone_count(void);
+const char *audio_ringtone_name(int idx);   /* NULL when out of range */
+/** Loop ringtone idx (out of range -> 0) at the current output volume; replaces any tone.
+ *  Auto-starts the stream like audio_play_tone. The phone uses it for the ringer;
+ *  the volume is whatever audio_set_volume holds (ring volume while idle/ringing). */
+void audio_play_ringtone(int idx);
+/** Stop a ringtone / preview (same as audio_play_tone(AUDIO_TONE_NONE)). */
+void audio_stop_ringtone(void);
 /** One-shot DTMF tone feedback for local keypress. */
 void audio_play_dtmf(char digit);
 

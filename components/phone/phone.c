@@ -43,8 +43,7 @@ static const char *SIP_TAG = "sip";
 #define POLL_MS                 20
 #define UNREG_WAIT_MS           2000
 #define RETRY_MS                10000       /* DNS / socket / create failure */
-#define VOLUME_SAVE_DELAY_MS    1000
-#define SPEAKER_VOLUME          90
+#define VOLUME_SAVE_DELAY_MS    3000    /* debounce: one NVS write per burst of +/- presses */
 #define SIP_LOCAL_PORT          5060
 #define SIP_KEEPALIVE_S         25
 #define EVENT_POST_TIMEOUT      pdMS_TO_TICKS(50)
@@ -805,6 +804,7 @@ static void on_settings(uint64_t now)
     if (!s.vol_dirty) {
         s.ring_vol = ns.ring_volume;
         s.call_vol = ns.call_volume;
+        s.spk_vol = ns.speaker_volume;
     }
     st_unlock();
     apply_volume();
@@ -932,21 +932,23 @@ static void housekeeping(uint64_t now)
     }
 
     bool save = false;
-    uint8_t ring = 0, call = 0;
+    uint8_t ring = 0, call = 0, spk = 0;
     st_lock();
     if (s.vol_dirty && now >= s.vol_save_at) {
         s.vol_dirty = false;
         save = true;
         ring = s.ring_vol;
         call = s.call_vol;
+        spk = s.spk_vol;
     }
     st_unlock();
     if (save) {
         static settings_t cur;          /* sip task only */
         settings_get(&cur);
-        if (cur.ring_volume != ring || cur.call_volume != call) {
+        if (cur.ring_volume != ring || cur.call_volume != call || cur.speaker_volume != spk) {
             cur.ring_volume = ring;
             cur.call_volume = call;
+            cur.speaker_volume = spk;
             esp_err_t err = settings_set(&cur);
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "saving volume: %s", esp_err_to_name(err));
@@ -1025,7 +1027,7 @@ esp_err_t phone_init(void)
     blf_apply(s.acc.blf);               /* the sip task does not run yet */
     s.ring_vol = s.acc.ring_volume;
     s.call_vol = s.acc.call_volume;
-    s.spk_vol = SPEAKER_VOLUME;
+    s.spk_vol = s.acc.speaker_volume;
     s.st.reg = SIP_REG_NONE;
     s.st.call = CALL_IDLE;
     s.state = SIP_UA_CALL_IDLE;
@@ -1154,10 +1156,8 @@ void phone_set_volume(uint8_t volume)
     }
     st_lock();
     *current_volume_locked() = volume;
-    if (phone_volume_kind(s.vstate, s.st.speaker) != PHONE_VOL_SPEAKER) {
-        s.vol_dirty = true;
-        s.vol_save_at = now_ms() + VOLUME_SAVE_DELAY_MS;
-    }
+    s.vol_dirty = true;                 /* all three kinds are persisted (debounced) */
+    s.vol_save_at = now_ms() + VOLUME_SAVE_DELAY_MS;
     s.st.volume = volume;
     st_unlock();
     audio_set_volume(volume);
