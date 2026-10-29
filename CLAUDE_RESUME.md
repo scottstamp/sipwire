@@ -81,7 +81,9 @@ Open development work (see `docs/PLAN.md` for the full list):
   run in parallel, ~18 s wall; one shard: `smoke.sh smoke.d/40-ota.txt`.
   Logs: `build_qemu/smoke-<shard>.log`. `build.sh` regenerates
   `build_qemu/sdkconfig` only when the defaults files change (hash stamp),
-  so don't delete it by hand.
+  so don't delete it by hand. `build.sh` and `ci.sh build` pass `--ccache`
+  (ccache `base_dir=/home/scott`, so worktrees hit the same cache); a warm
+  clean build is ~40 s vs ~85 s. Host tests run with `ctest -j`, ~3 s.
 - UI sim: `sim/web/build.sh` (Emscripten), `serve.sh --watch`,
   `node sim/web/screenshot.mjs out.png <scenario>` or `--all <dir>`; look at
   screenshots before shipping UI changes.

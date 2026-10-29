@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 B="$ROOT/build_qemu"
 cd "$ROOT"
 DEFAULTS=(sdkconfig.defaults tools/qemu/sdkconfig.qemu)
-ARGS=(-B "$B" -DSDKCONFIG="$B/sdkconfig" -DSDKCONFIG_DEFAULTS="$(IFS=';'; echo "${DEFAULTS[*]}")")
+ARGS=(--ccache -B "$B" -DSDKCONFIG="$B/sdkconfig" -DSDKCONFIG_DEFAULTS="$(IFS=';'; echo "${DEFAULTS[*]}")")
 # An existing sdkconfig keeps its values over changed defaults (a stored "is not set" wins),
 # so regenerate it when the defaults change, and only then: a new sdkconfig rebuilds everything.
 STAMP="$B/sdkconfig.defaults.sha256"

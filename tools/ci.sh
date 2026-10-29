@@ -7,12 +7,12 @@ case "${1:-}" in
 host-test)
     cmake -S "$ROOT/test_host" -B "$ROOT/build_host" -G Ninja
     cmake --build "$ROOT/build_host"
-    ctest --test-dir "$ROOT/build_host" --output-on-failure
+    ctest --test-dir "$ROOT/build_host" --output-on-failure -j"$(nproc)"
     ;;
 build)
     cd "$ROOT"
-    idf.py set-target esp32s3
-    idf.py build
+    idf.py --ccache set-target esp32s3
+    idf.py --ccache build
     ;;
 *)
     echo "usage: $0 host-test|build" >&2

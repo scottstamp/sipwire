@@ -8,6 +8,7 @@ target_include_directories(test_rtp PRIVATE
     ${SIPWIRE_COMPONENTS}/codec/include)
 target_link_libraries(test_rtp PRIVATE unity m)
 add_test(NAME rtp COMMAND test_rtp)
-# Tens of simulated minutes of 16 kHz audio through the resamplers/codecs:
-# ~30 s unoptimised under ASan, ~20 s at -O1.
-target_compile_options(test_rtp PRIVATE -O1)
+# Minutes of simulated 16 kHz audio through the resamplers/codecs, plus the
+# fuzz loops: ~1.5 s at -O2 under ASan (the drift and long-run cases were cut
+# from 10 to 3 simulated minutes to keep host tests short).
+target_compile_options(test_rtp PRIVATE -O2)

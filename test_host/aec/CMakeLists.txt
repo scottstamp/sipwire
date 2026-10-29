@@ -9,8 +9,10 @@ set(SPX_SRCS
 
 # Same sources and flags as components/aec/CMakeLists.txt: float math stays
 # float (see speexdsp/config.h), checked with -Wdouble-promotion (-Werror is
-# global here); upstream has unused parameters.
-set_source_files_properties(${SPX_SRCS} PROPERTIES COMPILE_OPTIONS "-Wno-unused-parameter;-fsingle-precision-constant")
+# global here); upstream has unused parameters. The vendored upstream sources are
+# built -O2 without sanitizers (the wrapper and the test keep them): the echo
+# scenarios run tens of seconds of audio, ~10 s instrumented.
+set_source_files_properties(${SPX_SRCS} PROPERTIES COMPILE_OPTIONS "-Wno-unused-parameter;-fsingle-precision-constant;-O2;-fno-sanitize=all")
 add_library(aec STATIC ${AEC_DIR}/aec.c ${SPX_SRCS})
 target_include_directories(aec PUBLIC ${AEC_DIR}/include PRIVATE ${SPX_DIR} ${SPX_DIR}/include ${SPX_DIR}/libspeexdsp)
 target_compile_definitions(aec PRIVATE HAVE_CONFIG_H)
@@ -18,7 +20,7 @@ target_compile_options(aec PRIVATE -Wdouble-promotion -fsingle-precision-constan
 target_link_libraries(aec PRIVATE m)
 
 add_executable(test_aec test_aec.c)
-target_compile_options(test_aec PRIVATE -Wdouble-promotion)
+target_compile_options(test_aec PRIVATE -Wdouble-promotion -O2)
 target_link_libraries(test_aec PRIVATE aec unity m)
 add_test(NAME aec COMMAND test_aec)
 

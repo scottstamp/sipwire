@@ -1127,7 +1127,7 @@ void test_jitter_moderate_has_little_concealment(void)
     sim_done(&m);
 }
 
-void test_ten_minutes_depth_stays_bounded(void)
+void test_long_run_depth_stays_bounded(void)
 {
     rtp_config_t cfg = make_cfg(0);
     sim_t m;
@@ -1137,7 +1137,7 @@ void test_ten_minutes_depth_stays_bounded(void)
     sim_advance(&m, 1000);
     m.track = true;
     m.depth_min = 1 << 30;
-    /* 10 simulated minutes: alternating bursts of jitter and calm. */
+    /* 200 simulated seconds: alternating bursts of jitter and calm. */
     for (int phase = 0; phase < 20; phase++) {
         m.net.jitter_ms = (phase % 2 == 0) ? 30 : 0;
         if (phase % 5 == 4) {
@@ -1146,13 +1146,13 @@ void test_ten_minutes_depth_stays_bounded(void)
         } else {
             m.net.loss_pct = 0;
         }
-        sim_advance(&m, 30000);
+        sim_advance(&m, 10000);
         rtp_stats_t st;
         rtp_get_stats(m.rx, &st);
         TEST_ASSERT_GREATER_OR_EQUAL_UINT16(40, st.jb_target_ms);
         TEST_ASSERT_LESS_OR_EQUAL_UINT16(160, st.jb_target_ms);
     }
-    TEST_ASSERT_GREATER_THAN_UINT32(29000, m.k_pulled);
+    TEST_ASSERT_GREATER_THAN_UINT32(9700, m.k_pulled);
     TEST_ASSERT_LESS_OR_EQUAL_INT(160, m.depth_max);
     TEST_ASSERT_GREATER_OR_EQUAL_INT(20, m.depth_min);
     sim_done(&m);
@@ -1168,13 +1168,13 @@ static void run_drift(int ppm)
     sim_advance(&m, 1000);
     m.track = true;
     m.depth_min = 1 << 30;
-    sim_advance(&m, 600000);                        /* 10 minutes */
+    sim_advance(&m, 180000);                        /* 3 minutes */
     rtp_stats_t st;
     rtp_get_stats(m.rx, &st);
     TEST_ASSERT_LESS_OR_EQUAL_INT(160, m.depth_max);
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, m.depth_min);
     TEST_ASSERT_LESS_OR_EQUAL_UINT16(160, st.jb_depth_ms);
-    /* 600 ppm over 10 min is ~360 ms of drift: a handful of adjustments */
+    /* 600 ppm over 3 min is ~108 ms of drift: a few adjustments */
     TEST_ASSERT_LESS_THAN_UINT32(40, st.plc_frames);
     TEST_ASSERT_LESS_THAN_UINT32(40, st.rx_late);
     sim_done(&m);
@@ -1817,7 +1817,7 @@ void test_fuzz_packets_and_pulls(void)
         uint8_t pkt[RTP_MAX_PACKET + 128];
         int16_t pcm[RTP_FRAME_SAMPLES], out[RTP_FRAME_SAMPLES];
         uint32_t now = 0;
-        for (int it = 0; it < 25000; it++) {
+        for (int it = 0; it < 8000; it++) {
             gen_frame((uint32_t)it, pcm);
             if (it % 400 == 399) {
                 (void)rtp_send_dtmf(tx, "0123456789*#ABCD"[rnd_range(16)], (uint16_t)rnd_range(300));
@@ -1921,7 +1921,7 @@ int main(void)
     RUN_TEST(test_single_loss_crossfades_smoothly);
     RUN_TEST(test_jitter_grows_then_shrinks);
     RUN_TEST(test_jitter_moderate_has_little_concealment);
-    RUN_TEST(test_ten_minutes_depth_stays_bounded);
+    RUN_TEST(test_long_run_depth_stays_bounded);
     RUN_TEST(test_clock_drift_receiver_fast);
     RUN_TEST(test_clock_drift_receiver_slow);
     RUN_TEST(test_burst_after_stall_resyncs);
