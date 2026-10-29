@@ -90,16 +90,16 @@ refused while a call is up or just ended, so that block runs before any call). I
 `sipwire.bin` must show progress, reboot (QEMU keeps running, so the written flash image stays),
 boot from `ota_1` (offset 0x320000) and mark itself valid.
 
-## Known flake
+## Former flake: USB-Serial-JTAG tick hook
 
-QEMU itself fails now and then in early boot or during OTA image verification, in any shard
-(most often `40-ota`, around the reboot after the update): a hang, `qemu-system-xtensa: Bad ram
-pointer 0x4209....` (QEMU exits; the runner reports `QEMU exited` at once), or `Guru Meditation
-Error ... LoadStorePIFAddrError` with `EXCVADDR` 0x6002300x (SYSTIMER registers) right after
-`esp_eth` init or `esp_image: segment 3`. A single unloaded QEMU running the old sequential
-scenario showed it as well. It looks like a bug in QEMU's dual-core flash-cache emulation, not
-firmware or runner. Check the shard log before blaming a change; re-run the shard
-(`tools/qemu/smoke.sh smoke.d/40-ota.txt`).
+Until 2026-10-29 roughly 1 run in 8 failed in early boot or during OTA image verification: a
+hang, `Guru Meditation Error ... LoadStorePIFAddrError` (`EXCVADDR` 0x60038008), or QEMU itself
+exiting (segfault, `Bad ram pointer`). The panic PC was `usb_serial_jtag_sof_tick_hook`, the
+FreeRTOS tick hook that IDF installs for the USB-Serial-JTAG secondary console; QEMU handles
+that register badly. `sdkconfig.qemu` now sets `CONFIG_ESP_CONSOLE_SECONDARY_NONE=y` (the
+device keeps the default; its console is UART0). Afterwards: `40-ota` 15/15, full suite 3/3.
+PSRAM was ruled out (no PSRAM: still 3 failures in 15). If it comes back, decode the panic PC
+with `xtensa-esp32s3-elf-addr2line -e build_qemu/sipwire.elf` first.
 
 A log line from another task can land in the middle of a console reply (`sip_port = I (..)
 phone: ... 5182`), so `expect` on a reply that follows a `cfg set` matches the key, not the value.

@@ -2,5 +2,8 @@
 CONFIG_SIPWIRE_QEMU=y
 CONFIG_ETH_USE_OPENETH=y
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+# No USB-Serial-JTAG secondary console: its FreeRTOS tick hook polls a USJ register that
+# QEMU handles unreliably (LoadStorePIFAddrError at 0x60038008, QEMU segfaults).
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 # PSRAM as on the device, but QEMU emulates quad (not octal) mode
 CONFIG_SPIRAM_MODE_QUAD=y

@@ -50,11 +50,6 @@ Open development work (see `docs/PLAN.md` for the full list):
   use the 9.9 MB `storage` partition if storage is needed).
 - Review task priorities, DMA sizing, PSRAM placement (`[core]`).
 - SIP over TCP/TLS, SRTP, RTCP (optional).
-- QEMU smoke: 1 of 10 runs (2026-10-29, after the console read fix) froze
-  during OTA image verification (after `esp_image: segment 3`, no output for
-  60 s; run.py disables the QEMU watchdog so a hang never resets). Not seen
-  again; watch for it. Possibly related to PSRAM being enabled in QEMU since
-  6f5fb3f.
 - Known small gaps: no SIP INFO DTMF fallback; RTP timestamps jump after
   hold; speaker volume preset not persisted; re-INVITE glare (491) not
   retried; https OTA untested.
@@ -81,11 +76,12 @@ Open development work (see `docs/PLAN.md` for the full list):
 - Host tests: `tools/ci.sh host-test` (needs `IDF_PATH` for Unity; ASan/UBSan,
   `-Werror`). SIP vs Asterisk: `test_host/sip/integration.sh` (needs
   `asterisk` from apt; runs its own instance on 127.0.0.1:5080).
-- QEMU smoke: `tools/qemu/build.sh && tools/qemu/smoke.sh > smoke.out`
-  (needs `idf_tools.py install qemu-xtensa`; capture stdout — the `###`
-  step lines go there). Covers calls, BLF/MWI, settings, OTA incl. negative
-  cases. One earlier run failed at an unidentified step; two later runs
-  passed — watch for flakiness.
+- QEMU smoke: `tools/qemu/build.sh && tools/qemu/smoke.sh` (needs
+  `idf_tools.py install qemu-xtensa`). Four shards in `tools/qemu/smoke.d/`
+  run in parallel, ~18 s wall; one shard: `smoke.sh smoke.d/40-ota.txt`.
+  Logs: `build_qemu/smoke-<shard>.log`. `build.sh` regenerates
+  `build_qemu/sdkconfig` only when the defaults files change (hash stamp),
+  so don't delete it by hand.
 - UI sim: `sim/web/build.sh` (Emscripten), `serve.sh --watch`,
   `node sim/web/screenshot.mjs out.png <scenario>` or `--all <dir>`; look at
   screenshots before shipping UI changes.
