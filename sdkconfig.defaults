@@ -26,9 +26,10 @@ CONFIG_LV_USE_PERF_MONITOR=n
 CONFIG_XPT2046_INTERRUPT_MODE=y
 CONFIG_XPT2046_CONVERT_ADC_TO_COORDS=n
 
-# Console: `tasks` command (vTaskList)
+# Console: `tasks` command (vTaskList), `cpu` command (run-time stats)
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS=y
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 
 # ESP32-S3-WROOM-1-N16R8: 16 MB quad flash, 8 MB octal PSRAM (in-package,
 # uses GPIO 35-37). Large heap allocations (LVGL, jitter buffers) spill to PSRAM.

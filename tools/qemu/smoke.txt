@@ -118,6 +118,8 @@ send sip
 expect registration: not registered
 send tasks
 sleep 2
+send cpu 1
+expect ^IDLE0\s+0\s+\d+\.\d 5
 
 # 7b: time settings apply live (TZ + SNTP server, no reboot) and persist
 send cfg set tz CET-1CEST,M3.5.0,M10.5.0/3

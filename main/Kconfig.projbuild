@@ -15,7 +15,7 @@ menu "Sipwire app"
 
     config SIPWIRE_OTA_URL
         string "Default firmware update URL"
-        default "http://192.168.2.154:8090/ota.bin"
+        default "http://192.168.2.193/ota.bin"
         help
             Where `ota` and Settings > Update fetch the new sipwire.bin from
             unless another URL is stored (`cfg set ota_url`). Plain http works

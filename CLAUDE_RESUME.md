@@ -85,8 +85,8 @@ Open development work (see `docs/PLAN.md` for the full list):
   `node sim/web/screenshot.mjs out.png <scenario>` or `--all <dir>`; look at
   screenshots before shipping UI changes.
 - Device updates: OTA. Serve `build/sipwire.bin` as `ota.bin` with
-  `python -m http.server 8090` on 192.168.2.154 (default OTA URL
-  `http://192.168.2.154:8090/ota.bin`), then Settings → Update or console
+  any HTTP server on 192.168.2.193:80 (default OTA URL
+  `http://192.168.2.193/ota.bin`), then Settings → Update or console
   `ota`. Serial flashing (`write_flash 0x20000 sipwire.bin`) keeps settings;
   a merged image at `0x0` erases them.
 - Console setup after an erase: `wifi <ssid> <pass>`, `cfg set sip_server

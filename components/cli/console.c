@@ -297,6 +297,58 @@ static int cmd_tasks(int argc, char **argv)
 }
 #endif
 
+#if CONFIG_FREERTOS_USE_TRACE_FACILITY && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+#define CPU_MAX_TASKS 40
+
+static TaskStatus_t *cpu_snapshot(UBaseType_t *n, configRUN_TIME_COUNTER_TYPE *total)
+{
+    TaskStatus_t *st = calloc(CPU_MAX_TASKS, sizeof(*st));
+    if (st != NULL) {
+        *n = uxTaskGetSystemState(st, CPU_MAX_TASKS, total);
+    }
+    return st;
+}
+
+/* Per-task CPU load over a sampling window, in % of one core (IDLE0/IDLE1
+ * show what is left on each core). */
+static int cmd_cpu(int argc, char **argv)
+{
+    int secs = argc > 1 ? atoi(argv[1]) : 2;
+    if (secs < 1 || secs > 60) {
+        printf("usage: cpu [seconds 1-60]\n");
+        return 1;
+    }
+    UBaseType_t n0 = 0, n1 = 0;
+    configRUN_TIME_COUNTER_TYPE t0 = 0, t1 = 0;
+    TaskStatus_t *a = cpu_snapshot(&n0, &t0);
+    vTaskDelay(pdMS_TO_TICKS(secs * 1000));
+    TaskStatus_t *b = cpu_snapshot(&n1, &t1);
+    if (a == NULL || b == NULL || t1 == t0) {
+        printf("snapshot failed\n");
+        free(a);
+        free(b);
+        return 1;
+    }
+    printf("name            core  cpu%%\n");
+    for (UBaseType_t i = 0; i < n1; i++) {
+        configRUN_TIME_COUNTER_TYPE prev = 0;
+        for (UBaseType_t j = 0; j < n0; j++) {
+            if (a[j].xTaskNumber == b[i].xTaskNumber) {
+                prev = a[j].ulRunTimeCounter;
+                break;
+            }
+        }
+        uint64_t used = (uint64_t)(b[i].ulRunTimeCounter - prev) * 1000 / (t1 - t0);
+        BaseType_t c = xTaskGetCoreID(b[i].xHandle);
+        int core = c == tskNO_AFFINITY ? -1 : (int)c;
+        printf("%-15s %4d %3u.%u\n", b[i].pcTaskName, core, (unsigned)(used / 10), (unsigned)(used % 10));
+    }
+    free(a);
+    free(b);
+    return 0;
+}
+#endif
+
 static int cmd_reboot(int argc, char **argv)
 {
     (void)argc;
@@ -326,6 +378,10 @@ esp_err_t console_start(void)
         { .command = "free", .help = "Show free heap (internal / PSRAM)", .func = cmd_free },
 #if CONFIG_FREERTOS_USE_TRACE_FACILITY && CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS
         { .command = "tasks", .help = "List FreeRTOS tasks", .func = cmd_tasks },
+#endif
+#if CONFIG_FREERTOS_USE_TRACE_FACILITY && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+        { .command = "cpu", .help = "Per-task CPU load (% of one core) over a sampling window",
+          .hint = "[seconds]", .func = cmd_cpu },
 #endif
         { .command = "reboot", .help = "Restart the device", .func = cmd_reboot },
     };

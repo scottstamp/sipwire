@@ -697,7 +697,7 @@ int main(void)
     snprintf(s_model.tz, sizeof(s_model.tz), "UTC0");
     snprintf(s_model.fw_version, sizeof(s_model.fw_version), "v0.4.0-12-gabc1234");
     snprintf(s_model.fw_partition, sizeof(s_model.fw_partition), "ota_0");
-    snprintf(s_model.ota_url, sizeof(s_model.ota_url), "http://192.168.2.154:8090/ota.bin");
+    snprintf(s_model.ota_url, sizeof(s_model.ota_url), "http://192.168.2.193/ota.bin");
     snprintf(s_model.vm_number, sizeof(s_model.vm_number), "*97");
 
     s_actions = (ui_actions_t){

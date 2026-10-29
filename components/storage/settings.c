@@ -25,7 +25,7 @@ static const char *TAG = "storage";
 #define CONFIG_SIPWIRE_TZ "UTC0"
 #endif
 #ifndef CONFIG_SIPWIRE_OTA_URL
-#define CONFIG_SIPWIRE_OTA_URL "http://192.168.2.154:8090/ota.bin"
+#define CONFIG_SIPWIRE_OTA_URL "http://192.168.2.193/ota.bin"
 #endif
 
 /* One NVS key per settings_t field (max 15 chars). A missing key means "use the
