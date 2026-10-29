@@ -37,3 +37,35 @@ poll 10 ^blf 1: 1002\s+Bob\s+idle :: blf
 expect ^blf 1: 1002\s+Bob\s+idle
 # the whole reply is in by now (prompt seen): no window needed
 absent ^blf 2: 0
+
+# 10: directory (components/directory, FAT on the storage partition): contacts, speed dial,
+# CSV import (`feed` types into the running command), call history. Persistence over a
+# reboot is checked in 40-ota.
+do contact add 555-0101 Alice Example
+expect ^contact 5550101 = Alice Example \(1 total\)
+do contact add sip:7002@pbx Bob
+expect ^contact 7002 = Bob \(2 total\)
+do contact list ali
+expect ^5550101\s+Alice Example
+expect ^1 of 2 contacts
+do speed 5 7002
+expect ^speed 5 = 7002
+do speed 1 7002
+expect ^digit must be 2..9
+send contact import
+expect ^paste CSV lines
+feed 7003,Carol
+feed "Dan, D";7004
+feed bogus line
+feed
+expect ^imported 2 contacts, 1 bad lines, 4 total
+prompt
+do contact list
+expect ^7004\s+Dan, D
+do history add in missed 7002
+do history
+expect in\s+missed\s+NEW\s+0s\s+7002\s+Bob
+expect ^1 calls, 1 unseen missed
+do history seen
+do history
+expect ^1 calls, 0 unseen missed

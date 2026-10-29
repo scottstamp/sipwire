@@ -8,6 +8,7 @@ idf_component_register(
         audio
         board
         cli
+        directory
         display
         keypad
         common

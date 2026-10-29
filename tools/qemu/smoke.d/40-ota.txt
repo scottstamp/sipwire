@@ -13,6 +13,14 @@ expect (\bntp_server\s+= |ui_bridge: ntp server: 10.0.2.2) 5
 do cfg set clock_24h true
 expect \bclock_24h\s+=
 
+# directory data written now must survive the reboot and the switch to the other OTA slot
+do contact add 9001 Persist Me
+expect ^contact 9001 = Persist Me
+do speed 9 9001
+expect ^speed 9 = 9001
+do history add out answered 9001 42
+expect ^history add: ESP_OK
+
 # 9: OTA, the real update: progress -> done -> reboot -> boots from ota_1 -> marked valid.
 do ota status
 expect ^running partition: ota_0
@@ -26,6 +34,8 @@ expect ota: progress 100% 300
 expect ota: update done, rebooting in 3 s 60
 expect ESP-ROM:esp32s3 30
 expect boot: Loaded app from partition at offset 0x320000 30
+expect directory: contacts: 1 loaded, 0 bad lines 30
+expect directory: history: 1 entries 5
 expect ota: new firmware on ota_1 is pending verification 60
 expect ui_bridge: time zone: CET-1CEST 30
 expect ota: new firmware marked valid \(UI started and network up\) 60
@@ -34,3 +44,10 @@ expect ^running partition: ota_1
 expect ^app state: valid
 expect ^next slot: ota_0
 shell grep -c 'GET /sipwire.bin' ${HTTP_LOG}
+# the FAT partition (contacts, speed dial, history) is still there
+do contact list persist
+expect ^9001\s+Persist Me
+do speed 9
+expect ^speed 9 = 9001
+do history
+expect out\s+answered\s+(NEW\s+)?42s\s+9001\s+Persist Me
