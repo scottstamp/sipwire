@@ -647,6 +647,14 @@ static void apply_time_from_settings(void)
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
+    if (base == SIPWIRE_DISPLAY_EVENT) {
+        /* backlight back on: one refresh now (clock, anything deferred while dark); the 1 s
+         * ticks resume with it */
+        if (id == DISPLAY_EVENT_BACKLIGHT && data && *(const bool *)data) {
+            kick();
+        }
+        return;
+    }
     if (base == SIPWIRE_KEY_EVENT) {
         display_wake();
         bridge_msg_t m = { .kind = MSG_KEY };
@@ -723,6 +731,9 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
     if (base == SIPWIRE_SETTINGS_EVENT) {
         apply_time_from_settings();
+    }
+    if (base == SIPWIRE_NET_EVENT && id == NET_EVENT_RSSI && !display_is_lit()) {
+        return;     /* signal bars nobody sees: b.loc has them for the refresh on wake */
     }
     kick();
 }
@@ -900,6 +911,13 @@ static void refresh(void)
     have_last = true;
 }
 
+/* Refreshes on every message (events, keys, UI actions) and, while the backlight is on or
+ * dimmed, once a second for the clock and call timer. While it is off the task sleeps until a
+ * message: events that matter in the dark (incoming / missed call, registration, settings,
+ * BLF, OTA) still refresh at once, so the incoming-call screen is drawn before the backlight
+ * lights (display_wake runs first, then this refresh, within the panel's 120 ms start-up).
+ * Nothing is lost meanwhile: every refresh rebuilds the whole model from b.loc, the phone
+ * status, history and the clock, and DISPLAY_EVENT_BACKLIGHT (on) kicks one at wake-up. */
 static void bridge_task(void *arg)
 {
     (void)arg;
@@ -907,8 +925,12 @@ static void bridge_task(void *arg)
     for (;;) {
         int64_t now = esp_timer_get_time() / 1000;
         int64_t wait = next_tick - now;
+        TickType_t ticks = wait > 0 ? pdMS_TO_TICKS(wait) : 0;
+        if (!display_is_lit()) {
+            ticks = portMAX_DELAY;      /* dark: no clock refresh, only messages */
+        }
         bridge_msg_t m;
-        if (xQueueReceive(b.q, &m, wait > 0 ? pdMS_TO_TICKS(wait) : 0) == pdTRUE) {
+        if (xQueueReceive(b.q, &m, ticks) == pdTRUE) {
             do {
                 if (m.kind == MSG_KEY) {
                     lvgl_port_lock(0);
@@ -952,7 +974,7 @@ esp_err_t ui_bridge_init(lv_display_t *disp)
 
     static const esp_event_base_t *const bases[] = {
         &SIPWIRE_NET_EVENT, &SIPWIRE_SIP_EVENT, &SIPWIRE_CALL_EVENT, &SIPWIRE_KEY_EVENT, &SIPWIRE_SETTINGS_EVENT,
-        &SIPWIRE_OTA_EVENT, &SIPWIRE_BLF_EVENT,
+        &SIPWIRE_OTA_EVENT, &SIPWIRE_BLF_EVENT, &SIPWIRE_DISPLAY_EVENT,
     };
     for (size_t i = 0; i < sizeof(bases) / sizeof(bases[0]); i++) {
         ESP_RETURN_ON_ERROR(esp_event_handler_register(*bases[i], ESP_EVENT_ANY_ID, on_event, NULL), TAG,

@@ -355,8 +355,17 @@ full speed, no light sleep). Both drop when the phone is idle again.
     30 ms). It wakes the LVGL task only on a touch.
   - *backlight*: the 500 ms dim/off check (`bl_tick`) runs only while the backlight is on or
     dimmed. *rtp_rx* waits for its socket without a 500 ms timeout.
-  - Left: `ui_bridge` 1 s refresh (clock, phone status snapshot), net RSSI every 10 s,
-    LVGL's 2 s max sleep, SNTP, Wi-Fi DTIM beacons.
+  - *ui_bridge*: the 1 s refresh (clock, call timer, phone status snapshot) runs only while
+    the backlight is on or dimmed (`display_is_lit()`); dark, the task blocks on its queue
+    until a message. Events still refresh at once while dark (incoming / missed call,
+    registration, BLF, settings, OTA), except the 10 s RSSI update (kept in `b.loc`, shown at
+    wake-up). `DISPLAY_EVENT_BACKLIGHT` (on) kicks one refresh and the ticks resume; every
+    refresh rebuilds the whole model, so nothing that changed while dark is lost. Incoming
+    call while dark: `on_event` calls `display_wake` (SLPOUT) before it kicks the bridge, so
+    the incoming-call screen is rendered into the panel during its 120 ms start-up, before
+    the backlight lights (see Panel sleep).
+  - Left: net RSSI every 10 s (Wi-Fi driver call; the UI ignores it while dark), LVGL's 2 s
+    max sleep, SNTP, Wi-Fi beacons.
 - **Automatic light sleep** (`power`, board Kconfig `SIPWIRE_POWER_LIGHT_SLEEP`, **default n**:
   on the handset, after the chip had light-slept once, answering or ending a call sometimes
   crashed it (PSRAM "MMU entry fault" / panic handler hung with the cache off, watchdog reset),
@@ -417,7 +426,7 @@ full speed, no light sleep). Both drop when the phone is idle again.
     safe choice: pausing the refresh timer would need every invalidation path to resume it,
     and a missed resume is a frozen screen; with flushes allowed, whatever LVGL drew while dark
     (the incoming-call screen, built during the 120 ms before the backlight lights) is what
-    SLPOUT shows.
+    SLPOUT shows. While dark the bridge skips its 1 s refresh, so such flushes are rare.
   - Lock order: LVGL lock, then `bl_lock` (the touch path calls `display_wake` from the LVGL
     task with the recursive LVGL lock held). `bl_take()` takes the LVGL lock first whenever
     the backlight is off; `bl_tick_cb` (esp_timer task) waits at most 20 ms for it and
