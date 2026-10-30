@@ -16,6 +16,8 @@
 #                    call waiting answer / swap / promote held call / reject
 #   60-transfer      blind transfer (REFER, sipfrag 200), failed transfer keeps the call,
 #                    attended transfer (consultation call, REFER with Replaces)
+#   70-call-features find the handset through DND, 302 forwarding (always / declined /
+#                    no answer), redial, quiet hours / forwarding cfg keys
 #
 #   tools/qemu/build.sh && tools/qemu/smoke.sh            all shards in parallel
 #   tools/qemu/smoke.sh smoke.d/30-blf-mwi.txt [log]      one scenario file, output streamed

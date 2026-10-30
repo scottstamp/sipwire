@@ -43,6 +43,7 @@ Host networking, so no port mapping. Linux only.
 | `603` | DTMF test: reads up to 4 digits (RFC 4733), reads them back |
 | `604` | Music on hold |
 | `*97` | Voicemail menu for the caller's own mailbox (`VoiceMailMain`) |
+| `*44<ext>` | Find a handset (`*441001`): rings it 60 s with `Alert-Info: <...>;info=find` |
 
 `100X` that is not answered within 30 s (or busy) goes to voicemail `100X@default`.
 
@@ -71,6 +72,25 @@ Check: `cli.sh "core show hints"` (Watchers > 0 once a phone subscribed),
 `cli.sh "pjsip show subscriptions inbound"`, `cli.sh "voicemail show users"`.
 Leave a test message: `cli.sh "channel originate Local/1001@dial application Wait 5"`
 (rings 30 s, then voicemail) or call `1001` from `1003` and let it ring.
+
+## Find the handset, call forwarding
+
+- **Find**: `*44<ext>` dials `PJSIP/<ext>` with a pre-dial handler (`Dial(...,b(sipwire-hdr^find^1))`)
+  that adds `Alert-Info: <http://localhost>;info=find`. The handset (setting `find_alert`,
+  default `find`) rings at full volume with its own pattern through do not disturb and quiet
+  hours. Mirror on another PBX:
+
+  ```
+  exten => _*44XXXX,1,Dial(PJSIP/${EXTEN:3},60,b(sipwire-hdr^find^1))
+  [sipwire-hdr]
+  exten => find,1,Set(PJSIP_HEADER(add,Alert-Info)=<http://localhost>\;info=find)
+   same => n,Return()
+  ```
+- **Forwarding** is done by the handset (settings `fwd_always`, `fwd_busy`, `fwd_noanswer`):
+  it answers `302 Moved Temporarily` with `Contact: <sip:<target>@<pbx>>`. `Dial()` follows
+  it (no `i` option; PJSIP endpoint `redirect_method` default `user`: the target's user part
+  is dialled as `Local/<target>@<context of the call>`), so the target must be dialable in
+  that context (here `[dial]`: `100X` and its voicemail).
 
 ## Endpoints
 
