@@ -86,6 +86,9 @@ typedef struct {
     void (*history_clear)(void *ctx);
     /* Mark all missed calls seen (the badge count follows in the model). */
     void (*history_mark_seen)(void *ctx);
+    /* Redial: the number of the newest outgoing call in the history into `out` (cap bytes);
+     * false when there is none. */
+    bool (*last_dialed)(void *ctx, char *out, size_t cap);
 
     /* ---- sounds / call features ---- */
     const char *(*ringtone_name)(void *ctx, int idx);   /* NULL out of range */

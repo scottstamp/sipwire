@@ -509,6 +509,12 @@ static void act_history_mark_seen(void *ctx)
     kick();                         /* the home badge follows */
 }
 
+static bool act_last_dialed(void *ctx, char *out, size_t cap)
+{
+    (void)ctx;
+    return dir_history_last_dialed(out, cap);
+}
+
 /* ---- sounds / call features ---- */
 
 static const char *act_ringtone_name(void *ctx, int idx)
@@ -604,6 +610,7 @@ static const ui_actions_t s_actions = {
     .history_list = act_history_list,
     .history_clear = act_history_clear,
     .history_mark_seen = act_history_mark_seen,
+    .last_dialed = act_last_dialed,
     .ringtone_name = act_ringtone_name,
     .ringtone_preview = act_ringtone_preview,
     .save_sounds = act_save_sounds,

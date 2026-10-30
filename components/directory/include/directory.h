@@ -116,6 +116,8 @@ esp_err_t dir_history_mark_seen(void);
 uint32_t dir_history_rev(void);
 /** Newest missed incoming call not yet seen; false if there is none. */
 bool dir_history_last_unseen_missed(dir_call_t *out);
+/** Number of the newest outgoing call (redial), false if there is none. */
+bool dir_history_last_dialed(char *number, size_t cap);
 
 /* ---- persistence ---- */
 

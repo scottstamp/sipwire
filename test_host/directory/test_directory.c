@@ -297,6 +297,29 @@ static void test_history_ring(void)
     TEST_ASSERT_EQUAL_STRING("11", dir_hist_last_unseen_missed(&h)->number);
 }
 
+static void test_history_last_dialed(void)
+{
+    dir_call_t store[4];
+    dir_hist_t h = { .e = store, .cap = 4 };
+    TEST_ASSERT_NULL(dir_hist_last_dialed(&h));
+    dir_call_t in = call(DIR_CALL_IN, DIR_RES_ANSWERED, "1002", 0);
+    dir_hist_add(&h, &in);
+    TEST_ASSERT_NULL(dir_hist_last_dialed(&h));                     /* incoming calls never count */
+    dir_call_t o1 = call(DIR_CALL_OUT, DIR_RES_ANSWERED, "600", 0);
+    dir_hist_add(&h, &o1);
+    dir_call_t o2 = call(DIR_CALL_OUT, DIR_RES_MISSED, "1003", 0);  /* not answered: still redialled */
+    dir_hist_add(&h, &o2);
+    dir_hist_add(&h, &in);
+    TEST_ASSERT_EQUAL_STRING("1003", dir_hist_last_dialed(&h)->number);
+    dir_call_t anon = call(DIR_CALL_OUT, DIR_RES_MISSED, "", 0);    /* no number: skipped */
+    dir_hist_add(&h, &anon);
+    TEST_ASSERT_EQUAL_STRING("1003", dir_hist_last_dialed(&h)->number);
+    for (int i = 0; i < 4; i++) {                                   /* rolled out of the ring */
+        dir_hist_add(&h, &in);
+    }
+    TEST_ASSERT_NULL(dir_hist_last_dialed(&h));
+}
+
 static void test_history_serialize(void)
 {
     dir_call_t a[DIR_HISTORY_MAX], b[DIR_HISTORY_MAX];
@@ -370,6 +393,7 @@ int main(void)
     RUN_TEST(test_csv_garbage);
     RUN_TEST(test_speed);
     RUN_TEST(test_history_ring);
+    RUN_TEST(test_history_last_dialed);
     RUN_TEST(test_history_serialize);
     return UNITY_END();
 }

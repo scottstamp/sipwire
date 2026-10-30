@@ -807,6 +807,14 @@ const SCENARIOS = {
       await page.waitForTimeout(350);
     },
   },
+  dialer_redial: {   // Call with nothing typed: the last dialled number is filled in
+    sim: (sim) => {
+      sim.set_net(2, -62); sim.set_reg(2); sim.set_time('12:34');
+      sim.history_add(1, 0, '5551234567', '', 42);
+      sim.history_add(0, 1, '1002', 'Bob Example', 0);
+      sim.key('#', 0); sim.key('#', 1);     // '#' opens the dialer, long '#' = Call
+    },
+  },
   dialer_matches: {   // "100" -> Alice Johnson (1001) and more
     sim: (sim) => {
       sim.set_net(2, -62); sim.set_reg(2); sim.set_time('12:34');

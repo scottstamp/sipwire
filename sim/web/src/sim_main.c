@@ -467,6 +467,19 @@ static bool act_speed_get(void *ctx, int digit, ui_contact_t *out)
     return true;
 }
 
+static bool act_last_dialed(void *ctx, char *out, size_t cap)
+{
+    (void)ctx;
+    for (size_t i = 0; i < s_n_hist; i++) {     /* newest first */
+        if (s_hist[i].direction == UI_CALLDIR_OUT && s_hist[i].number[0]) {
+            snprintf(out, cap, "%s", s_hist[i].number);
+            sim_log("action last_dialed -> %s", out);
+            return true;
+        }
+    }
+    return false;
+}
+
 static size_t act_history_list(void *ctx, ui_call_t *out, size_t max)
 {
     (void)ctx;
@@ -1411,6 +1424,7 @@ int main(void)
         .contact_delete = act_contact_delete,
         .speed_get = act_speed_get,
         .history_list = act_history_list,
+        .last_dialed = act_last_dialed,
         .history_clear = act_history_clear,
         .history_mark_seen = act_history_mark_seen,
         .ringtone_name = act_ringtone_name,

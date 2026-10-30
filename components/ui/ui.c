@@ -347,6 +347,15 @@ void ui_act_history_mark_seen(void)
     }
 }
 
+bool ui_act_last_dialed(char *out, size_t cap)
+{
+    if (cap == 0) {
+        return false;
+    }
+    out[0] = '\0';
+    return s_actions && s_actions->last_dialed && s_actions->last_dialed(s_actions->ctx, out, cap) && out[0];
+}
+
 /* ---- sounds ---- */
 
 const char *ui_act_ringtone_name(int idx)

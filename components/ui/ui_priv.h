@@ -81,6 +81,7 @@ bool ui_act_speed_get(int digit, ui_contact_t *out);
 size_t ui_act_history_list(ui_call_t *out, size_t max);
 void ui_act_history_clear(void);
 void ui_act_history_mark_seen(void);
+bool ui_act_last_dialed(char *out, size_t cap);
 /* sounds */
 const char *ui_act_ringtone_name(int idx);
 void ui_act_ringtone_preview(int idx);   /* idx < 0 stops */

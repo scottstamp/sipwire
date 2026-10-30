@@ -621,6 +621,20 @@ bool dir_history_last_unseen_missed(dir_call_t *out)
     return c != NULL;
 }
 
+bool dir_history_last_dialed(char *number, size_t cap)
+{
+    if (s_lock == NULL || number == NULL || cap == 0) {
+        return false;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    const dir_call_t *c = dir_hist_last_dialed(&s_hist);
+    if (c) {
+        snprintf(number, cap, "%s", c->number);
+    }
+    xSemaphoreGive(s_lock);
+    return c != NULL;
+}
+
 esp_err_t dir_history_mark_seen(void)
 {
     ESP_RETURN_ON_FALSE(s_lock, ESP_ERR_INVALID_STATE, TAG, "not initialised");
