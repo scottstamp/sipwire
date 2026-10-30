@@ -118,7 +118,11 @@ static int cmd_power(int argc, char **argv)
     }
 
     unsigned bits = power_holds();
-    printf("cpu       : %u MHz now\n", (unsigned)esp_rom_get_cpu_ticks_per_us());
+    /* Always the maximum: IDF holds its "rtos" lock at full speed while any task runs on a
+     * core, and this command is running. The minimum applies only while both cores idle;
+     * `power locks` shows the time spent at each frequency (CONFIG_PM_PROFILING). */
+    printf("cpu       : %u MHz now (this command is running: idle time is at the minimum)\n",
+           (unsigned)esp_rom_get_cpu_ticks_per_us());
 #if POWER_DFS
     esp_pm_config_t pc = { 0 };
     if (s_dfs && esp_pm_get_configuration(&pc) == ESP_OK) {
@@ -137,7 +141,7 @@ static int cmd_power(int argc, char **argv)
     if (bits == 0) {
         printf(" none");
 #if POWER_DFS
-        printf(" (CPU at the DFS minimum)");
+        printf(" (CPU at the DFS minimum whenever idle)");
 #endif
     }
     for (int i = 0; i < POWER_HOLD_COUNT; i++) {
@@ -148,6 +152,9 @@ static int cmd_power(int argc, char **argv)
     printf("\n");
     printf("wifi ps   : %s\n", wifi_ps_name());
     printf("sleep     : no automatic light sleep (docs/ARCHITECTURE.md \"Power\")\n");
+#if POWER_DFS && defined(CONFIG_PM_PROFILING)
+    printf("time per frequency since boot: `power locks` (Mode stats; CPU_MAX = 240, APB_MAX = 80)\n");
+#endif
     return 0;
 }
 

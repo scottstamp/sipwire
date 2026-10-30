@@ -330,7 +330,11 @@ full speed). Both drop when the phone is idle again.
   needs the LVGL lock around the panel commands), then light sleep only with the backlight
   off and no call, keypad as a GPIO wake source, behind a setting defaulting off.
 - **Console `power`**: current CPU MHz, DFS range, active holds (`call`, `display`), Wi-Fi
-  power save mode; `power locks` dumps the IDF PM lock table (`esp_pm_dump_locks`).
+  power save mode; `power locks` dumps the IDF PM lock table (`esp_pm_dump_locks`) and, with
+  `CONFIG_PM_PROFILING`, the time spent in each mode since boot (CPU_MAX = 240 MHz, APB_MIN /
+  APB_MAX = 80 MHz). "cpu now" always reads 240 MHz: IDF holds its `rtos0`/`rtos1` CPU_FREQ_MAX
+  locks while a core runs any task (here: the console), so DFS only lowers the clock while both
+  cores idle. That idle time is where the saving is.
 
 ## Config (NVS)
 wifi ssid/pass, sip server/port/transport, user, auth user, password,
