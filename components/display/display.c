@@ -40,7 +40,7 @@ static const char *TAG = "display";
 #define BL_DIM_PCT          10                /* brightness while dimmed */
 #define BL_TICK_US          (500 * 1000)
 #define BL_FIRST_FRAME_US   (100 * 1000)      /* let the last SPI transfers finish */
-#define DRAW_BUF_DIVIDER    10                /* each draw buffer = 1/10 screen */
+#define DRAW_BUF_DIVIDER    20                /* each draw buffer = 1/20 screen (16 lines) */
 #define SWALLOW_GAP_US      (250 * 1000)      /* touch "release" = no sample for this long */
 #define XPT2046_ADC_MAX     4096
 #define TOUCH_REARM_US      (30 * 1000)       /* finger still down but not reported: next look */
@@ -828,9 +828,11 @@ esp_err_t display_init(lv_display_t **out_disp)
     /* LVGL port (task + tick), once. */
     ESP_RETURN_ON_ERROR(lvgl_start(), TAG, "lvgl");
 
-    /* Draw buffers: 1/10 screen each, double buffered, internal DMA RAM. One flush is a
-     * single SPI transaction, so it must fit max_transfer_sz set in board_init()
-     * (h_res * 40 pixels * 2 bytes). */
+    /* Draw buffers: 1/20 screen each (240 x 16 px = 7.5 KB), double buffered, internal DMA
+     * RAM: LVGL renders into one while the other is sent. One flush is a single SPI
+     * transaction, so it must fit max_transfer_sz set in board_init() (h_res * 40 pixels *
+     * 2 bytes = 19.2 KB; 1/10 screen = 15 KB fitted too). The clamp keeps that true for other
+     * panel sizes. */
     uint32_t buf_px = (uint32_t)s.hres * s.vres / DRAW_BUF_DIVIDER;
     const uint32_t max_px = (uint32_t)b->lcd.h_res * 40;
     if (buf_px > max_px) {

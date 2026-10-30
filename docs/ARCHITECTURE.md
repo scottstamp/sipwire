@@ -148,9 +148,10 @@ internal heap) is the scarce resource; PSRAM (8 MB octal) is plentiful but has r
   `heap_caps_malloc_prefer(n, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, MALLOC_CAP_8BIT)` for
   larger buffers only tasks use.
 
-**DMA**: LCD draw buffers 2 x 1/10 screen (240 x 32 px x 2 B = 15 KB each, 30 KB internal DMA,
-double buffered so LVGL renders while SPI at 40 MHz flushes); `max_transfer_sz` = 240 x 40 x 2
-= 19.2 KB covers one buffer in a single transaction. I2S: 4 descriptors x 160 frames (10 ms)
+**DMA**: LCD draw buffers 2 x 1/20 screen (240 x 16 px x 2 B = 7.5 KB each, 15 KB internal DMA,
+double buffered so LVGL renders while SPI at 40 MHz flushes; was 2 x 1/10 = 30 KB: 15 KB of
+internal heap back, a full-screen redraw now takes 20 flushes instead of 10);
+`max_transfer_sz` = 240 x 40 x 2 = 19.2 KB still covers one buffer in a single transaction. I2S: 4 descriptors x 160 frames (10 ms)
 per direction (TX 4 x 320 B, RX 4 x 640 B for 32-bit mic slots); the 40 ms TX ring is the AEC
 delay `D` (see Echo canceller) and the main playout latency besides the jitter buffer.
 
@@ -190,11 +191,12 @@ cannot preempt them.
 | task stacks changed | | sip -1.5 KB, ipc0+ipc1 +1.5 KB (net 0) |
 | https OTA (mbedTLS, ~20-40 KB peak) | internal | PSRAM |
 | contacts screen refetch (12.8 KB transient) | internal | PSRAM |
+| LCD draw buffers (internal DMA heap) | 2 x 15 KB | 2 x 7.5 KB (-15 KB heap; static DIRAM 164562 -> 164662 B, +100 B from the power changes' code) |
 
 Options not taken (need device testing): Wi-Fi/LWIP
 buffers in PSRAM (`SPIRAM_TRY_ALLOCATE_WIFI_LWIP`), Wi-Fi IRAM optimisations off
 (`ESP_WIFI_IRAM_OPT`, `ESP_WIFI_RX_IRAM_OPT`: ~15-19 KB of IRAM code back to the heap),
-smaller LCD draw buffers (1/20 screen: -15 KB), LVGL task stack in PSRAM (unsafe: contact
+LVGL task stack in PSRAM (unsafe: contact
 saves write FAT from the LVGL task), settings snapshots in PSRAM via `EXT_RAM_BSS_ATTR`
 (~9 KB of static `settings_t` copies; conflicts with `SPIRAM_IGNORE_NOTFOUND`), fewer I2S
 descriptors (lower latency, changes the AEC delay).
