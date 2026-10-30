@@ -131,13 +131,15 @@ unsigned power_holds(void)
  * only wakes the chip). So any console input, and the UART wake-up itself, keeps the chip
  * awake until the console has been quiet for CONFIG_SIPWIRE_POWER_CONSOLE_AWAKE_S. Tasks only
  * (console task, esp_timer task). */
+#define CONSOLE_AWAKE_US    ((int64_t)CONFIG_SIPWIRE_POWER_CONSOLE_AWAKE_S * 1000000)
+
+static _Atomic int64_t s_con_last_us;  /* esp_timer time of the last console input */
+
 static void console_activity(void)
 {
-    const uint64_t us = (uint64_t)CONFIG_SIPWIRE_POWER_CONSOLE_AWAKE_S * 1000000u;
+    s_con_last_us = esp_timer_get_time();
     power_hold(POWER_HOLD_CONSOLE, true);
-    if (esp_timer_restart(s_con_idle, us) != ESP_OK) {   /* not running */
-        esp_timer_start_once(s_con_idle, us);
-    }
+    esp_timer_start_once(s_con_idle, CONSOLE_AWAKE_US); /* ESP_ERR_INVALID_STATE if armed */
 }
 
 static void con_kick_cb(void *arg)
@@ -146,11 +148,21 @@ static void con_kick_cb(void *arg)
     console_activity();
 }
 
+/* Not esp_timer_is_active() to see a restart: it is true inside the timer's own callback, so
+ * the hold was never dropped. The timer only ever runs once per quiet period; input in between
+ * just moves s_con_last_us and the callback re-arms for the rest. */
 static void con_idle_cb(void *arg)
 {
     (void)arg;
-    if (!esp_timer_is_active(s_con_idle)) {             /* not restarted meanwhile */
-        power_hold(POWER_HOLD_CONSOLE, false);
+    int64_t last = s_con_last_us;
+    int64_t quiet = esp_timer_get_time() - last;
+    if (quiet < CONSOLE_AWAKE_US) {
+        esp_timer_start_once(s_con_idle, CONSOLE_AWAKE_US - quiet);
+        return;
+    }
+    power_hold(POWER_HOLD_CONSOLE, false);
+    if (s_con_last_us != last) {                        /* input raced the release */
+        console_activity();
     }
 }
 #endif
