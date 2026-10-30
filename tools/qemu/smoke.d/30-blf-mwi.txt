@@ -87,6 +87,8 @@ expect ^1 calls, 1 unseen missed
 do history seen
 do history
 expect ^1 calls, 0 unseen missed
-# stack high-water marks after the scenario, for the log (docs/ARCHITECTURE.md "Memory and tasks")
+# stack high-water marks after the scenario, for the log (docs/ARCHITECTURE.md "Memory and tasks");
+# the async writer ("dir_save") wrote contacts, speed dial and history: its stack still has room
 do free
 do tasks
+expect ^dir_save\s

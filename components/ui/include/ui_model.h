@@ -169,6 +169,14 @@ typedef struct {
     /* directory: the lists themselves are fetched through ui_actions_t (contacts_search,
      * history_list) when a screen opens; only the badge count lives in the model. */
     uint8_t missed_unseen;     /* missed incoming calls not yet seen in the history (capped at 99) */
+    char missed_last[UI_NAME_LEN]; /* name (else number) of the newest of those; "" if none */
+    uint32_t history_rev;      /* changes whenever the call history does (new call, clear, seen):
+                                * an open History screen refetches its list */
+    /* incoming call refused without ringing (do not disturb, or busy without call waiting):
+     * missed_seq counts up once per call, the UI shows a short notice */
+    uint16_t missed_seq;
+    bool missed_dnd;           /* that call was refused because of do not disturb */
+    char missed_from[64];      /* its caller: name, else number */
     int64_t now;               /* wall clock, seconds since the epoch rounded down to the minute;
                                 * 0 until the clock is set */
 

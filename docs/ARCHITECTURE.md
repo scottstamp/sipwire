@@ -23,13 +23,18 @@ components/
                      FAT partition (wear-levelled, /data; contacts.csv, speed.csv, history.bin,
                      atomic tmp+rename writes); `dir_*` API, thread-safe; console: contact,
                      speed, history. dir_core.c is pure C (host-tested in test_host/directory).
+                     Mutators change RAM only; the "dir_save" task writes snapshots (taken
+                     under the lock) ~200 ms later, so the LVGL / sip tasks never wait for
+                     flash; dir_flush() waits for the write (console commands use it).
                      phone.c logs every ended call (dir_history_add; phone_log_* in
                      phone_logic.c: answered / missed / declined / DND, outgoing no-answer =
-                     missed); the UI reads the lists through ui_actions_t (bridge) and keeps
-                     only the unseen-missed count in the model.
+                     missed); the UI reads the lists through ui_actions_t (bridge); the model
+                     carries the unseen-missed count + newest caller, history_rev (an open
+                     History screen refetches when it changes) and the last
+                     CALL_EVENT_MISSED (missed_seq/from/dnd: a notice over any screen).
   ota/               firmware update (esp_https_ota, http or https), rollback health watch
   phone/             call state machine, ties sip+rtp+audio; emits UI events
-  ui/                LVGL screens: home, dialer (contact matches, speed dial), incoming, in-call,
+  ui/                LVGL screens: home, dialer (up to 3 contact matches, speed dial), incoming, in-call,
                      history, contacts, settings (Sounds, Call features...). Long lists (contacts,
                      history) use ui_vlist.c: a pool of ~8 row widgets re-bound on scroll.
                      (pure LVGL, no IDF deps — also built for the web simulator)

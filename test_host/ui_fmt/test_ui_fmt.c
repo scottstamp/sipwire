@@ -63,11 +63,58 @@ static void test_month_and_year_boundary(void)
     TEST_ASSERT_EQUAL_STRING("Jan 5", b);
 }
 
+static ui_call_t hc(const char *num, int64_t start, uint8_t res, bool seen)
+{
+    ui_call_t c;
+    memset(&c, 0, sizeof(c));
+    c.direction = UI_CALLDIR_IN;
+    c.result = res;
+    c.seen = seen;
+    c.start = start;
+    strcpy(c.number, num);
+    return c;
+}
+
+static void test_hist_shift_and_fresh(void)
+{
+    /* opened with: B (missed, unseen), A (answered); then marked seen */
+    ui_call_t old[2] = {hc("1002", 200, UI_CALLRES_MISSED, false), hc("1001", 100, UI_CALLRES_ANSWERED, true)};
+    bool fresh[8] = {false};
+    ui_hist_carry_fresh(fresh, 0, -1, old, 2);
+    TEST_ASSERT_TRUE(fresh[0]);
+    TEST_ASSERT_FALSE(fresh[1]);
+    old[0].seen = true;                             /* refetch after mark seen: nothing added */
+    TEST_ASSERT_EQUAL_INT32(0, ui_hist_shift(&old[0], old, 2));
+    ui_hist_carry_fresh(fresh, 2, 0, old, 2);
+    TEST_ASSERT_TRUE(fresh[0]);                     /* still highlighted */
+    TEST_ASSERT_FALSE(fresh[1]);
+
+    /* two new calls in front: a missed (unseen) one and an outgoing one */
+    ui_call_t now[4] = {hc("1003", 400, UI_CALLRES_MISSED, false), hc("1004", 300, UI_CALLRES_ANSWERED, true),
+                        old[0], old[1]};
+    now[1].direction = UI_CALLDIR_OUT;
+    int32_t k = ui_hist_shift(&old[0], now, 4);
+    TEST_ASSERT_EQUAL_INT32(2, k);
+    ui_hist_carry_fresh(fresh, 2, k, now, 4);
+    TEST_ASSERT_TRUE(fresh[0]);
+    TEST_ASSERT_FALSE(fresh[1]);
+    TEST_ASSERT_TRUE(fresh[2]);                     /* the old B kept its flag */
+    TEST_ASSERT_FALSE(fresh[3]);
+
+    /* same number, other time: not the same entry; cleared history: -1 */
+    ui_call_t other = hc("1002", 201, UI_CALLRES_MISSED, true);
+    TEST_ASSERT_EQUAL_INT32(-1, ui_hist_shift(&other, now, 4));
+    TEST_ASSERT_EQUAL_INT32(-1, ui_hist_shift(&old[0], now, 0));
+    ui_hist_carry_fresh(fresh, 4, -1, now, 1);
+    TEST_ASSERT_TRUE(fresh[0]);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_today);
     RUN_TEST(test_weekday_and_date);
     RUN_TEST(test_month_and_year_boundary);
+    RUN_TEST(test_hist_shift_and_fresh);
     return UNITY_END();
 }

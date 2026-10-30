@@ -1,7 +1,8 @@
 /* Idle screen: clock, account, registration state and buttons; with BLF keys configured
  * a panel of up to 8 tiles (tap = dial that extension), and when voicemail is waiting a
  * button that dials the voicemail number. The History button carries a red badge with the
- * number of unseen missed calls.
+ * number of unseen missed calls; where the layout has the line under the state (no Wi-Fi
+ * problem to report there) it also says who called ("Missed (3): Bob"; tap = History).
  *
  * Layout (240x320, status bar 0-21):
  *   no BLF keys    big clock, name, id, state; "N new voicemails" banner when
@@ -215,8 +216,12 @@ static lv_obj_t *home_create(const char *arg)
 
     h->sub = ui_label_create(scr, &lv_font_montserrat_14, UI_COL_BAD, "");
     lv_obj_set_width(h->sub, 216);
+    lv_obj_set_height(h->sub, 18);      /* one line: DOTS needs a fixed height */
+    lv_label_set_long_mode(h->sub, LV_LABEL_LONG_MODE_DOTS);
     lv_obj_set_style_text_align(h->sub, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_pos(h->sub, 12, 212);
+    lv_obj_set_ext_click_area(h->sub, 8);
+    lv_obj_add_event_cb(h->sub, on_history, LV_EVENT_CLICKED, NULL);   /* only while it shows missed calls */
 
     h->scr = scr;                       /* tiles are created when first needed */
 
@@ -518,7 +523,18 @@ static void home_update(const ui_model_t *m)
     }
     lv_label_set_text_fmt(h->state, "%s %s", icon, h->compact ? shrt : txt);
     lv_obj_set_style_text_color(h->state, col, 0);
-    lv_label_set_text(h->sub, sub);
+    bool missed_note = !sub[0] && m->missed_unseen > 0 && m->missed_last[0];
+    if (missed_note) {
+        if (m->missed_unseen == 1) {
+            lv_label_set_text_fmt(h->sub, LV_SYMBOL_CALL " Missed: %s", m->missed_last);
+        } else {
+            lv_label_set_text_fmt(h->sub, LV_SYMBOL_CALL " Missed (%u): %s", (unsigned)m->missed_unseen,
+                                  m->missed_last);
+        }
+    } else {
+        lv_label_set_text(h->sub, sub);
+    }
+    lv_obj_set_clickable(h->sub, missed_note);
 
     for (int i = 0; i < n; i++) {
         tile_update(h, &h->tile[i], &m->blf[i]);

@@ -12,8 +12,13 @@
  *
  * Data is kept in RAM (PSRAM when present) and saved after every change: a
  * contacts/speed-dial change rewrites a small CSV file, a history append rewrites ~8 KB.
+ * The mutators only change RAM and queue the write: a background task ("dir_save") writes a
+ * snapshot taken under the lock ~200 ms later (several changes in a row = one write), so no
+ * caller (LVGL task, sip task) ever waits for flash. Their return value covers the change
+ * itself, not the write; dir_flush() waits for the write and returns its result (console).
  * Writes go to a temp file that is then renamed over the real one. If the partition
- * cannot be mounted the directory still works from RAM and the mutators return the error. */
+ * cannot be mounted the directory still works from RAM and the mutators return
+ * ESP_ERR_INVALID_STATE (after changing RAM). */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -105,3 +110,14 @@ esp_err_t dir_history_clear(void);
 unsigned dir_history_unseen_missed(void);
 /** Mark all missed calls seen (call when the history screen is opened). */
 esp_err_t dir_history_mark_seen(void);
+/** Changes whenever the history does (add, clear, mark seen): poll it to refresh a view. */
+uint32_t dir_history_rev(void);
+/** Newest missed incoming call not yet seen; false if there is none. */
+bool dir_history_last_unseen_missed(dir_call_t *out);
+
+/* ---- persistence ---- */
+
+/** Wait (up to `timeout_ms`) until every change made before the call is on flash. Returns the
+ *  result of the last write (ESP_FAIL...), ESP_ERR_TIMEOUT, or ESP_ERR_INVALID_STATE when nothing
+ *  is saved (not mounted). Not for the LVGL or sip task. */
+esp_err_t dir_flush(uint32_t timeout_ms);

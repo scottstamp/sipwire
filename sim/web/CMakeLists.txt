@@ -43,7 +43,7 @@ set(SIM_EXPORTS
     _sim_remote_hangup _sim_set_call _sim_key _sim_set_time _sim_set_clock24 _sim_set_ota _sim_touch_raw _sim_get_model_json
     _sim_set_blf_count _sim_set_blf _sim_set_mwi
     _sim_set_second _sim_set_xfer _sim_set_dnd _sim_set_page _sim_waiting
-    _sim_set_unseen _sim_clear_directory)
+    _sim_set_unseen _sim_clear_directory _sim_history_add _sim_missed)
 list(JOIN SIM_EXPORTS "," SIM_EXPORTS_CSV)
 
 target_link_options(index PRIVATE

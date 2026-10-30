@@ -797,6 +797,74 @@ const SCENARIOS = {
       for (const k of '100') sim.key(k, 0);
     },
   },
+  dialer_matches_two: {   // "555" -> Dave Miller, Pizza Palace: two rows, no "+N"
+    sim: (sim) => {
+      sim.set_net(2, -62); sim.set_reg(2); sim.set_time('12:34');
+      for (const k of '555') sim.key(k, 0);
+    },
+  },
+  dialer_match_long: {   // one match with a name too long for the row: dots
+    sim: (sim) => {
+      sim.set_net(2, -62); sim.set_reg(2); sim.set_time('12:34');
+      for (const k of '1012') sim.key(k, 0);
+    },
+  },
+  dialer_match_filled: {   // tap the second row: its number is filled in
+    sim: (sim) => {
+      sim.set_net(2, -62); sim.set_reg(2); sim.set_time('12:34');
+      for (const k of '100') sim.key(k, 0);
+    },
+    steps: async (page, click) => {
+      await click(120, 98);    // "Bob Example 1002"
+      await page.waitForTimeout(150);
+    },
+  },
+  // missed calls: a call refused without ringing (CALL_EVENT_MISSED) -> notice over any screen;
+  // the home screen names the newest unseen missed caller under the state (tap = History)
+  home_missed_toast_dnd: (sim) => {
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34'); sim.set_dnd(true);
+    sim.missed('1008', 'Heidi Klum', true);
+  },
+  home_missed_toast_busy: (sim) => {
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    sim.missed('+4930555123456', '', false);
+  },
+  home_missed_one: (sim) => {
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    sim.set_unseen(1);
+  },
+  home_blf1_missed: (sim) => {   // one BLF row: the notice line still fits above the tiles
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    sim.set_blf(0, '1002', 'Bob', 1); sim.set_blf(1, '1003', 'Front desk', 3);
+    sim.set_unseen(2);
+  },
+  // History follows the history live: a call logged while it is open
+  history_live_top: {   // at the top: the new call scrolls in, shown as new
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    },
+    steps: async (page, click) => {
+      await click(178, 225);   // History
+      await page.waitForTimeout(350);
+      await page.evaluate(() => window.sim.missed('1005', 'Eve Adams', false));
+      await page.waitForTimeout(100);
+    },
+  },
+  history_live_scrolled: {   // scrolled: two new calls in front, the rows in view stay put
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    },
+    steps: async (page, click, drag) => {
+      await click(178, 225);
+      await page.waitForTimeout(350);
+      await drag(120, 280, 120, 120);
+      await page.evaluate(() => {
+        window.sim.history_add(1, 0, '1001', 'Alice Johnson', 30);
+        window.sim.history_add(0, 1, '1003', 'Carol Test', 0);
+      });
+      await page.waitForTimeout(100);
+    },
+  },
   dialer_speed_hint: {   // a lone 5 has a speed dial entry: "Hold 5 to call Front desk"
     sim: (sim) => {
       sim.set_net(2, -62); sim.set_reg(2); sim.set_time('12:34');

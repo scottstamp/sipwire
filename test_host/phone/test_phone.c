@@ -412,6 +412,16 @@ static void test_model_call_features(void)
     TEST_ASSERT_EQUAL_UINT32(0, m.second_seconds);
     TEST_ASSERT_FALSE(m.dnd);
     TEST_ASSERT_EQUAL(UI_XFER_IDLE, m.xfer);
+    TEST_ASSERT_EQUAL_UINT16(0, m.missed_seq);
+
+    /* CALL_EVENT_MISSED as kept by the bridge: passed through for the UI's notice */
+    loc.missed_seq = 3;
+    loc.missed_dnd = true;
+    strcpy(loc.missed_from, "Bob");
+    ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
+    TEST_ASSERT_EQUAL_UINT16(3, m.missed_seq);
+    TEST_ASSERT_TRUE(m.missed_dnd);
+    TEST_ASSERT_EQUAL_STRING("Bob", m.missed_from);
 
     /* held background call: elapsed time; a background ACTIVE (hold unconfirmed) counts as held */
     ph.second.call = CALL_ACTIVE;

@@ -65,8 +65,8 @@ typedef struct {
     void (*transfer_attended_complete)(void *ctx);
     void (*transfer_attended_cancel)(void *ctx);
     void (*set_dnd)(void *ctx, bool on);
-    /* ---- directory (called from the LVGL task: in-RAM lookups; the saves write a small file (tens of ms)
-     * and return the result, so the screen can refetch right after) ---- */
+    /* ---- directory (called from the LVGL task: in-RAM lookups and changes; the saves update RAM at
+     * once, so the screen can refetch right after, and queue the flash write: they never block) ---- */
     /* Contacts whose name contains `query` or whose number contains it (case-insensitive;
      * "" = all), best matches first, then sorted. Fills up to `max` entries incl. the
      * speed dial key of each; returns the count. */

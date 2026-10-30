@@ -12,6 +12,7 @@
 
 #include "ui_priv.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #define ANIM_MS 120
@@ -112,6 +113,7 @@ void ui_update(const ui_model_t *model)
     if (!s_inited || !model) {
         return;
     }
+    bool missed = model->missed_seq != s_model.missed_seq && model->missed_from[0];
     s_model = *model;
 
     ui_screen_t want = s_kind;
@@ -156,6 +158,15 @@ void ui_update(const ui_model_t *model)
     } else {
         ui_statusbar_update(&s_model);
         OPS[s_kind]->update(&s_model);
+    }
+
+    /* A call refused without ringing (do not disturb / busy) leaves no other trace on screen
+     * than the History badge: say who it was, over whatever screen is up. */
+    if (missed) {
+        char txt[sizeof(model->missed_from) + 40];
+        snprintf(txt, sizeof(txt), LV_SYMBOL_CALL " Missed call: %s\n%s", model->missed_from,
+                 model->missed_dnd ? "(do not disturb)" : "(busy)");
+        ui_toast_for(txt, 4000);
     }
 }
 

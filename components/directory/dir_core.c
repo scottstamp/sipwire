@@ -536,6 +536,17 @@ unsigned dir_hist_unseen_missed(const dir_hist_t *h)
     return n;
 }
 
+const dir_call_t *dir_hist_last_unseen_missed(const dir_hist_t *h)
+{
+    for (size_t i = 0; i < h->count; i++) {
+        const dir_call_t *c = dir_hist_get(h, i);
+        if (c->direction == DIR_CALL_IN && c->result == DIR_RES_MISSED && !c->seen) {
+            return c;
+        }
+    }
+    return NULL;
+}
+
 bool dir_hist_mark_seen(dir_hist_t *h)
 {
     bool changed = false;

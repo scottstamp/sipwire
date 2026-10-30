@@ -48,7 +48,12 @@ Open development work (see `docs/PLAN.md` for the full list):
 - Battery ADC (GPIO 4 reserved) once the divider exists; dock detect design.
 - Contacts / call log / speed dial: backend, call-log hookup in phone.c and UI (History,
   Contacts, dialer matches + long-press speed dial, home badge) done; Settings has Sounds
-  (ringtone preview, volumes) and Call features pages. Not done: import/export UI (CSV via
+  (ringtone preview, volumes) and Call features pages. Directory loose ends done
+  (2026-10-30): History updates live (model `history_rev`; keeps scroll position and the
+  new-call highlight), dialer shows up to 3 matches (tap = fill, hold = call, "+N" on the
+  last row), missed calls: CALL_EVENT_MISSED -> 4 s notice over any screen, home line
+  "Missed (2): Bob" (tap = History); all directory writes (contacts and speed dial too) go
+  through the async `dir_save` task (`dir_flush()` for the console). Not done: import/export UI (CSV via
   console `contact import`), SD card (not wanted: the `storage` partition is used).
 - Review task priorities, DMA sizing, PSRAM placement (`[core]`).
 - SIP over TCP/TLS, SRTP, RTCP (optional).

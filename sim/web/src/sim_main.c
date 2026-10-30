@@ -98,6 +98,7 @@ static size_t s_n_contacts;
 static char s_speed[SIM_SPEED_SLOTS][UI_NUMBER_LEN];
 static ui_call_t s_hist[UI_HISTORY_MAX];           /* newest first */
 static size_t s_n_hist;
+static uint32_t s_hist_rev;                         /* like dir_history_rev(): +1 per change */
 static const char *const RINGTONES[] = {"Classic", "Digital", "Chime", "Old bell", "Soft"};
 #define N_RINGTONES ((int)(sizeof(RINGTONES) / sizeof(RINGTONES[0])))
 
@@ -115,6 +116,15 @@ static unsigned count_unseen(void)
 static void push_model(void)
 {
     s_model.missed_unseen = (uint8_t)count_unseen();
+    s_model.history_rev = s_hist_rev;
+    s_model.missed_last[0] = '\0';
+    for (size_t i = 0; i < s_n_hist; i++) {
+        const ui_call_t *c = &s_hist[i];
+        if (c->direction == UI_CALLDIR_IN && c->result == UI_CALLRES_MISSED && !c->seen) {
+            snprintf(s_model.missed_last, sizeof(s_model.missed_last), "%s", c->name[0] ? c->name : c->number);
+            break;
+        }
+    }
     s_model.now = s_hour >= 0 ? (int64_t)wall_at(0, s_hour, s_minute) : 0;
     format_clock();
     ui_update(&s_model);
@@ -466,6 +476,7 @@ static void act_history_clear(void *ctx)
     (void)ctx;
     sim_log("action history_clear()");
     s_n_hist = 0;
+    s_hist_rev++;
     push_model();
 }
 
@@ -476,7 +487,28 @@ static void act_history_mark_seen(void *ctx)
     for (size_t i = 0; i < s_n_hist; i++) {
         s_hist[i].seen = true;
     }
+    s_hist_rev++;
     push_model();
+}
+
+/* Like dir_history_add(): newest first, the oldest drops off a full list. */
+static void hist_add(int dir, int res, const char *number, const char *name, uint32_t duration)
+{
+    if (s_n_hist == UI_HISTORY_MAX) {
+        s_n_hist--;
+    }
+    memmove(&s_hist[1], &s_hist[0], s_n_hist * sizeof(s_hist[0]));
+    s_n_hist++;
+    ui_call_t *c = &s_hist[0];
+    memset(c, 0, sizeof(*c));
+    c->direction = (uint8_t)dir;
+    c->result = (uint8_t)res;
+    c->seen = !(dir == UI_CALLDIR_IN && res == UI_CALLRES_MISSED);
+    c->start = s_hour >= 0 ? (int64_t)wall_at(0, s_hour, s_minute) : 0;
+    c->duration_s = duration;
+    snprintf(c->number, UI_NUMBER_LEN, "%s", number ? number : "");
+    snprintf(c->name, UI_NAME_LEN, "%s", name ? name : "");
+    s_hist_rev++;
 }
 
 static const char *act_ringtone_name(void *ctx, int idx)
@@ -1118,6 +1150,27 @@ EMSCRIPTEN_KEEPALIVE void sim_set_unseen(int n)
             n--;
         }
     }
+    s_hist_rev++;
+    push_model();
+}
+
+/* Log a call now (direction 0 in / 1 out, result ui_call_result_t), like the phone at call end. */
+EMSCRIPTEN_KEEPALIVE void sim_history_add(int dir, int res, const char *number, const char *name, int seconds)
+{
+    hist_add(dir ? UI_CALLDIR_OUT : UI_CALLDIR_IN, res < UI_CALLRES_ANSWERED || res > UI_CALLRES_DND ? 0 : res,
+             number, name, seconds > 0 ? (uint32_t)seconds : 0);
+    push_model();
+}
+
+/* CALL_EVENT_MISSED: an incoming call refused without ringing (dnd: do not disturb, else busy).
+ * Logged like the phone does (DND -> "Do not disturb", busy -> missed) and announced. */
+EMSCRIPTEN_KEEPALIVE void sim_missed(const char *number, const char *name, int dnd)
+{
+    hist_add(UI_CALLDIR_IN, dnd ? UI_CALLRES_DND : UI_CALLRES_MISSED, number, name, 0);
+    s_model.missed_seq++;
+    s_model.missed_dnd = dnd != 0;
+    snprintf(s_model.missed_from, sizeof(s_model.missed_from), "%s",
+             name && name[0] ? name : number && number[0] ? number : "Unknown");
     push_model();
 }
 
@@ -1126,6 +1179,7 @@ EMSCRIPTEN_KEEPALIVE void sim_clear_directory(int which)
 {
     if (which == 0) {
         s_n_hist = 0;
+        s_hist_rev++;
     } else {
         s_n_contacts = 0;
         memset(s_speed, 0, sizeof(s_speed));

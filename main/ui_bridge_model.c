@@ -295,5 +295,9 @@ void ui_bridge_build_model(const ui_bridge_local_t *loc, const phone_status_t *p
     out->speaker_volume = loc->speaker_volume;
     out->call_waiting = loc->call_waiting;
     out->auto_answer = loc->auto_answer;
-    /* missed_unseen and now come from the directory / clock in the bridge task */
+    out->missed_seq = loc->missed_seq;
+    out->missed_dnd = loc->missed_dnd;
+    copy(out->missed_from, sizeof(out->missed_from), loc->missed_from);
+    /* missed_unseen, missed_last, history_rev and now come from the directory / clock in the
+     * bridge task */
 }
