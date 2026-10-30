@@ -47,6 +47,9 @@ typedef struct {
     uint16_t missed_seq;            /* +1 per event */
     bool missed_dnd;
     char missed_from[64];           /* name, else number */
+    /* keypad lock when the display goes dark (ui_model_t keypad_autolock); default off.
+     * Set it under b.mtx, e.g. in update_settings_locked() from a settings switch. */
+    bool keypad_autolock;
 } ui_bridge_local_t;
 
 /** Fill the time/update settings of `loc` (Settings > Time and > Update prefill).

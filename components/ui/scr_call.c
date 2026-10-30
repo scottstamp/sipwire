@@ -10,9 +10,20 @@
  *   - attended transfer: the foreground call is the consultation call, the original
  *     is the held strip, Complete / Cancel replace Hang up;
  *   - status line: transfer progress / failure, "On hold", or "Page / Intercom";
- *   - Transfer opens the target picker (scr_transfer.c). */
+ *   - Transfer opens the target picker (scr_transfer.c).
+ *
+ * Touch lock (cheek presses): while ui_call_lock_eligible() (answered, handset, no waiting
+ * call, model call_touch_lock_s > 0) the screen locks call_touch_lock_s after it became
+ * eligible or after the last tap on a control / key press. Locked: a touch shield covers
+ * the screen, the controls are dimmed, a slide-to-unlock control replaces Hang up. Any
+ * physical key unlocks and still does what it does (DTMF, long * hangs up): the keypad is
+ * not what the cheek presses, and a swallowed first digit would break IVR entry. Model
+ * updates (timer, hold, remote hang-up) keep applying; a waiting call or the loudspeaker
+ * unlocks. */
 
 #include "ui_priv.h"
+
+#include "ui_lock_logic.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -52,6 +63,13 @@ typedef struct {
     lv_obj_t *wait_who;
     lv_obj_t *wait_sub;
 
+    lv_obj_t *shield;    /* touch lock: swallows presses; holds the unlock slider */
+    lv_obj_t *slider;
+    lv_timer_t *lock_timer; /* fires call_touch_lock_s after the last activity */
+    bool lock_eligible;
+    bool locked;
+    uint16_t lock_s;
+
     bool pad_mode;
     bool two;     /* a held background call exists, or an attended transfer is consulting */
     bool consult; /* attended transfer consultation */
@@ -69,6 +87,9 @@ static void on_delete(lv_event_t *e)
     call_t *c = lv_event_get_user_data(e);
     if (s_c == c) {
         s_c = NULL;
+    }
+    if (c->lock_timer) {
+        lv_timer_delete(c->lock_timer);
     }
     lv_free(c);
 }
@@ -131,6 +152,96 @@ static void cell(lv_obj_t *o, int col, int32_t y, int32_t h)
     lv_obj_set_size(o, W[col], h);
 }
 
+/* ---- touch lock ---- */
+
+/* Locked look on top of apply_mode(): the bottom row gives way to the slider, the rest is
+ * dimmed (still readable: mute / hold state, held call, DTMF keys). */
+static void lock_look(call_t *c)
+{
+    lv_obj_set_hidden(c->shield, !c->locked);
+    if (c->locked) {
+        lv_obj_set_hidden(c->hangup, true);
+        lv_obj_set_hidden(c->complete, true);
+        lv_obj_set_hidden(c->cancel, true);
+        lv_obj_set_hidden(c->back, true);
+    }
+    lv_opa_t opa = c->locked ? LV_OPA_40 : LV_OPA_COVER;
+    ui_style_set_num(c->grid, LV_STYLE_OPA, opa, 0);
+    ui_style_set_num(c->pad, LV_STYLE_OPA, opa, 0);
+    ui_style_set_num(c->strip, LV_STYLE_OPA, opa, 0);
+}
+
+static void apply_mode(call_t *c);
+
+static void lock_set(call_t *c, bool locked)
+{
+    if (locked == c->locked) {
+        return;
+    }
+    c->locked = locked;
+    if (locked) {
+        ui_unlock_slider_reset(c->slider);
+    }
+    apply_mode(c);      /* restores the bottom row on unlock, then lock_look() */
+}
+
+/* A tap on a control, a key or the unlock: the lock comes back call_touch_lock_s later. */
+static void lock_activity(call_t *c)
+{
+    if (c->lock_eligible && !c->locked) {
+        lv_timer_reset(c->lock_timer);
+        lv_timer_resume(c->lock_timer);
+    }
+}
+
+static void lock_timer_cb(lv_timer_t *t)
+{
+    call_t *c = lv_timer_get_user_data(t);
+    lv_timer_pause(t);
+    if (c->lock_eligible) {
+        lock_set(c, true);
+    }
+}
+
+/* Model update: follow eligibility (answered, handset, no waiting call). */
+static void lock_eval(call_t *c, const ui_model_t *m)
+{
+    bool eligible = ui_call_lock_eligible(m);
+    if (eligible && m->call_touch_lock_s != c->lock_s) {
+        c->lock_s = m->call_touch_lock_s;
+        lv_timer_set_period(c->lock_timer, (uint32_t)c->lock_s * 1000u);
+    }
+    if (eligible == c->lock_eligible) {
+        return;
+    }
+    c->lock_eligible = eligible;
+    if (eligible) {
+        lock_activity(c);           /* connected / back to the handset: count from now */
+    } else {
+        lv_timer_pause(c->lock_timer);
+        lock_set(c, false);
+    }
+}
+
+static void on_unlock(void *user)
+{
+    call_t *c = user;
+    lock_set(c, false);
+    lock_activity(c);
+}
+
+/* Every control handler starts here: false while locked (a press that began before the
+ * lock still ends in a click on its button), else it counts as activity. */
+static bool lock_pass(void)
+{
+    call_t *c = s_c;
+    if (!c || c->locked) {
+        return false;
+    }
+    lock_activity(c);
+    return true;
+}
+
 /* Re-arrange the screen for the plain controls, the held-call strip or the DTMF keypad. */
 static void apply_mode(call_t *c)
 {
@@ -177,6 +288,7 @@ static void apply_mode(call_t *c)
     lv_obj_set_hidden(c->hangup, c->consult);
     lv_obj_set_hidden(c->complete, !c->consult);
     lv_obj_set_hidden(c->cancel, !c->consult);
+    lock_look(c);
     texts_refresh(c, m);
     side_refresh(c, m);
 }
@@ -184,59 +296,89 @@ static void apply_mode(call_t *c)
 static void on_mute(lv_event_t *e)
 {
     (void)e;
+    if (!lock_pass()) {
+        return;
+    }
     ui_act_set_mute(!ui_model()->muted);
 }
 
 static void on_speaker(lv_event_t *e)
 {
     (void)e;
+    if (!lock_pass()) {
+        return;
+    }
     ui_act_set_speaker(!ui_model()->speaker);
 }
 
 static void on_hold(lv_event_t *e)
 {
     (void)e;
+    if (!lock_pass()) {
+        return;
+    }
     ui_act_hold(ui_model()->call != UI_CALL_HELD);
 }
 
 static void on_transfer(lv_event_t *e)
 {
     (void)e;
+    if (!lock_pass()) {
+        return;
+    }
     ui_goto(UI_SCR_TRANSFER, NULL);
 }
 
 static void on_swap(lv_event_t *e)
 {
     (void)e;
+    if (!lock_pass()) {
+        return;
+    }
     ui_act_swap();
 }
 
 static void on_complete(lv_event_t *e)
 {
     (void)e;
+    if (!lock_pass()) {
+        return;
+    }
     ui_act_transfer_attended_complete();
 }
 
 static void on_cancel(lv_event_t *e)
 {
     (void)e;
+    if (!lock_pass()) {
+        return;
+    }
     ui_act_transfer_attended_cancel();
 }
 
 static void on_wait_answer(lv_event_t *e)
 {
     (void)e;
+    if (!lock_pass()) {
+        return;
+    }
     ui_act_answer_waiting();
 }
 
 static void on_wait_reject(lv_event_t *e)
 {
     (void)e;
+    if (!lock_pass()) {
+        return;
+    }
     ui_act_reject_waiting();
 }
 
 static void on_vol(lv_event_t *e)
 {
+    if (!lock_pass()) {
+        return;
+    }
     int delta = (int)(intptr_t)lv_event_get_user_data(e);
     int v = (int)ui_model()->volume + delta;
     if (v < 0) {
@@ -266,12 +408,18 @@ static void send_dtmf(call_t *c, char digit)
 static void on_pad_key(char key, bool long_press, void *user)
 {
     (void)long_press;
+    if (!lock_pass()) {
+        return;
+    }
     send_dtmf(user, key);
 }
 
 static void on_toggle_pad(lv_event_t *e)
 {
     call_t *c = lv_event_get_user_data(e);
+    if (!lock_pass()) {
+        return;
+    }
     c->pad_mode = !c->pad_mode;
     apply_mode(c);
 }
@@ -279,6 +427,9 @@ static void on_toggle_pad(lv_event_t *e)
 static void on_hangup(lv_event_t *e)
 {
     (void)e;
+    if (!lock_pass()) {
+        return;
+    }
     ui_act_hangup();
 }
 
@@ -415,6 +566,12 @@ static lv_obj_t *call_create(const char *arg)
     wait_create(c, scr);
     lv_obj_set_hidden(c->wait, true);
 
+    /* touch lock: over everything (a waiting call unlocks, so it never covers that overlay) */
+    c->shield = ui_touch_shield_create(scr);
+    c->slider = ui_unlock_slider_create(c->shield, 6, 270, 228, 46, on_unlock, c);
+    c->lock_timer = lv_timer_create(lock_timer_cb, 5000, c);
+    lv_timer_pause(c->lock_timer);
+
     s_c = c;
     apply_mode(c);
     return scr;
@@ -464,6 +621,7 @@ static void call_update(const ui_model_t *m)
         c->waiting = waiting;
         lv_obj_set_hidden(c->wait, !waiting);
     }
+    lock_eval(c, m);
 
     if (!c->names_valid || strcmp(c->rname, m->remote_name) != 0 ||
         strcmp(c->rnum, m->remote_number) != 0) {
@@ -529,6 +687,8 @@ static void call_key(char key, ui_key_action_t action)
     if (!c) {
         return;
     }
+    lock_set(c, false);     /* any key unlocks touch and keeps its meaning */
+    lock_activity(c);
     if (action == UI_KEY_PRESS && ui_is_dial_key(key)) {
         send_dtmf(c, key);
     } else if (action == UI_KEY_LONG && key == '*') {

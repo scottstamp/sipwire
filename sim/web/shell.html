@@ -118,6 +118,15 @@
     </div>
 
     <div class="card">
+      <h2>Locks</h2>
+      <div class="row"><label for="tlock">Touch lock s</label>
+        <input type="text" id="tlock" value="5" title="in-call touch lock after N s on the handset, 0 = off" style="max-width:56px; flex:none">
+        <button id="tlockset" type="button">set</button>
+        <label style="width:auto"><input type="checkbox" id="autolock"> keypad auto-lock</label>
+        <button id="dispoff" type="button">Screen off</button></div>
+    </div>
+
+    <div class="card">
       <div class="tools"><h2>Action log</h2><button id="logclr" type="button">clear</button></div>
       <pre id="log"></pre>
     </div>
@@ -202,6 +211,9 @@
     set_xfer: function (st, att, code, target) { Module.ccall('sim_set_xfer', null, ['number', 'number', 'number', 'string'], [st, att ? 1 : 0, code || 0, target || '']); },
     set_dnd: function (on) { Module.ccall('sim_set_dnd', null, ['number'], [on ? 1 : 0]); },
     set_page: function (on) { Module.ccall('sim_set_page', null, ['number'], [on ? 1 : 0]); },
+    set_touch_lock: function (s) { Module.ccall('sim_set_touch_lock', null, ['number'], [s]); },
+    set_keypad_autolock: function (on) { Module.ccall('sim_set_keypad_autolock', null, ['number'], [on ? 1 : 0]); },
+    display_off: function () { Module.ccall('sim_display_off', null, [], []); },
     waiting: function (n, nm) { Module.ccall('sim_waiting', null, ['string', 'string'], [n, nm || '']); },
     // directory stubs: mark the n newest missed incoming calls unseen; clear_directory(0 history | 1 contacts)
     set_unseen: function (n) { Module.ccall('sim_set_unseen', null, ['number'], [n]); },
@@ -287,6 +299,9 @@
   $('incoming').addEventListener('click', function () { window.sim.incoming($('inum').value, $('iname').value); });
   $('waiting').addEventListener('click', function () { window.sim.waiting($('inum').value, $('iname').value); });
   $('pagechk').addEventListener('change', function () { window.sim.set_page($('pagechk').checked); });
+  $('tlockset').addEventListener('click', function () { window.sim.set_touch_lock(parseInt($('tlock').value, 10) || 0); });
+  $('autolock').addEventListener('change', function () { window.sim.set_keypad_autolock($('autolock').checked); });
+  $('dispoff').addEventListener('click', function () { window.sim.display_off(); });
   $('rhangup').addEventListener('click', function () { window.sim.remote_hangup(parseInt($('rcode').value, 10) || 0); });
   $('logclr').addEventListener('click', function () { $('log').textContent = ''; });
 

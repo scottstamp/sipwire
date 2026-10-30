@@ -134,5 +134,28 @@ void ui_vlist_set_height(lv_obj_t *list, int32_t h);
 /** The item index of a pool row (-1 if unbound). */
 int32_t ui_vlist_row_index(lv_obj_t *row);
 
+/* ---- locks (ui_lock.c, gesture rules in ui_lock_logic.h) ---- */
+
+/** Padlock icon `h` px high (width 7/9 h) in `color`; position it like any object. */
+lv_obj_t *ui_lock_icon_create(lv_obj_t *parent, int32_t h, lv_color_t color);
+void ui_lock_icon_set_color(lv_obj_t *icon, lv_color_t color);
+
+/** Transparent object over all of `parent` that swallows every press. */
+lv_obj_t *ui_touch_shield_create(lv_obj_t *parent);
+
+/** Slide-to-unlock track with a padlock knob at its left end; `cb` runs once when the knob
+ *  is dragged to the right end (from the knob's own event: hide things, do not delete the
+ *  slider there). Returns the track. */
+typedef void (*ui_unlock_cb_t)(void *user);
+lv_obj_t *ui_unlock_slider_create(lv_obj_t *parent, int32_t x, int32_t y, int32_t w, int32_t h,
+                                  ui_unlock_cb_t cb, void *user);
+/** Knob back home (before showing the slider again). */
+void ui_unlock_slider_reset(lv_obj_t *slider);
+
+/** Keypad lock (ui.c; read it with ui_keylock_get()): the home screen ignores keys and
+ *  touches except the unlock gestures. Locking goes to the home screen first; it is refused
+ *  while a call screen is up. */
+void ui_keylock_set(bool on);
+
 /** True for keys that carry a dialable character. */
 bool ui_is_dial_key(char key);

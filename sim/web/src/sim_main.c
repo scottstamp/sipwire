@@ -1059,6 +1059,26 @@ EMSCRIPTEN_KEEPALIVE void sim_waiting(const char *number, const char *name)
     sim_set_second(UI_CALL_RINGING_IN, number, name, 0);
 }
 
+/* locks: in-call touch lock time (0 = off), keypad auto-lock switch, backlight going off */
+EMSCRIPTEN_KEEPALIVE void sim_set_touch_lock(int seconds)
+{
+    s_model.call_touch_lock_s = (uint16_t)(seconds < 0 ? 0 : seconds);
+    push_model();
+}
+
+EMSCRIPTEN_KEEPALIVE void sim_set_keypad_autolock(int on)
+{
+    s_model.keypad_autolock = on != 0;
+    push_model();
+}
+
+EMSCRIPTEN_KEEPALIVE void sim_display_off(void)
+{
+    sim_log("mock: display off");
+    ui_display_off();
+    js_model_changed();
+}
+
 EMSCRIPTEN_KEEPALIVE void sim_key(int key, int action)
 {
     if (action < UI_KEY_PRESS || action > UI_KEY_REPEAT) {
@@ -1240,6 +1260,9 @@ EMSCRIPTEN_KEEPALIVE const char *sim_get_model_json(void)
         m->speaker ? "true" : "false", (unsigned)m->volume, m->battery_pct,
         m->charging ? "true" : "false");
     PUTS(m->time_hhmm);
+    PUT(",\"call_touch_lock_s\":%u,\"keypad_autolock\":%s,\"keylock\":%s",
+        (unsigned)m->call_touch_lock_s, m->keypad_autolock ? "true" : "false",
+        ui_keylock_get() ? "true" : "false");
     PUT(",\"wifi_ssid\":");
     PUTS(m->wifi_ssid);
     PUT(",\"wifi_pass_set\":%s,\"sip_server\":", m->wifi_pass_set ? "true" : "false");
@@ -1324,6 +1347,7 @@ int main(void)
     memset(&s_model, 0, sizeof(s_model));
     s_model.battery_pct = -1;
     s_model.volume = 60;
+    s_model.call_touch_lock_s = 5;     /* firmware default (Kconfig SIPWIRE_CALL_TOUCH_LOCK_S) */
     /* plausible stored settings, so the Settings forms show up prefilled */
     snprintf(s_model.wifi_ssid, sizeof(s_model.wifi_ssid), "HomeNet-5G");
     s_model.wifi_pass_set = true;

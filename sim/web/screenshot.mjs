@@ -912,6 +912,190 @@ const SCENARIOS = {
       await page.waitForTimeout(150);
     },
   },
+
+  // ---- locks: in-call touch lock (1 s here instead of 5) and keypad lock ----
+  call_locked: {
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+      sim.set_touch_lock(1); sim.set_call(4, '1001', 'Bob Example', 42);
+    },
+    steps: async (page) => { await page.waitForTimeout(1300); },
+  },
+  call_locked_tap: {   // Mute and Hang up tapped while locked: nothing happens
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+      sim.set_touch_lock(1); sim.set_call(4, '1001', 'Bob Example', 42);
+    },
+    steps: async (page, click) => {
+      await page.waitForTimeout(1300);
+      await click(42, 167);    // Mute
+      await click(120, 293);   // the slider track (where Hang up was)
+      await click(200, 293);
+    },
+  },
+  call_locked_pad: {   // locked in keypad mode
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+      sim.set_touch_lock(1); sim.set_call(4, '1001', 'Bob Example', 42);
+    },
+    steps: async (page, click) => {
+      await click(198, 167);   // Keypad
+      await page.waitForTimeout(1300);
+      await click(120, 150);   // a DTMF key: swallowed
+    },
+  },
+  call_unlock_swipe: {   // swipe the knob to the right end, then Mute works again
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+      sim.set_touch_lock(1); sim.set_call(4, '1001', 'Bob Example', 42);
+    },
+    steps: async (page, click, drag) => {
+      await page.waitForTimeout(1300);
+      await drag(36, 293, 232, 293);
+      await click(42, 167);    // Mute: muted
+    },
+  },
+  call_unlock_half: {   // half a swipe: knob springs back, still locked
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+      sim.set_touch_lock(1); sim.set_call(4, '1001', 'Bob Example', 42);
+    },
+    steps: async (page, click, drag) => {
+      await page.waitForTimeout(1300);
+      await drag(36, 293, 140, 293);
+      await click(42, 167);    // Mute: ignored
+    },
+  },
+  call_unlock_jump: {   // press the knob, then the point jumps (second contact): aborted
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+      sim.set_touch_lock(1); sim.set_call(4, '1001', 'Bob Example', 42);
+    },
+    steps: async (page) => {
+      await page.waitForTimeout(1300);
+      const box = await page.locator('#canvas').boundingBox();
+      await page.mouse.move(box.x + 36, box.y + 293);
+      await page.mouse.down();
+      await page.waitForTimeout(80);
+      await page.mouse.move(box.x + 200, box.y + 293);   // one 164 px step
+      await page.waitForTimeout(80);
+      await page.mouse.move(box.x + 232, box.y + 293);
+      await page.waitForTimeout(150);
+      await page.mouse.up();
+    },
+  },
+  call_unlock_mid: {   // knob half way, finger still down
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+      sim.set_touch_lock(1); sim.set_call(4, '1001', 'Bob Example', 42);
+    },
+    steps: async (page) => {
+      await page.waitForTimeout(1300);
+      const box = await page.locator('#canvas').boundingBox();
+      await page.mouse.move(box.x + 36, box.y + 293);
+      await page.mouse.down();
+      for (let x = 56; x <= 136; x += 20) {
+        await page.mouse.move(box.x + x, box.y + 293);
+        await page.waitForTimeout(40);
+      }
+    },
+  },
+  home_keylock_after_call: {   // locked, answer a call with #, it ends: locked again
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+      sim.key('*', 0); sim.key('*', 1);
+      sim.incoming('1001', 'Bob Example');
+      sim.key('#', 0);
+      sim.remote_hangup(0);
+    },
+    steps: async (page) => { await page.waitForTimeout(1800); },
+  },
+  call_unlock_key: {   // a physical key unlocks and still sends its DTMF
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+      sim.set_touch_lock(1); sim.set_call(4, '1001', 'Bob Example', 42);
+    },
+    steps: async (page) => {
+      await page.waitForTimeout(1300);
+      await page.evaluate(() => window.sim.key('5', 0));
+    },
+  },
+  call_locked_waiting: {   // a waiting call unlocks so it can be answered
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+      sim.set_touch_lock(1); sim.set_call(4, '1001', 'Bob Example', 42);
+    },
+    steps: async (page) => {
+      await page.waitForTimeout(1300);
+      await page.evaluate(() => window.sim.waiting('1002', 'Carol'));
+    },
+  },
+  call_speaker_nolock: {   // loudspeaker: never locks
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+      sim.set_touch_lock(1); sim.set_call(4, '1001', 'Bob Example', 42);
+    },
+    steps: async (page, click) => {
+      await click(120, 167);   // Speaker on
+      await page.waitForTimeout(1500);
+    },
+  },
+  home_keylock_btn: {   // padlock at the top right
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+    },
+    steps: async (page, click) => {
+      await click(219, 43);
+      await click(64, 283);    // Dial: ignored while locked
+    },
+  },
+  home_keylock_blf8: {
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+      const keys = [['1002', 'Bob', 1], ['1003', 'Front desk', 3], ['1004', '', 1], ['1005', 'Carol', 1],
+                    ['1006', 'Dave', 0], ['1007', 'Reception', 2], ['1008', 'Eve', 1], ['+4915112345678', '', 1]];
+      keys.forEach((k, i) => sim.set_blf(i, k[0], k[1], k[2]));
+      sim.set_mwi(1, 2, 0);
+    },
+    steps: async (page, click) => {
+      await click(219, 43);
+      await click(60, 90);     // a tile: ignored while locked
+    },
+  },
+  home_keylock_star: (sim) => {   // hold * on the home screen
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+    sim.key('*', 0); sim.key('*', 1); sim.key('*', 2);
+    sim.key('5', 0);           // ignored, hint toast
+  },
+  home_keylock_star_unlock: (sim) => {
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+    sim.key('*', 0); sim.key('*', 1);
+    sim.key('*', 0); sim.key('*', 1);
+  },
+  home_keylock_swipe_unlock: {
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+    },
+    steps: async (page, click, drag) => {
+      await click(219, 43);
+      await drag(36, 290, 232, 290);
+    },
+  },
+  home_keylock_autolock: (sim) => {   // auto-lock on: the display going dark locks
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+    sim.set_keypad_autolock(1);
+    sim.key('5', 0);           // dialer up
+    sim.display_off();
+  },
+  home_keylock_incoming: (sim) => {   // locked, a call rings: answerable
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+    sim.key('*', 0); sim.key('*', 1);
+    sim.incoming('1001', 'Bob Example');
+  },
+  dialer_star: (sim) => {   // a short * still starts a number
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_battery(80, false); sim.set_time('12:34');
+    for (const k of '*97') sim.key(k, 0);
+  },
 };
 
 const args = process.argv.slice(2);

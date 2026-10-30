@@ -12,7 +12,12 @@
  *                  Settings (4 or 5 buttons). The header shrinks with the number of
  *                  rows: 1 row -> clock, name, id, state; 2 -> clock, name, state;
  *                  3 -> clock, state; 4 -> one line: smaller clock left, short state
- *                  right. */
+ *                  right.
+ *
+ * Keypad lock (pocket dialling): the padlock at the top right (or holding * here, see
+ * ui.c) locks. Locked, a touch shield covers the screen, the buttons give way to a
+ * slide-to-unlock control at the bottom, BLF tiles and voicemail stay visible but dimmed,
+ * the padlock turns amber; ui.c drops the keys except a held *. */
 
 #include "ui_priv.h"
 
@@ -68,6 +73,14 @@ typedef struct {
     int n_tiles;                /* created so far */
     lv_timer_t *blink;
     bool blink_on;
+    /* keypad lock */
+    lv_obj_t *lock_btn;         /* padlock, top right: tap = lock */
+    lv_obj_t *lock_icon;
+    lv_obj_t *pane;             /* touch shield + unlock slider + hint, on top of everything */
+    lv_obj_t *slider;
+    lv_obj_t *pane_hint;        /* "Keypad locked" (no BLF keys: room between header and slider) */
+    bool lock_valid;
+    bool lock_shown;
     /* layout key: re-layout only when it changes */
     int lay_n;
     bool lay_mwi;
@@ -110,6 +123,18 @@ static void on_settings(lv_event_t *e)
 {
     (void)e;
     ui_goto(UI_SCR_SETTINGS, NULL);
+}
+
+static void on_lock(lv_event_t *e)
+{
+    (void)e;
+    ui_keylock_set(true);
+}
+
+static void on_unlock(void *user)
+{
+    (void)user;
+    ui_keylock_set(false);
 }
 
 static void on_voicemail(lv_event_t *e)
@@ -274,6 +299,27 @@ static lv_obj_t *home_create(const char *arg)
     lv_obj_add_event_cb(h->vm, on_voicemail, LV_EVENT_CLICKED, NULL);
     lv_obj_set_hidden(h->vm, true);
 
+    h->lock_btn = ui_box_create(scr, UI_W - 34, 28, 30, 30);
+    lv_obj_set_clickable(h->lock_btn, true);
+    lv_obj_set_ext_click_area(h->lock_btn, 6);
+    lv_obj_set_style_radius(h->lock_btn, 8, 0);
+    lv_obj_set_style_bg_color(h->lock_btn, UI_COL_SURFACE, LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(h->lock_btn, LV_OPA_COVER, LV_STATE_PRESSED);
+    lv_obj_add_event_cb(h->lock_btn, on_lock, LV_EVENT_CLICKED, NULL);
+    h->lock_icon = ui_lock_icon_create(h->lock_btn, 18, UI_COL_DIM);
+    lv_obj_center(h->lock_icon);
+
+    /* created last: above everything else on the screen */
+    h->pane = ui_touch_shield_create(scr);
+    h->pane_hint = ui_box_create(h->pane, 0, 216, UI_W, 30);
+    lv_obj_set_flex_flow(h->pane_hint, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(h->pane_hint, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(h->pane_hint, 8, 0);
+    ui_lock_icon_create(h->pane_hint, 18, UI_COL_WARN);
+    ui_label_create(h->pane_hint, &lv_font_montserrat_14, UI_COL_WARN, "Keypad locked");
+    h->slider = ui_unlock_slider_create(h->pane, 6, BTN_ROW_Y, 228, BTN_ROW_H, on_unlock, NULL);
+    lv_obj_set_hidden(h->pane, true);
+
     h->lay_n = -1;
     h->blink = lv_timer_create(blink_cb, BLINK_MS, h);
     s_h = h;
@@ -366,8 +412,8 @@ static void home_layout(home_t *h, int n, bool mwi)
     lv_obj_set_style_text_font(h->ampm, h->compact ? &lv_font_montserrat_14 : &lv_font_montserrat_24, 0);
     lv_obj_set_style_translate_y(h->ampm, h->compact ? -5 : -3, 0);
     lv_obj_set_style_text_font(h->state, h->compact ? &lv_font_montserrat_14 : &lv_font_montserrat_24, 0);
-    lv_obj_set_width(h->state, h->compact ? 92 : 216);
-    lv_obj_set_x(h->state, h->compact ? 140 : 12);
+    lv_obj_set_width(h->state, h->compact ? 86 : 216);   /* compact: ends left of the padlock */
+    lv_obj_set_x(h->state, h->compact ? 118 : 12);
     lv_obj_set_style_text_align(h->state, h->compact ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_CENTER, 0);
 
     if (n == 0) {
@@ -434,6 +480,36 @@ static void home_layout(home_t *h, int n, bool mwi)
     for (int i = 0; i < h->n_tiles; i++) {
         lv_obj_set_hidden(h->tile[i].btn, i >= n);
     }
+    lv_obj_move_foreground(h->pane);    /* tiles created just now must stay under the shield */
+    h->lock_valid = false;              /* and get the lock look too */
+}
+
+/* Keypad lock look: shield + slider up, the buttons under the slider gone (opacity, so the
+ * layout's hidden flags stay as they are), tiles / voicemail / missed note dimmed. */
+static void lock_apply(home_t *h)
+{
+    bool locked = ui_keylock_get();
+    if (h->lock_valid && locked == h->lock_shown) {
+        return;
+    }
+    if (locked && !h->lock_shown) {
+        ui_unlock_slider_reset(h->slider);
+    }
+    h->lock_valid = true;
+    h->lock_shown = locked;
+    lv_obj_set_hidden(h->pane, !locked);
+    lv_obj_set_hidden(h->pane_hint, h->lay_n != 0);
+    ui_lock_icon_set_color(h->lock_icon, locked ? UI_COL_WARN : UI_COL_DIM);
+    lv_obj_t *gone[] = {h->dial, h->con, h->hist, h->set, h->vm};
+    for (size_t i = 0; i < sizeof(gone) / sizeof(gone[0]); i++) {
+        ui_style_set_num(gone[i], LV_STYLE_OPA, locked ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
+    }
+    lv_opa_t dim = locked ? LV_OPA_40 : LV_OPA_COVER;
+    ui_style_set_num(h->mwi_btn, LV_STYLE_OPA, dim, 0);
+    ui_style_set_num(h->sub, LV_STYLE_OPA, dim, 0);
+    for (int i = 0; i < h->n_tiles; i++) {
+        ui_style_set_num(h->tile[i].btn, LV_STYLE_OPA, dim, 0);
+    }
 }
 
 static void tile_update(home_t *h, tile_t *t, const ui_blf_t *b)
@@ -469,6 +545,7 @@ static void home_update(const ui_model_t *m)
     if (n != h->lay_n || m->mwi_waiting != h->lay_mwi) {
         home_layout(h, n, m->mwi_waiting);
     }
+    lock_apply(h);
 
     if (m->time_hhmm[0]) {
         /* "3:07 PM" -> "3:07" + "PM"; 24 h mode has no suffix */

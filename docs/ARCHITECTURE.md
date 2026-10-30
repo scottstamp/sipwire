@@ -119,6 +119,34 @@ sim/web/             Emscripten build of components/ui + mock model → browser
   keeps the transfer picker up over the plain call and pulls back to the call screen for a waiting call
   or a consultation call. Physical keys on the call screen are DTMF only (long `*` = hang up, or cancel
   during a consultation).
+- Locks (`components/ui`: `ui_lock.c` widgets, `ui_lock_logic.c` pure rules, host-tested in
+  `test_host/ui_lock`). Unlock gesture for both: slide the padlock knob along a 228 px track
+  to its right end (not a long press: a cheek easily rests on one spot for seconds, but does
+  not slide a small knob sideways in a line). The XPT2046 reports the average of all contact
+  points, so a second contact makes the point jump: a step > 60 px between samples or > 40 px
+  off the row aborts until the next press. A half swipe springs back.
+  - In-call touch lock (`scr_call.c`): model `call_touch_lock_s` (bridge: Kconfig
+    `SIPWIRE_CALL_TOUCH_LOCK_S`, default 5, 0 = off). An ACTIVE call on the handset (not the
+    loudspeaker) with no waiting second call locks that long after it became so or after the
+    last tap on a control / key. Locked: transparent touch shield over the screen, controls
+    dimmed, the slider replaces Hang up / Complete-Cancel; every control handler also checks
+    the lock (a press begun before the lock still ends in a click). Model updates keep
+    applying (timer, hold, remote hang-up → ended screen). A waiting call, the loudspeaker,
+    hold or leaving ACTIVE unlocks. Any physical key unlocks and keeps its meaning (DTMF, long
+    `*` = hang up): keys are not the cheek problem and a swallowed digit would break IVR
+    entry. The backlight is not dimmed while locked: every touch calls `display_wake()`, so a
+    cheek would keep relighting it; that needs a display-side hook (not done).
+  - Keypad lock (`ui.c` state, `scr_home.c` look): padlock button at the top right of the
+    home screen, or holding `*` there (the PRESS opens the dialer with "*", the router turns
+    the following LONG into the lock while that dialer is still the one the PRESS opened; a
+    short `*` still dials). Locked: touch shield, buttons replaced by the slider, BLF tiles /
+    voicemail dimmed, amber padlock + "Keypad locked"; the router drops keys (a press shows
+    "Hold * or slide to unlock"), held `*` unlocks. Enforced on the home screen only, which is
+    where locking goes; ringing / call screens suspend it (answer / reject as usual), back
+    home it is on again. Auto-lock: model `keypad_autolock` (bridge `ui_bridge_local_t
+    .keypad_autolock`, default off; meant for a settings switch): on
+    `DISPLAY_EVENT_BACKLIGHT` (dark) the bridge queues `ui_display_off()`, which goes home and
+    locks unless a call is up, ahead of the key / touch that later wakes the display.
 - Touch calibration: `ui_actions_t.touch_cal_begin/end` + `ui_touch_raw()`. The
   bridge installs `display_touch_raw_hook()` (raw samples to the UI, none to LVGL)
   between begin and end and stores the result in `settings.touch_cal`.
