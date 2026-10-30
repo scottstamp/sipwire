@@ -183,6 +183,27 @@ void phone_dtmf_seq_consume(phone_dtmf_seq_t *s, uint64_t now_ms)
     s->next_ms = now_ms + PHONE_DTMF_GAP_MS;
 }
 
+uint64_t phone_dtmf_seq_next_ms(const phone_dtmf_seq_t *s)
+{
+    return s->len == 0 ? UINT64_MAX : s->next_ms;
+}
+
+void phone_dtmf_seq_defer(phone_dtmf_seq_t *s, uint64_t at_ms)
+{
+    if (s->len != 0) {
+        s->next_ms = at_ms;
+    }
+}
+
+uint32_t phone_wait_ms(uint64_t now_ms, uint64_t deadline, uint32_t max_ms)
+{
+    if (deadline <= now_ms) {
+        return 0;
+    }
+    uint64_t d = deadline - now_ms;
+    return d < max_ms ? (uint32_t)d : max_ms;
+}
+
 phone_vol_kind_t phone_volume_kind(sip_ua_call_state_t state, bool speaker)
 {
     switch (state) {

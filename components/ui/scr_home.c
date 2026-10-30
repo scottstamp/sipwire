@@ -150,14 +150,20 @@ static void tile_paint(home_t *h, tile_t *t)
     lv_obj_set_style_border_color(t->btn, c, 0);
 }
 
+/* Runs only while a tile rings (tile_update resumes it): no idle LVGL wake-ups otherwise. */
 static void blink_cb(lv_timer_t *timer)
 {
     home_t *h = lv_timer_get_user_data(timer);
     h->blink_on = !h->blink_on;
+    bool ringing = false;
     for (int i = 0; i < h->lay_n; i++) {
         if (h->tile[i].state == UI_BLF_RINGING) {
             tile_paint(h, &h->tile[i]);
+            ringing = true;
         }
+    }
+    if (!ringing) {
+        lv_timer_pause(timer);
     }
 }
 
@@ -446,6 +452,9 @@ static void tile_update(home_t *h, tile_t *t, const ui_blf_t *b)
     }
     t->state = b->state;
     tile_paint(h, t);
+    if (t->state == UI_BLF_RINGING && h->blink && lv_timer_get_paused(h->blink)) {
+        lv_timer_resume(h->blink);
+    }
 }
 
 static void home_update(const ui_model_t *m)

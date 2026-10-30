@@ -26,6 +26,11 @@ void keypad_scan_reset(keypad_scan_state_t *st)
     memset(st, 0, sizeof(*st));
 }
 
+bool keypad_scan_idle(const keypad_scan_state_t *st)
+{
+    return st->raw_prev == 0 && st->stable == 0;
+}
+
 size_t keypad_scan_step(keypad_scan_state_t *st, uint16_t raw_mask, uint32_t now_ms,
                         keypad_scan_event_t *out, size_t max)
 {

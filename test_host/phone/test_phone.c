@@ -172,6 +172,36 @@ static void test_dtmf_sequence_spacing(void)
     TEST_ASSERT_EQUAL(0, s.len);
 }
 
+static void test_dtmf_sequence_next_and_defer(void)
+{
+    phone_dtmf_seq_t s;
+    phone_dtmf_seq_clear(&s);
+    TEST_ASSERT_TRUE(UINT64_MAX == phone_dtmf_seq_next_ms(&s));      /* empty: no deadline */
+    phone_dtmf_seq_defer(&s, 500);                                  /* empty: no-op */
+    TEST_ASSERT_TRUE(UINT64_MAX == phone_dtmf_seq_next_ms(&s));
+    TEST_ASSERT_TRUE(phone_dtmf_seq_push(&s, "12"));
+    TEST_ASSERT_TRUE(phone_dtmf_seq_next_ms(&s) <= 1000);            /* due at once */
+    phone_dtmf_seq_defer(&s, 1020);                                 /* media busy */
+    TEST_ASSERT_EQUAL_CHAR(0, phone_dtmf_seq_due(&s, 1019));
+    TEST_ASSERT_EQUAL_CHAR('1', phone_dtmf_seq_due(&s, 1020));
+    phone_dtmf_seq_consume(&s, 1020);
+    TEST_ASSERT_TRUE(1020 + PHONE_DTMF_GAP_MS == phone_dtmf_seq_next_ms(&s));
+    phone_dtmf_seq_consume(&s, 1170);
+    TEST_ASSERT_TRUE(UINT64_MAX == phone_dtmf_seq_next_ms(&s));
+}
+
+static void test_wait_ms(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(0, phone_wait_ms(1000, 0, 2000));           /* overdue */
+    TEST_ASSERT_EQUAL_UINT32(0, phone_wait_ms(1000, 1000, 2000));        /* due now */
+    TEST_ASSERT_EQUAL_UINT32(1, phone_wait_ms(1000, 1001, 2000));
+    TEST_ASSERT_EQUAL_UINT32(1500, phone_wait_ms(1000, 2500, 2000));
+    TEST_ASSERT_EQUAL_UINT32(2000, phone_wait_ms(1000, 3000, 2000));     /* clamped */
+    TEST_ASSERT_EQUAL_UINT32(2000, phone_wait_ms(1000, UINT64_MAX, 2000)); /* none */
+    TEST_ASSERT_TRUE(5 == phone_deadline_min(5, UINT64_MAX));
+    TEST_ASSERT_TRUE(5 == phone_deadline_min(7, 5));
+}
+
 static void test_dtmf_event_fits_in_gap(void)
 {
     /* event frames + 3 end packets (20 ms each) must finish before the next start */
@@ -830,5 +860,7 @@ int main(void)
     RUN_TEST(test_blf_plan);
     RUN_TEST(test_build_model_blf_mwi);
     RUN_TEST(test_model_call_features);
+    RUN_TEST(test_dtmf_sequence_next_and_defer);
+    RUN_TEST(test_wait_ms);
     return UNITY_END();
 }

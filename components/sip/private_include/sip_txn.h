@@ -82,6 +82,8 @@ void sip_txn_layer_init(sip_txn_layer_t *l, const sip_txn_tu_t *tu);
 sip_txn_t *sip_txn_find(sip_txn_layer_t *l, uint32_t id);
 int sip_txn_count(const sip_txn_layer_t *l);
 void sip_txn_tick(sip_txn_layer_t *l, uint64_t now);
+/* Earliest armed retransmission / timeout of any transaction, UINT64_MAX if none. */
+uint64_t sip_txn_next_deadline(const sip_txn_layer_t *l);
 void sip_txn_terminate(sip_txn_t *t);
 
 /* Client: copy + send the request and arm timers. NULL if pool full or the

@@ -69,7 +69,10 @@ CONFIG_ESP_IPC_TASK_STACK_SIZE=2048
 
 # Power (components/power, docs/ARCHITECTURE.md "Power"): dynamic frequency scaling. The CPU
 # drops to CONFIG_SIPWIRE_POWER_MIN_CPU_MHZ (80) only with no call and the backlight off.
-# No automatic light sleep (FREERTOS_USE_TICKLESS_IDLE stays off).
 CONFIG_PM_ENABLE=y
 # Lock and mode counters: `power locks` shows the time spent at each CPU frequency.
 CONFIG_PM_PROFILING=y
+# Automatic light sleep (CONFIG_SIPWIRE_POWER_LIGHT_SLEEP, default y) needs tickless idle (it
+# selects PM_LIGHT_SLEEP_CALLBACKS: console wake-up, `power` sleep stats). The QEMU overlay
+# turns PM_ENABLE off, which drops them.
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y

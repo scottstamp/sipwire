@@ -6,6 +6,7 @@
  * Keys are indexed row-major, index = row * KEYPAD_COLS + col. Bit i of a raw
  * mask is 1 while key i reads pressed. */
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -42,6 +43,11 @@ typedef struct {
 
 /* Clear all state: nothing pressed. */
 void keypad_scan_reset(keypad_scan_state_t *st);
+
+/* True when nothing is pressed or settling: the last raw sample was all
+ * released and no key is debounced down. Steps would emit nothing until a key
+ * reads pressed again, so the caller may stop sampling and wait for one. */
+bool keypad_scan_idle(const keypad_scan_state_t *st);
 
 /* Feed one raw sample taken at now_ms (uint32 ms, wraps). Writes up to max
  * events to out and returns the total number generated. If the return value

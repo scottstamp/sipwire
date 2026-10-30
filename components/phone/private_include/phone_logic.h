@@ -157,6 +157,25 @@ char phone_dtmf_seq_due(const phone_dtmf_seq_t *s, uint64_t now_ms);
 /** Remove the due digit after it was sent; the next one is due GAP later. */
 void phone_dtmf_seq_consume(phone_dtmf_seq_t *s, uint64_t now_ms);
 
+/** When the next digit is due (<= now: already), UINT64_MAX when the queue is empty. */
+uint64_t phone_dtmf_seq_next_ms(const phone_dtmf_seq_t *s);
+
+/** The digit due now could not start yet (previous event still being sent): try again at
+ *  `at_ms` instead of on every pass. */
+void phone_dtmf_seq_defer(phone_dtmf_seq_t *s, uint64_t at_ms);
+
+/* ---- sip task wait ---------------------------------------------------------- */
+
+/** How long the sip task may block (ms) until `deadline` (absolute, UINT64_MAX = none):
+ *  0 when due, at most `max_ms` (safety net for anything without a deadline). */
+uint32_t phone_wait_ms(uint64_t now_ms, uint64_t deadline, uint32_t max_ms);
+
+/** Earlier of two absolute deadlines (UINT64_MAX = none). */
+static inline uint64_t phone_deadline_min(uint64_t a, uint64_t b)
+{
+    return a < b ? a : b;
+}
+
 /* ---- volume ----------------------------------------------------------------- */
 
 typedef enum {

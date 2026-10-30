@@ -77,15 +77,40 @@ int sip_udp_send(void *ctx, const sip_addr_t *to, const void *data, size_t len)
 
 int sip_udp_poll(sip_udp_t *u, sip_ua_t *ua, int timeout_ms)
 {
+    return sip_udp_poll_wake(u, ua, timeout_ms, -1);
+}
+
+int sip_udp_poll_wake(sip_udp_t *u, sip_ua_t *ua, int timeout_ms, int wake_fd)
+{
     fd_set rf;
     FD_ZERO(&rf);
-    FD_SET(u->fd, &rf);
+    int maxfd = -1;
+    if (u->fd >= 0) {
+        FD_SET(u->fd, &rf);
+        maxfd = u->fd;
+    }
+    if (wake_fd >= 0) {
+        FD_SET(wake_fd, &rf);
+        if (wake_fd > maxfd) {
+            maxfd = wake_fd;
+        }
+    }
+    if (timeout_ms < 0) {
+        timeout_ms = 0;
+    }
     struct timeval tv = { .tv_sec = timeout_ms / 1000, .tv_usec = (timeout_ms % 1000) * 1000 };
-    int r = select(u->fd + 1, &rf, NULL, NULL, &tv);
+    int r = select(maxfd + 1, &rf, NULL, NULL, &tv);
     if (r < 0) {
         return errno == EINTR ? 0 : SIP_ERR_TRANSPORT;
     }
     if (r == 0) {
+        return 0;
+    }
+    if (wake_fd >= 0 && FD_ISSET(wake_fd, &rf)) {
+        uint64_t v;
+        (void)!read(wake_fd, &v, sizeof(v));  /* eventfd: resets the counter */
+    }
+    if (u->fd < 0 || !FD_ISSET(u->fd, &rf) || ua == NULL) {
         return 0;
     }
     /* one byte more than the UA accepts so oversized datagrams are detected */

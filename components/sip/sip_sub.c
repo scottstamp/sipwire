@@ -625,6 +625,46 @@ void sipua_sub_tick(sip_ua_t *ua)
     }
 }
 
+/* Mirrors sipua_sub_tick: only conditions the tick acts on count. A start or
+ * refresh held back by SUB_MAX_INFLIGHT (or by not being registered) is not
+ * a deadline: the transaction or registration that ends the hold-back arrives
+ * as a packet or its own timer, after which the deadline is asked again. */
+uint64_t sipua_sub_next_deadline(const sip_ua_t *ua)
+{
+    bool registered = ua->reg.state == SIP_UA_REG_REGISTERED;
+    bool room = inflight(ua) < SUB_MAX_INFLIGHT;
+    uint64_t d = UINT64_MAX;
+    for (int i = 0; i < SIP_UA_MAX_SUBS; i++) {
+        const sub_t *s = &ua->subs[i];
+        uint64_t t = UINT64_MAX;
+        switch (s->st) {
+        case SUB_WAIT:
+            if (registered && room) {
+                t = s->t_retry;
+            }
+            break;
+        case SUB_ACTIVE:
+            if (s->txn) {
+                break;
+            }
+            t = s->t_expire;
+            if (room) {
+                uint64_t r = s->refresh_now ? 0 : s->t_refresh;
+                if (r < t) {
+                    t = r;
+                }
+            }
+            break;
+        default:
+            break;
+        }
+        if (t < d) {
+            d = t;
+        }
+    }
+    return d;
+}
+
 void sipua_sub_registered(sip_ua_t *ua)
 {
     for (int i = 0; i < SIP_UA_MAX_SUBS; i++) {

@@ -376,6 +376,8 @@ static int cmd_reboot(int argc, char **argv)
     return 0;
 }
 
+static void (*volatile s_input_hook)(void);
+
 /* linenoise ends the line on any read() <= 0, and the REPL's own reader does a
  * non-blocking read after select(), which can come back EAGAIN: the line got
  * split mid-command and both halves ran. Wait until a byte really arrives. */
@@ -389,6 +391,9 @@ static ssize_t console_read(int fd, void *buf, size_t max_bytes)
             return -1;
         }
         ssize_t n = read(fd, buf, max_bytes);
+        if (n > 0 && s_input_hook) {
+            s_input_hook();
+        }
         if (n > 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
             return n;
         }
@@ -396,6 +401,11 @@ static ssize_t console_read(int fd, void *buf, size_t max_bytes)
 }
 
 /* ---- public API ---- */
+
+void console_set_input_hook(void (*hook)(void))
+{
+    s_input_hook = hook;
+}
 
 esp_err_t console_register_command(const esp_console_cmd_t *cmd)
 {

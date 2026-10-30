@@ -425,6 +425,24 @@ void sip_txn_ack_2xx(sip_txn_t *t)
 /* ------------------------------------------------------------------ */
 /* timers                                                               */
 
+uint64_t sip_txn_next_deadline(const sip_txn_layer_t *l)
+{
+    uint64_t d = UINT64_MAX;
+    for (int i = 0; i < SIP_MAX_TXN; i++) {
+        const sip_txn_t *t = &l->pool[i];
+        if (t->id == 0) {
+            continue;
+        }
+        if (t->t_retx && t->t_retx < d) {
+            d = t->t_retx;
+        }
+        if (t->t_end && t->t_end < d) {
+            d = t->t_end;
+        }
+    }
+    return d;
+}
+
 void sip_txn_tick(sip_txn_layer_t *l, uint64_t now)
 {
     for (int i = 0; i < SIP_MAX_TXN; i++) {

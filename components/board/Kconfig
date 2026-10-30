@@ -236,8 +236,8 @@ menu "Sipwire board"
             help
                 Run the CPU at the minimum frequency below when no call exists and
                 the backlight is off; full speed otherwise. Wi-Fi modem sleep while
-                idle is separate (net) and always on. Automatic light sleep is never
-                used (docs/ARCHITECTURE.md "Power").
+                idle is separate (net) and always on. Light sleep: next option
+                (docs/ARCHITECTURE.md "Power").
         config SIPWIRE_POWER_MIN_CPU_MHZ
             int "Idle CPU frequency (MHz): 80, 160 or 240"
             depends on SIPWIRE_POWER_DFS
@@ -247,6 +247,29 @@ menu "Sipwire board"
                 Not below 80: under 80 MHz the CPU runs from XTAL and APB drops to
                 40 MHz, which changes the UART, LEDC (backlight PWM) and other
                 APB-clocked peripherals mid-operation.
+        config SIPWIRE_POWER_LIGHT_SLEEP
+            bool "Automatic light sleep while idle (screen off, no call)"
+            depends on SIPWIRE_POWER_DFS && FREERTOS_USE_TICKLESS_IDLE
+            select PM_LIGHT_SLEEP_CALLBACKS
+            default y
+            help
+                Let the chip light-sleep whenever both cores idle and nothing holds it
+                awake: never during a call (ringing included), while the backlight is
+                on or dimmed, or within SIPWIRE_POWER_CONSOLE_AWAKE_S of console input.
+                Wi-Fi stays associated in modem sleep and wakes for each DTIM beacon, so
+                an INVITE still arrives within one DTIM interval. Wake sources: keypad
+                columns and touch PENIRQ (GPIO, level low), console UART RX edges (the
+                characters that wake it are lost). Needs FREERTOS_USE_TICKLESS_IDLE.
+        config SIPWIRE_POWER_CONSOLE_AWAKE_S
+            int "Stay awake this long after console input (s)"
+            depends on SIPWIRE_POWER_LIGHT_SLEEP
+            range 5 3600
+            default 60
+            help
+                A character that arrives during light sleep only wakes the chip; it
+                is not received. After a UART wake-up or any console input, light
+                sleep stays off for this many seconds so the rest of the line and
+                the next commands get through.
     endmenu
 
     config SIPWIRE_QEMU
