@@ -14,6 +14,7 @@ ESP_EVENT_DECLARE_BASE(SIPWIRE_KEY_EVENT);
 ESP_EVENT_DECLARE_BASE(SIPWIRE_SETTINGS_EVENT);
 ESP_EVENT_DECLARE_BASE(SIPWIRE_OTA_EVENT);
 ESP_EVENT_DECLARE_BASE(SIPWIRE_BLF_EVENT);
+ESP_EVENT_DECLARE_BASE(SIPWIRE_DISPLAY_EVENT);
 
 /* SIPWIRE_NET_EVENT */
 typedef enum {
@@ -166,3 +167,8 @@ typedef struct {
     char ext[32];              /* SIPWIRE_BLF_EXT_MAX */
     blf_state_t state;
 } blf_event_state_t;
+
+/* SIPWIRE_DISPLAY_EVENT — screen state (emitted by display) */
+typedef enum {
+    DISPLAY_EVENT_BACKLIGHT,   /* bool: true while lit or dimmed, false once off; on change */
+} display_event_id_t;

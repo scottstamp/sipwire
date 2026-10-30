@@ -329,6 +329,10 @@ full speed). Both drop when the phone is idle again.
   it. Possible later steps, in order: ILI9341 SLPIN while the backlight is off (a few mA,
   needs the LVGL lock around the panel commands), then light sleep only with the backlight
   off and no call, keypad as a GPIO wake source, behind a setting defaulting off.
+- **Status LED** (`components/status_led`): the RMT channel is enabled only around each
+  ~30 us WS2812 frame (an enabled RMT TX channel holds a CPU_FREQ_MAX lock, which pinned DFS
+  at 240 MHz). While the backlight is off (`SIPWIRE_DISPLAY_EVENT` / `DISPLAY_EVENT_BACKLIGHT`)
+  the LED is dark and its 20 ms pattern timer is stopped, except for an incoming call.
 - **Console `power`**: current CPU MHz, DFS range, active holds (`call`, `display`), Wi-Fi
   power save mode; `power locks` dumps the IDF PM lock table (`esp_pm_dump_locks`) and, with
   `CONFIG_PM_PROFILING`, the time spent in each mode since boot (CPU_MAX = 240 MHz, APB_MIN /

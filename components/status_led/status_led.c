@@ -3,6 +3,7 @@
 #include "board.h"
 #include "driver/rmt_encoder.h"
 #include "driver/rmt_tx.h"
+#include <stdatomic.h>
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -24,6 +25,7 @@ static struct {
     sl_state_t st;                       /* written by event handler, read by timer */
     sl_rgb_t shown;
     bool shown_valid;
+    atomic_bool dark;                    /* backlight off: LED off except for an incoming call */
 } s = {
     .st = { .booting = true, .net = SL_NET_DOWN, .reg = SL_REG_NONE, .call = SL_CALL_IDLE },
 };
@@ -52,9 +54,30 @@ static void show(sl_rgb_t c)
     rmt_disable(s.chan);
 }
 
+static bool want_running(void)
+{
+    return !atomic_load(&s.dark) || s.st.call == SL_CALL_INCOMING;
+}
+
+/* (Re)start the pattern timer when the LED should show something. Called after the state
+ * it depends on changed; a timer that is already running is left alone. */
+static void wake(void)
+{
+    if (s.timer && want_running()) {
+        esp_timer_start_periodic(s.timer, TICK_MS * 1000);     /* ESP_ERR_INVALID_STATE if running */
+    }
+}
+
 static void tick_cb(void *arg)
 {
     (void)arg;
+    if (!want_running()) {
+        /* screen off and no incoming call: LED off, and no 50 Hz wakeups while dark */
+        show((sl_rgb_t){ 0, 0, 0 });
+        esp_timer_stop(s.timer);
+        wake();                          /* lit again meanwhile: keep going */
+        return;
+    }
     sl_state_t st = s.st;
     show(sl_pattern(&st, (uint32_t)(esp_timer_get_time() / 1000), MAX_LEVEL));
 }
@@ -88,7 +111,10 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         case CALL_HELD:        s.st.call = SL_CALL_HELD; break;
         default:               s.st.call = SL_CALL_IDLE; break;
         }
+    } else if (base == SIPWIRE_DISPLAY_EVENT && id == DISPLAY_EVENT_BACKLIGHT && data) {
+        atomic_store(&s.dark, !*(const bool *)data);
     }
+    wake();
 }
 
 esp_err_t status_led_init(void)
@@ -126,6 +152,8 @@ esp_err_t status_led_init(void)
                         TAG, "sip events");
     ESP_RETURN_ON_ERROR(esp_event_handler_register(SIPWIRE_CALL_EVENT, ESP_EVENT_ANY_ID, on_event, NULL),
                         TAG, "call events");
+    ESP_RETURN_ON_ERROR(esp_event_handler_register(SIPWIRE_DISPLAY_EVENT, ESP_EVENT_ANY_ID, on_event, NULL),
+                        TAG, "display events");
 
     const esp_timer_create_args_t targs = { .callback = tick_cb, .name = "status_led" };
     ESP_RETURN_ON_ERROR(esp_timer_create(&targs, &s.timer), TAG, "timer");

@@ -107,7 +107,15 @@ static void bl_set_duty(uint32_t pct)
  * as lit. */
 static void bl_apply_locked(void)
 {
-    power_hold(POWER_HOLD_DISPLAY, s.bl_state != BL_OFF);
+    bool lit = s.bl_state != BL_OFF;
+    power_hold(POWER_HOLD_DISPLAY, lit);
+    static int8_t s_lit_posted = -1;    /* last DISPLAY_EVENT_BACKLIGHT value (-1: none yet) */
+    if (s_lit_posted != (int8_t)lit) {
+        /* status LED: dark while the screen is off (night) */
+        if (esp_event_post(SIPWIRE_DISPLAY_EVENT, DISPLAY_EVENT_BACKLIGHT, &lit, sizeof(lit), 0) == ESP_OK) {
+            s_lit_posted = (int8_t)lit;
+        }
+    }
     switch (s.bl_state) {
     case BL_ON:
         bl_set_duty(s.bl_pct);
