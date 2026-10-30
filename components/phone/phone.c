@@ -1771,6 +1771,12 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     } else if (base == SIPWIRE_NET_EVENT && id == NET_EVENT_DISCONNECTED) {
         atomic_store(&s.net_ip, 0);     /* no new UA until the next GOT_IP */
         notify_sip_task(NOTIFY_NET_DOWN);
+    } else if (base == SIPWIRE_NET_EVENT && id == NET_EVENT_LINK_WARN && data) {
+        /* weak Wi-Fi during a call: beep in the earpiece (audio ignores it without a call
+         * stream). A roam or reconnect with the same IP keeps the call (on_net_up). */
+        if (((const net_event_link_warn_t *)data)->weak) {
+            audio_play_alert(AUDIO_ALERT_WEAK_SIGNAL);
+        }
     } else if (base == SIPWIRE_SETTINGS_EVENT && id == SETTINGS_EVENT_CHANGED) {
         notify_sip_task(NOTIFY_SETTINGS);
     }

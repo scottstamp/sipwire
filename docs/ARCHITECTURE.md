@@ -17,7 +17,7 @@ components/
                      SUBSCRIBE/NOTIFY for BLF (dialog) and MWI (message-summary)
   power/             DFS policy (esp_pm, CPU_FREQ_MAX holds: call, display), console `power`
   cli/               serial REPL (esp_console): cfg/wifi/ip/free/tasks; console_register_command()
-  net/               wifi manager, reconnect, SNTP, mDNS (optional)
+  net/               wifi manager, reconnect, roaming, weak-signal warning (console `wlan`)
   storage/           NVS config (settings)
   directory/         contacts (200), speed dial (keys 2-9), call history (100) on the `storage`
                      FAT partition (wear-levelled, /data; contacts.csv, speed.csv, history.bin,
@@ -243,6 +243,11 @@ mic → I2S RX (16 kHz) → DC block → AEC → mute → rtp: G.722 enc
 RTP rx → jitter buf → G.722 dec, or G.711 dec → ↑2 → mixer (+ tones, 16 kHz)
        → gain/soft clip → I2S TX → amp
 
+Alerts (`audio_play_alert`, so far `AUDIO_ALERT_WEAK_SIGNAL`) have a tone generator of their
+own in `tx_task`, mixed after the source and the tone: they never replace a looping tone
+(call waiting) and play only in a stream with callbacks (a call), at 0.15 FS before volume.
+Speaker side only: the far end never hears them (the AEC reference includes them).
+
 ### Echo canceller (`components/aec` + `audio_aec.c`, setting `aec`, console `aec`)
 SpeexDSP 1.2.1 (BSD-3, vendored unmodified in `components/aec/speexdsp`, see its
 README): the MDF echo canceller (partitioned frequency-domain adaptive filter,
@@ -307,6 +312,58 @@ worst frame is close to the average (icount max ~1.3-1.7 M instructions, ~7-9 ms
 QEMU runs the same code on a silent mic.
 Codec preference (settings `codec_pref`): G.722 > PCMU > PCMA. On the wire all
 three are 64 kbit/s with an 8000 Hz RTP clock (RFC 3551, G.722 included).
+
+## Wi-Fi link (`components/net`, board Kconfig "Wi-Fi roaming and range warning", console `wlan`)
+- **Connect**: every connect (boot, reconnect, new credentials) is `WIFI_ALL_CHANNEL_SCAN` +
+  `WIFI_CONNECT_AP_BY_SIGNAL`: the strongest AP of the SSID, not the first one found. Scan
+  dwell (`esp_wifi_set_scan_parameters`, also used by the connect scan): active 30 ms per
+  empty channel, 70 ms where an AP answered (default: 120 ms flat), so a full 2.4 GHz scan
+  is ~0.5-0.9 s. A lost link is retried at once, then 1 s, 2 s, ... 30 s (2 s during calls).
+- **Roaming** (`SIPWIRE_WIFI_ROAM`, default on; pure policy `net_policy.c`, host-tested in
+  `test_host/net`): the RSSI of the current AP is sampled every 10 s (2 s during calls).
+  Below `SIPWIRE_WIFI_ROAM_RSSI` (-70 dBm idle) or `SIPWIRE_WIFI_ROAM_CALL_RSSI` (-80 dBm
+  during a call: a scan delays packets by up to 60 ms per channel and a roam pauses the
+  audio) a background scan for the SSID runs (30-60 ms per channel, 30 ms back home in
+  between), at most every `SIPWIRE_WIFI_ROAM_SCAN_INTERVAL` (30 s); a scan that finds nothing
+  `SIPWIRE_WIFI_ROAM_DELTA` (8 dB) stronger than the current AP (the stronger of the driver's
+  and the scan's reading) doubles the interval, up to 8x (single-AP homes: one scan per
+  4 min while weak). A better AP is joined directly: `esp_wifi_disconnect`, then the
+  STA_DISCONNECTED handler connects with that BSSID + channel and `WIFI_FAST_SCAN` (one
+  channel); a failure falls back to the normal all-channel connect.
+  Not used: the IDF roaming app (`ESP_WIFI_ENABLE_ROAMING_APP`): it does its own reconnect on
+  every disconnect (racing ours), takes the one RSSI threshold the driver has, scans
+  periodically from -50 dBm regardless of calls and allocates in the supplicant task; its
+  legacy roam is the same disconnect + directed connect done here.
+- **802.11v** (`SIPWIRE_WIFI_BTM`, default on, selects `ESP_WIFI_11KV_SUPPORT`;
+  `ESP_WIFI_RRM_SUPPORT` off in sdkconfig.defaults: 802.11k beacon report requests would scan
+  during calls): `btm_enabled` in the STA config, so a mesh / managed network can steer the
+  handset with a BSS transition request instead of kicking it. The supplicant does
+  disconnect + directed connect itself (`WIFI_REASON_BSS_TRANSITION_DISASSOC`); net only
+  arms a 3 s safety retry. **802.11r** (`SIPWIRE_WIFI_FT`, default off, untested): saves
+  only the 4-way handshake (tens of ms) and some APs mishandle FT clients.
+- **Gap** (link down until the IP is back; logged as "link was down N ms (associated after
+  M ms)", last value in `wlan`): disconnect + one-channel scan (<= 70 ms) + auth/assoc/4-way
+  (~50-100 ms) + DHCP (DISCOVER..ACK, a few round trips: the netif drops its address on every
+  disconnect). `LWIP_DHCP_DOES_NOT_CHECK_OFFERED_IP` (sdkconfig.defaults) skips the 500 ms
+  ARP probe lwIP otherwise does after each ACK: estimated 0.2-0.4 s per roam, to be measured
+  on the handset. The same DHCP lease comes back (same MAC, same LAN), so the sockets (bound
+  to INADDR_ANY) keep working: `phone.c` `on_net_up` keeps a call when the IP is unchanged
+  (only a REGISTER refresh via `sip_ua_set_local_addr`); idle, it rebuilds the UA (fresh
+  REGISTER + subscriptions, ~a few round trips). RTP/SIP sends during the gap fail silently
+  (counted, retransmitted by the SIP timers).
+- **Weak-signal warning** (`SIPWIRE_WIFI_RANGE_WARN`, default on): while a call exists
+  (`net_set_low_latency(true)`), two consecutive 2 s samples below `SIPWIRE_WIFI_WARN_RSSI`
+  (-75 dBm; no connection at all counts as weak) post `NET_EVENT_LINK_WARN` (weak) and log
+  "weak signal during a call"; repeated every `SIPWIRE_WIFI_WARN_INTERVAL` (10 s) until the
+  RSSI is back at -75 + `SIPWIRE_WIFI_WARN_HYST` (5) = -70 dBm or better (posted with weak =
+  false). `phone.c` plays `AUDIO_ALERT_WEAK_SIGNAL` (two 70 ms 1.4 kHz beeps, earpiece only)
+  for each weak event. `wlan warn -40` raises the threshold until reboot to hear it at a desk.
+- **Cost** (`idf.py size`, all of the above vs before): flash +18.3 KB (code +15.1 KB, rodata
+  +3.2 KB), internal RAM static +240 B (.data +64, .bss +176), IRAM 0. Of that, 802.11v
+  (supplicant WNM code): flash +7.2 KB, RAM +96 B; 802.11r if enabled: another +6.5 KB flash,
+  +224 B .bss. Runtime: no new tasks or buffers; scan results are read one record at a time
+  (SSID-filtered scan) and freed at once; the second tone generator is ~70 B of `audio_tx`
+  stack.
 
 ## Power (`components/power`, `net`, console `power`)
 Rule: nothing that saves power may run while a call exists. `phone.c` `update_power()` runs
@@ -425,7 +482,8 @@ full speed, no light sleep). Both drop when the phone is idle again.
     minute the clock only. A model whose only change is the RSSI (every 10 s) updates the
     status bar alone (it redraws only on a new bar count); only Settings (About shows dBm)
     still gets the screen update.
-  - Left: net RSSI every 10 s (Wi-Fi driver call; the UI ignores it while dark), LVGL's 2 s
+  - Left: net RSSI every 10 s (Wi-Fi driver call; the UI ignores it while dark; 2 s during
+    calls, the event stays at 10 s), LVGL's 2 s
     max sleep, SNTP, Wi-Fi beacons.
 - **Automatic light sleep** (`power`, board Kconfig `SIPWIRE_POWER_LIGHT_SLEEP`, **default n**:
   on the handset, after the chip had light-slept once, answering or ending a call sometimes

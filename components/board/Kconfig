@@ -255,6 +255,89 @@ menu "Sipwire board"
             default -1
     endmenu
 
+    menu "Wi-Fi roaming and range warning (components/net)"
+        config SIPWIRE_WIFI_ROAM
+            bool "Roam to a stronger access point of the same network"
+            default y
+            help
+                Every (re)connect scans all channels and joins the strongest AP of the
+                SSID (WIFI_ALL_CHANNEL_SCAN, sorted by signal). While connected, an RSSI
+                below the thresholds below starts a background scan for the SSID; an AP
+                at least SIPWIRE_WIFI_ROAM_DELTA dB stronger than the current one is
+                joined directly (BSSID + channel known: no full scan). A roam is a short
+                disconnect: audio pauses for the reassociation + DHCP (~0.2-0.5 s); the
+                IP stays the same, so calls and the SIP registration survive. A scan that
+                finds nothing better doubles the scan interval (up to 8x): a single-AP
+                home scans rarely. Off: the connect still picks the strongest AP.
+        config SIPWIRE_WIFI_ROAM_RSSI
+            int "Look for a stronger AP below this RSSI while idle (dBm)"
+            depends on SIPWIRE_WIFI_ROAM
+            range -95 -40
+            default -70
+        config SIPWIRE_WIFI_ROAM_CALL_RSSI
+            int "Look for a stronger AP below this RSSI during a call (dBm)"
+            depends on SIPWIRE_WIFI_ROAM
+            range -95 -40
+            default -80
+            help
+                Lower than the idle threshold: a scan during a call delays packets by up
+                to ~60 ms per channel and a roam pauses the audio, so only a really poor
+                link (lost packets) is worth it.
+        config SIPWIRE_WIFI_ROAM_DELTA
+            int "Roam only to an AP at least this much stronger (dB)"
+            depends on SIPWIRE_WIFI_ROAM
+            range 3 30
+            default 8
+        config SIPWIRE_WIFI_ROAM_SCAN_INTERVAL
+            int "Seconds between roam scans while the signal is weak"
+            depends on SIPWIRE_WIFI_ROAM
+            range 10 600
+            default 30
+        config SIPWIRE_WIFI_BTM
+            bool "Follow AP steering (802.11v BSS transition management)"
+            default y
+            select ESP_WIFI_11KV_SUPPORT
+            help
+                Mesh / managed Wi-Fi systems ask clients to move to a better AP with a BSS
+                transition request; without 802.11v they disconnect (kick) the client
+                instead. The supplicant then reconnects to the AP the network named.
+                802.11k radio measurements stay off (CONFIG_ESP_WIFI_RRM_SUPPORT in
+                sdkconfig.defaults): beacon report requests would scan during calls.
+        config SIPWIRE_WIFI_FT
+            bool "802.11r fast transition (FT-PSK)"
+            default n
+            select ESP_WIFI_11R_SUPPORT
+            help
+                Only for networks with 802.11r enabled: skips the 4-way handshake when
+                roaming within the mobility domain (saves a few tens of ms). Not tested on
+                the handset; some APs mishandle FT clients.
+        config SIPWIRE_WIFI_RANGE_WARN
+            bool "Warning beep during calls when the Wi-Fi signal is weak"
+            default y
+            help
+                Like a DECT handset near the edge of range: while a call exists and the
+                RSSI stays below SIPWIRE_WIFI_WARN_RSSI (two samples, 2 s apart; no
+                connection at all counts as weak), two short quiet beeps play in the
+                earpiece (not sent to the far end), repeated every
+                SIPWIRE_WIFI_WARN_INTERVAL seconds until the RSSI is back to
+                SIPWIRE_WIFI_WARN_RSSI + SIPWIRE_WIFI_WARN_HYST or better.
+        config SIPWIRE_WIFI_WARN_RSSI
+            int "Weak signal below this RSSI (dBm)"
+            depends on SIPWIRE_WIFI_RANGE_WARN
+            range -95 -50
+            default -75
+        config SIPWIRE_WIFI_WARN_HYST
+            int "Hysteresis back to normal (dB)"
+            depends on SIPWIRE_WIFI_RANGE_WARN
+            range 1 20
+            default 5
+        config SIPWIRE_WIFI_WARN_INTERVAL
+            int "Repeat the warning every (seconds)"
+            depends on SIPWIRE_WIFI_RANGE_WARN
+            range 4 120
+            default 10
+    endmenu
+
     menu "Power (components/power)"
         config SIPWIRE_WIFI_LISTEN_INTERVAL
             int "Wi-Fi listen interval while idle (beacons; 1 = every DTIM)"
