@@ -10,6 +10,7 @@
 #include "console.h"
 #include "dir_core.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 static const char *TAG = "directory";
@@ -33,9 +34,17 @@ static void print_contacts(const dir_contact_t *c, size_t n)
     }
 }
 
+/* Listing / import buffers (up to 24 KB, only while a command runs): PSRAM when there is some.
+ * Plain malloc would take internal RAM for anything under the 16 KB SPIRAM_MALLOC_ALWAYSINTERNAL
+ * threshold, e.g. the contact (12.8 KB) and history (8.8 KB) listings. */
+static void *console_alloc(size_t size)
+{
+    return heap_caps_malloc_prefer(size, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, MALLOC_CAP_8BIT);
+}
+
 static dir_contact_t *alloc_contacts(void)
 {
-    return malloc(DIR_CONTACTS_MAX * sizeof(dir_contact_t));
+    return console_alloc(DIR_CONTACTS_MAX * sizeof(dir_contact_t));
 }
 
 /* Reads one byte from the console; false on timeout. The REPL's stdin is non-blocking. */
@@ -53,7 +62,7 @@ static bool console_getc(char *c, int timeout_s)
 
 static int contact_import(void)
 {
-    char *text = malloc(IMPORT_MAX + 1);
+    char *text = console_alloc(IMPORT_MAX + 1);
     if (text == NULL) {
         printf("out of memory\n");
         return 1;
@@ -233,7 +242,7 @@ static int cmd_history(int argc, char **argv)
         printf("usage: history [clear | seen | add <in|out> <answered|missed|rejected|dnd> <number> [secs]]\n");
         return 1;
     }
-    dir_call_t *c = malloc(DIR_HISTORY_MAX * sizeof(*c));
+    dir_call_t *c = console_alloc(DIR_HISTORY_MAX * sizeof(*c));
     if (c == NULL) {
         return 1;
     }

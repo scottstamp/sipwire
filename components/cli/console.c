@@ -344,9 +344,11 @@ static int cmd_tasks(int argc, char **argv)
 #if CONFIG_FREERTOS_USE_TRACE_FACILITY && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
 #define CPU_MAX_TASKS 40
 
+/* Two of these (~1.6 KB each) are held for the whole sampling window: PSRAM when there is some. */
 static TaskStatus_t *cpu_snapshot(UBaseType_t *n, configRUN_TIME_COUNTER_TYPE *total)
 {
-    TaskStatus_t *st = calloc(CPU_MAX_TASKS, sizeof(*st));
+    TaskStatus_t *st = heap_caps_calloc_prefer(CPU_MAX_TASKS, sizeof(*st), 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                               MALLOC_CAP_8BIT);
     if (st != NULL) {
         *n = uxTaskGetSystemState(st, CPU_MAX_TASKS, total);
     }
