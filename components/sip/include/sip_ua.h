@@ -302,6 +302,14 @@ uint64_t sip_ua_next_deadline_ms(const sip_ua_t *ua);
 /* Feed one received datagram. Malformed or oversized input is dropped. */
 void sip_ua_on_packet(sip_ua_t *ua, const void *data, size_t len, const sip_addr_t *from);
 
+/* Zero-copy receive (what sip_udp_poll does): receive straight into the
+ * UA's own buffer, then hand over the length. *cap is one byte more than the
+ * largest datagram accepted, so a receive that fills the buffer is known to
+ * be oversized (and dropped). Use only between UA calls, never from a
+ * callback: the buffer holds the message being processed. */
+char *sip_ua_rx_buffer(sip_ua_t *ua, size_t *cap);
+void sip_ua_on_rx(sip_ua_t *ua, size_t len, const sip_addr_t *from);
+
 /* Start registering and keep the registration refreshed (and retried with
  * backoff on failure) until sip_ua_unregister(). */
 sip_err_t sip_ua_register(sip_ua_t *ua);

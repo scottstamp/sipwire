@@ -1768,6 +1768,83 @@ static void test_long_contact_keeps_remote_target(void)
     TEST_ASSERT_EQUAL_STRING("BYE sip:asterisk@10.0.0.1:5060 SIP/2.0", strtok(strcpy(sbuf, f->sent[bye].buf), "\r"));
 }
 
+/* ------------------------------------------------ zero-copy receive path */
+
+/* OPTIONS padded (X-Pad) to exactly len bytes, written to out */
+static size_t padded_options(char *out, size_t len)
+{
+    const char *head = "OPTIONS sip:1001@10.0.0.2:5060 SIP/2.0\r\n"
+                       "Via: SIP/2.0/UDP 10.0.0.1:5060;rport;branch=z9hG4bKpad\r\n"
+                       "From: <sip:asterisk@10.0.0.1>;tag=p1\r\nTo: <sip:1001@10.0.0.2>\r\n"
+                       "Call-ID: pad@x\r\nCSeq: 1 OPTIONS\r\nContent-Length: 0\r\nX-Pad: ";
+    size_t h = strlen(head);
+    TEST_ASSERT_TRUE(len > h + 4);
+    memcpy(out, head, h);
+    memset(out + h, 'a', len - h - 4);
+    memcpy(out + len - 4, "\r\n\r\n", 4);
+    return len;
+}
+
+static void test_rx_buffer_in_place(void)
+{
+    fx_init(f, NULL);
+    size_t cap = 0;
+    char *rx = sip_ua_rx_buffer(f->ua, &cap);
+    TEST_ASSERT_NOT_NULL(rx);
+    TEST_ASSERT_EQUAL(SIP_MAX_MSG_IN + 1, cap);
+    /* largest accepted datagram */
+    sip_ua_on_rx(f->ua, padded_options(rx, SIP_MAX_MSG_IN), &f->server);
+    TEST_ASSERT_EQUAL(1, fx_count(f, "SIP/2.0 200"));
+    /* one byte more (the buffer is full): dropped, no write past it */
+    fx_clear_sent(f);
+    rx = sip_ua_rx_buffer(f->ua, &cap);
+    sip_ua_on_rx(f->ua, padded_options(rx, cap), &f->server);
+    sip_ua_on_rx(f->ua, cap + 100, &f->server); /* a caller bug is clamped */
+    TEST_ASSERT_EQUAL(0, f->n_sent);
+    /* sip_ua_on_packet still copies (also from the rx buffer itself) */
+    static char big[SIP_MAX_MSG_IN + 64];
+    sip_ua_on_packet(f->ua, big, padded_options(big, sizeof(big)), &f->server);
+    TEST_ASSERT_EQUAL(0, f->n_sent);
+    size_t n = padded_options(big, 600);
+    sip_ua_on_packet(f->ua, big, n, &f->server);
+    TEST_ASSERT_EQUAL(1, fx_count(f, "SIP/2.0 200"));
+    rx = sip_ua_rx_buffer(f->ua, &cap);
+    memcpy(rx, big, n);
+    sip_ua_on_packet(f->ua, rx, n, &f->server);
+    TEST_ASSERT_EQUAL(2, fx_count(f, "SIP/2.0 200")); /* retransmission: same response */
+}
+
+static void any_source_cfg(sip_ua_config_t *c)
+{
+    c->accept_any_source = true;
+}
+
+/* sip_udp_poll receives straight into the UA buffer (loopback socket). */
+static void test_udp_poll_into_ua(void)
+{
+    fx_init(f, any_source_cfg);
+    sip_udp_t u, tx;
+    TEST_ASSERT_EQUAL(SIP_OK, sip_udp_open(&u, 0));
+    TEST_ASSERT_EQUAL(SIP_OK, sip_udp_open(&tx, 0));
+    sip_addr_t to = { 0x7f000001, u.port };
+    static char big[SIP_MAX_MSG_IN + 64];
+    size_t n = padded_options(big, 700);
+    TEST_ASSERT_EQUAL(0, sip_udp_send(&tx, &to, big, n));
+    TEST_ASSERT_EQUAL(1, sip_udp_poll(&u, f->ua, 1000));
+    TEST_ASSERT_EQUAL(1, fx_count(f, "SIP/2.0 200"));
+    /* oversized: fed (and dropped by the UA) */
+    TEST_ASSERT_EQUAL(0, sip_udp_send(&tx, &to, big, padded_options(big, sizeof(big))));
+    TEST_ASSERT_EQUAL(1, sip_udp_poll(&u, f->ua, 1000));
+    TEST_ASSERT_EQUAL(1, f->n_sent);
+    /* exactly the limit still works */
+    fx_clear_sent(f);
+    TEST_ASSERT_EQUAL(0, sip_udp_send(&tx, &to, big, padded_options(big, SIP_MAX_MSG_IN)));
+    TEST_ASSERT_EQUAL(1, sip_udp_poll(&u, f->ua, 1000));
+    TEST_ASSERT_EQUAL(1, fx_count(f, "SIP/2.0 200"));
+    sip_udp_close(&tx);
+    sip_udp_close(&u);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1830,5 +1907,7 @@ int main(void)
     RUN_TEST(test_outgoing_timer_c);
     RUN_TEST(test_timer_c_restarted_by_1xx);
     RUN_TEST(test_long_contact_keeps_remote_target);
+    RUN_TEST(test_rx_buffer_in_place);
+    RUN_TEST(test_udp_poll_into_ua);
     return UNITY_END();
 }

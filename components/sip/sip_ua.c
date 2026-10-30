@@ -2155,38 +2155,33 @@ uint64_t sip_ua_next_deadline_ms(const sip_ua_t *ua)
     return d;
 }
 
-void sip_ua_on_packet(sip_ua_t *ua, const void *data, size_t len, const sip_addr_t *from)
+/* A datagram of len bytes is in ua->rx (len <= sizeof(ua->rx); more than
+ * SIP_MAX_MSG_IN means oversized). Called inside sipua_enter/leave. */
+static void rx_process(sip_ua_t *ua, size_t len, const sip_addr_t *from)
 {
-    if (!ua || !data || !from || ua->destroy_pending) {
-        return;
-    }
-    sipua_enter(ua);
-    const char *p = data;
+    const char *p = ua->rx;
     size_t i = 0;
     while (i < len && (p[i] == '\r' || p[i] == '\n' || p[i] == ' ')) {
         i++;
     }
     if (i == len) {
-        sipua_leave(ua); /* keepalive ping/pong (RFC 5626 §4.4.1) */
-        return;
+        return; /* keepalive ping/pong (RFC 5626 §4.4.1) */
     }
+    /* IP only, not the port: any socket on the server host is trusted */
     if (!ua->any_source && from->ip != ua->server.ip) {
         LOGD("ignoring datagram from a non-server address");
-        sipua_leave(ua);
         return;
     }
     if (len > SIP_MAX_MSG_IN) {
-        LOGW("dropping oversized datagram (%u bytes)", (unsigned)len);
-        sipua_leave(ua);
+        /* checked before the terminator below: rx has SIP_MAX_MSG_IN + 1 bytes */
+        LOGW("dropping oversized datagram (> %u bytes)", (unsigned)SIP_MAX_MSG_IN);
         return;
     }
-    memcpy(ua->rx, data, len);
     ua->rx[len] = '\0';
     sipua_log_msg(ua, "recv", ua->rx, len, from);
     sip_msg_t *m = &ua->msg;
     if (sip_msg_parse(m, ua->rx, len) != SIP_PARSE_OK) {
         LOGW("dropping malformed message (%u bytes)", (unsigned)len);
-        sipua_leave(ua);
         return;
     }
     if (m->is_request) {
@@ -2194,6 +2189,36 @@ void sip_ua_on_packet(sip_ua_t *ua, const void *data, size_t len, const sip_addr
     } else if (!sip_txn_on_response(&ua->txl, ua->now, m)) {
         LOGD("stray %d response dropped", m->status);
     }
+}
+
+void sip_ua_on_packet(sip_ua_t *ua, const void *data, size_t len, const sip_addr_t *from)
+{
+    if (!ua || !data || !from || ua->destroy_pending) {
+        return;
+    }
+    sipua_enter(ua);
+    /* an oversized datagram only needs to be recognised as such */
+    size_t n = len < sizeof(ua->rx) ? len : sizeof(ua->rx);
+    memmove(ua->rx, data, n);
+    rx_process(ua, n, from);
+    sipua_leave(ua);
+}
+
+char *sip_ua_rx_buffer(sip_ua_t *ua, size_t *cap)
+{
+    if (cap) {
+        *cap = sizeof(ua->rx);
+    }
+    return ua->rx;
+}
+
+void sip_ua_on_rx(sip_ua_t *ua, size_t len, const sip_addr_t *from)
+{
+    if (!ua || !from || ua->destroy_pending) {
+        return;
+    }
+    sipua_enter(ua);
+    rx_process(ua, len < sizeof(ua->rx) ? len : sizeof(ua->rx), from);
     sipua_leave(ua);
 }
 

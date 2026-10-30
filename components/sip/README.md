@@ -98,7 +98,8 @@ Functions return `sip_err_t` (0 / negative) because the core cannot depend on
 
 ### API summary
 
-* lifecycle: `sip_ua_create`, `sip_ua_destroy`, `sip_ua_tick`, `sip_ua_on_packet`,
+* lifecycle: `sip_ua_create`, `sip_ua_destroy`, `sip_ua_tick`, `sip_ua_on_packet`
+  (or zero-copy `sip_ua_rx_buffer` + `sip_ua_on_rx`),
   `sip_ua_next_deadline_ms` (earliest timer: retransmissions, transaction timers,
   re-REGISTER / retry / keepalive, subscription refresh / retry / expiry, call cleanup,
   hold re-INVITE, REFER timeout; host tests check it on every tick of every test)
@@ -238,7 +239,9 @@ on the device it lands in PSRAM). No allocation afterwards. Message buffers
 live in the UA, so stack frames stay small (largest ≈ 1 KB for a parsed SDP
 answer or dialog-info document, plus vsnprintf); a 6 KB sip task stack is
 plenty (log callback not included).
-`sip_udp_poll` uses a static 2 KB receive buffer (one sip task).
+`sip_udp_poll` receives straight into the UA's own 2 KB receive buffer
+(`sip_ua_rx_buffer` / `sip_ua_on_rx`; no static copy buffer, so no internal
+RAM); `sip_ua_on_packet` copies into the same buffer.
 Limits: 2048 B in (larger datagrams are dropped), 1500 B out, 8 Via / Route /
 Contact entries per message, 64 header lines. A request whose response cannot
 be built (Via / From / Call-ID over the 800 B template, To or Record-Route too
@@ -283,7 +286,7 @@ Host (`tools/ci.sh host-test`, needs `IDF_PATH` for Unity), under ASan/UBSan:
   re-INVITE hold (remote and local), delayed offer, G.722 offer/answer and
   codec preference config, callback re-entrancy, pool slots of requests that
   cannot be answered, 200 too big → 500, unanswered call → 480, timer C,
-  unanswered CANCEL.
+  unanswered CANCEL, zero-copy receive (also `sip_udp_poll` on loopback).
 * `test_sip_sub` — SUBSCRIBE/401/200/NOTIFY, NOTIFY before the 2xx, refresh
   timing (granted / shortened expires), terminated + noresource / probation +
   retry-after / deactivated, 404 backoff to 5 min, 503 Retry-After, 481 to a
