@@ -1251,7 +1251,9 @@ static void on_reinvite_response(sip_ua_t *ua, call_t *c, sip_txn_t *t, const si
         if (c->st != CS_CONFIRMED) {
             return;
         }
-        sip_dialog_set_target(&c->dlg, m);
+        if (sip_dialog_set_target(&c->dlg, m) != 0 && m->n_contact > 0) {
+            LOGW("call %d: unusable Contact in re-INVITE 2xx, keeping remote target", c->handle);
+        }
         bool changed = c->local_hold != c->reinv_hold;
         c->local_hold = c->reinv_hold;
         if (is_sdp(m) && !apply_answer(ua, c, m, false)) {
@@ -1606,7 +1608,9 @@ static void on_reinvite(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const si
     t->owner = OWN_SERVER_INVITE;
     t->owner_ref = c->handle;
     c->uas_inv_txn = t->id;
-    sip_dialog_set_target(&c->dlg, m);
+    if (sip_dialog_set_target(&c->dlg, m) != 0 && m->n_contact > 0) {
+        LOGW("call %d: unusable Contact in re-INVITE, keeping remote target", c->handle);
+    }
     c->have_offer = false;
     if (is_sdp(m)) {
         if (sip_sdp_parse(&c->offer, m->body.p, m->body.len) != 0) {

@@ -392,8 +392,8 @@ void sipua_sub_on_response(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m)
             }
             s->dlg.confirmed = true;
             s->dlg_valid = true;
-        } else if (m->n_contact > 0) {
-            sip_dialog_set_target(&s->dlg, m);
+        } else if (m->n_contact > 0 && sip_dialog_set_target(&s->dlg, m) != 0) {
+            LOGW("%s %s: unusable Contact in 2xx, keeping remote target", kind_name(s), s->target);
         }
         uint32_t granted = m->expires >= 0 ? (uint32_t)m->expires : s->txn_expires;
         if (granted == 0) {
@@ -545,8 +545,8 @@ bool sipua_sub_on_notify(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const s
         if (!s->dlg.remote_tag[0]) {
             sip_str_copy(s->dlg.remote_tag, sizeof(s->dlg.remote_tag), m->from.tag);
         }
-        if (m->n_contact > 0) {
-            sip_dialog_set_target(&s->dlg, m); /* NOTIFY is a target refresh */
+        if (m->n_contact > 0 && sip_dialog_set_target(&s->dlg, m) != 0) { /* NOTIFY is a target refresh */
+            LOGW("%s %s: unusable Contact in NOTIFY, keeping remote target", kind_name(s), s->target);
         }
     }
     sipua_respond_msg(ua, t, m, from, 200, 0, NULL);

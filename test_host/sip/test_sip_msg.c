@@ -603,6 +603,43 @@ static void test_event_headers(void)
     TEST_ASSERT_EQUAL(SIP_PARSE_ERR, parse_with_body(tmp, ""));
 }
 
+/* A target refresh whose Contact URI does not fit keeps the old target
+ * (sip_str_copy would have left it empty: BYE with an empty Request-URI). */
+static void test_dialog_target_refresh_too_long(void)
+{
+    static char tmp[1024];
+    sip_dialog_t d;
+    TEST_ASSERT_EQUAL(SIP_PARSE_OK, parse("INVITE sip:b@x SIP/2.0\r\n" BASIC_HDRS
+                                          "Contact: <sip:old@10.0.0.1:5060>\r\n\r\n"));
+    TEST_ASSERT_EQUAL(0, sip_dialog_init_uas(&d, &m, "t1"));
+    TEST_ASSERT_EQUAL_STRING("sip:old@10.0.0.1:5060", d.remote_target);
+
+    /* longest URI that fits: SIP_URI_MAX - 1 */
+    char uri[SIP_URI_MAX + 8];
+    int base = snprintf(uri, sizeof(uri), "sip:new@10.0.0.1;p=");
+    memset(uri + base, 'a', SIP_URI_MAX - 1 - (size_t)base);
+    uri[SIP_URI_MAX - 1] = '\0';
+    snprintf(tmp, sizeof(tmp), "INVITE sip:b@x SIP/2.0\r\n" BASIC_HDRS "Contact: <%s>\r\n\r\n", uri);
+    TEST_ASSERT_EQUAL(SIP_PARSE_OK, parse(tmp));
+    TEST_ASSERT_EQUAL(0, sip_dialog_set_target(&d, &m));
+    TEST_ASSERT_EQUAL_STRING(uri, d.remote_target);
+
+    /* one byte more: refused, target unchanged */
+    uri[SIP_URI_MAX - 1] = 'a';
+    uri[SIP_URI_MAX] = '\0';
+    snprintf(tmp, sizeof(tmp), "INVITE sip:b@x SIP/2.0\r\n" BASIC_HDRS "Contact: <%s>\r\n\r\n", uri);
+    TEST_ASSERT_EQUAL(SIP_PARSE_OK, parse(tmp));
+    char before[SIP_URI_MAX];
+    strcpy(before, d.remote_target);
+    TEST_ASSERT_EQUAL(-1, sip_dialog_set_target(&d, &m));
+    TEST_ASSERT_EQUAL_STRING(before, d.remote_target);
+
+    /* no Contact / '*': refused, unchanged */
+    TEST_ASSERT_EQUAL(SIP_PARSE_OK, parse("INVITE sip:b@x SIP/2.0\r\n" BASIC_HDRS "\r\n"));
+    TEST_ASSERT_EQUAL(-1, sip_dialog_set_target(&d, &m));
+    TEST_ASSERT_EQUAL_STRING(before, d.remote_target);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -632,5 +669,6 @@ int main(void)
     RUN_TEST(test_nameaddr);
     RUN_TEST(test_param_find_and_list);
     RUN_TEST(test_writer);
+    RUN_TEST(test_dialog_target_refresh_too_long);
     return UNITY_END();
 }

@@ -1737,6 +1737,37 @@ static void test_timer_c_restarted_by_1xx(void)
     TEST_ASSERT_EQUAL(0, sip_ua_debug_txn_count(f->ua));
 }
 
+/* A re-INVITE (target refresh) whose Contact URI is longer than the
+ * remote_target buffer used to wipe the target: the BYE then went out with
+ * an empty Request-URI. Now the old target is kept. */
+static void test_long_contact_keeps_remote_target(void)
+{
+    fx_init(f, NULL);
+    const char *t;
+    establish_incoming("lc@x", &t);
+    char tag[80];
+    snprintf(tag, sizeof(tag), "%s", t);
+    inject_fmt("INVITE sip:1001@10.0.0.2:5060 SIP/2.0\r\n"
+               "Via: SIP/2.0/UDP 10.0.0.1:5060;rport;branch=z9hG4bKlc1\r\n"
+               "Max-Forwards: 70\r\n"
+               "From: \"Bob\" <sip:1002@10.0.0.1>;tag=remote1\r\n"
+               "To: <sip:1001@10.0.0.2>;tag=%s\r\n"
+               "Contact: <sip:moved@10.0.0.1:5060;x=%0200d>\r\n"
+               "Call-ID: lc@x\r\n"
+               "CSeq: 101 INVITE\r\n"
+               "Content-Type: application/sdp\r\n"
+               "Content-Length: %u\r\n\r\n%s",
+               tag, 0, (unsigned)strlen(FX_SDP_PCMU), FX_SDP_PCMU);
+    int ok = fx_find(f, "SIP/2.0 200", 0);
+    TEST_ASSERT_EQUAL_UINT32(101, fx_parse(f, ok)->cseq);
+    inject_from_bob("ACK", 101, "lc@x", tag, "z9hG4bKlc1ack", NULL);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_ACTIVE, sip_call_state(f->ua, last_call_ev()->call));
+    sip_call_hangup(f->ua, last_call_ev()->call);
+    int bye = fx_find(f, "BYE", 0);
+    TEST_ASSERT_TRUE(bye >= 0);
+    TEST_ASSERT_EQUAL_STRING("BYE sip:asterisk@10.0.0.1:5060 SIP/2.0", strtok(strcpy(sbuf, f->sent[bye].buf), "\r"));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1798,5 +1829,6 @@ int main(void)
     RUN_TEST(test_cancel_unanswered_frees_invite_txn);
     RUN_TEST(test_outgoing_timer_c);
     RUN_TEST(test_timer_c_restarted_by_1xx);
+    RUN_TEST(test_long_contact_keeps_remote_target);
     return UNITY_END();
 }

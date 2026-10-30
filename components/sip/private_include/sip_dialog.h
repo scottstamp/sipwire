@@ -43,7 +43,8 @@ int sip_dialog_init_uac(sip_dialog_t *d, const sip_msg_t *resp, const char *call
                         const char *local_na, const char *local_tag, const char *remote_na,
                         const char *request_uri, uint32_t local_cseq);
 
-/* Target refresh from the Contact of a request/response (§12.2). */
+/* Target refresh from the Contact of a request/response (§12.2). Returns -1
+ * (target unchanged) if there is no usable Contact or its URI does not fit. */
 int sip_dialog_set_target(sip_dialog_t *d, const sip_msg_t *m);
 
 /* Does an incoming in-dialog request belong to d? (Call-ID + both tags) */
