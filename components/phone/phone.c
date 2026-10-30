@@ -1715,7 +1715,7 @@ static void handle_cmd(const phone_cmd_t *c, uint64_t now)
     case CMD_REJECT_WAITING:
         if (s.ua && s.bg.h && s.bg.state == SIP_UA_CALL_RINGING_IN) {
             s.bg.rej = true;
-            bool fwd = redirect_call(s.bg.h, FWD_BUSY, &s.bg.fwd);   /* declined: busy forwarding */
+            bool fwd = !s.bg.find && redirect_call(s.bg.h, FWD_BUSY, &s.bg.fwd);   /* declined: busy fwd */
             err = fwd ? SIP_OK : sip_call_reject(s.ua, s.bg.h, WAITING_REJECT_CODE);
         } else {
             ESP_LOGW(TAG, "reject2: no waiting call");
@@ -1749,7 +1749,7 @@ static void handle_cmd(const phone_cmd_t *c, uint64_t now)
     case CMD_REJECT:
         if (s.ua && s.call && s.state == SIP_UA_CALL_RINGING_IN) {
             s.rej = true;
-            bool fwd = redirect_call(s.call, FWD_BUSY, &s.fwd);     /* declined: busy forwarding */
+            bool fwd = !s.find && redirect_call(s.call, FWD_BUSY, &s.fwd);   /* declined: busy fwd */
             err = fwd ? SIP_OK : sip_call_reject(s.ua, s.call, c->code);
         } else {
             ESP_LOGW(TAG, "reject: no ringing call");
@@ -1759,7 +1759,7 @@ static void handle_cmd(const phone_cmd_t *c, uint64_t now)
         if (s.ua && s.call) {
             bool decline = s.state == SIP_UA_CALL_RINGING_IN && !s.outgoing;
             s.rej = s.rej || decline;
-            bool fwd = decline && redirect_call(s.call, FWD_BUSY, &s.fwd);   /* busy forwarding */
+            bool fwd = decline && !s.find && redirect_call(s.call, FWD_BUSY, &s.fwd);   /* busy fwd */
             err = fwd ? SIP_OK : sip_call_hangup(s.ua, s.call);
         } else if (s.state == SIP_UA_CALL_ENDED) {
             go_idle();
