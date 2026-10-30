@@ -245,7 +245,7 @@ static void print_sleep(unsigned bits)
 {
 #if POWER_LS
     if (!s_ls) {
-        printf("sleep     : light sleep configured but rejected by esp_pm (see boot log)\n");
+        printf("sleep     : light sleep off (`power sleep off`, or rejected by esp_pm: see boot log)\n");
         return;
     }
     printf("sleep     : automatic light sleep, %s\n",
@@ -287,6 +287,28 @@ static void print_sleep(unsigned bits)
 
 static int cmd_power(int argc, char **argv)
 {
+    if (argc >= 3 && strcmp(argv[1], "sleep") == 0) {
+#if POWER_LS
+        /* until reboot: turn automatic light sleep off / on again without a rebuild (debugging) */
+        bool on = strcmp(argv[2], "on") == 0;
+        esp_pm_config_t pc = { 0 };
+        esp_err_t err = s_dfs ? esp_pm_get_configuration(&pc) : ESP_ERR_INVALID_STATE;
+        if (err == ESP_OK) {
+            pc.light_sleep_enable = on;
+            err = esp_pm_configure(&pc);
+        }
+        if (err != ESP_OK) {
+            printf("light sleep %s: %s\n", on ? "on" : "off", esp_err_to_name(err));
+            return 1;
+        }
+        s_ls = on;
+        printf("light sleep %s until reboot\n", on ? "on" : "off");
+        return 0;
+#else
+        printf("light sleep not built in (CONFIG_SIPWIRE_POWER_LIGHT_SLEEP)\n");
+        return 1;
+#endif
+    }
     if (argc >= 2 && strcmp(argv[1], "locks") == 0) {
 #if defined(CONFIG_PM_ENABLE)
         esp_pm_dump_locks(stdout);
@@ -429,8 +451,8 @@ esp_err_t power_init(void)
     const esp_console_cmd_t cmd = {
         .command = "power",
         .help = "Power state: CPU frequency, holds, Wi-Fi power save, light sleep time and wake-ups. "
-                "`power locks`: PM lock table",
-        .hint = "[locks]",
+                "`power locks`: PM lock table. `power sleep off|on`: light sleep until reboot",
+        .hint = "[locks | sleep off|on]",
         .func = cmd_power,
     };
     ESP_RETURN_ON_ERROR(console_register_command(&cmd), TAG, "register power");
