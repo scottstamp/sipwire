@@ -116,15 +116,23 @@ static esp_err_t create(void)
     ESP_RETURN_ON_FALSE(avail >= need, ESP_ERR_NO_MEM, TAG, "aec needs %u B of heap, %u available",
                         (unsigned)need, (unsigned)avail);
 
+    /* aec_heap_alloc is greedy (internal until INTERNAL_RESERVE is left): the canceller's
+     * state, touched all over every 20 ms frame, goes first; the ring (one sequential
+     * 640 B write and read per frame) takes what is left, i.e. PSRAM unless all fits. */
     a.mem_internal = a.mem_psram = 0;
     aec_set_allocator(aec_heap_alloc, heap_caps_free);
-    int16_t *ring = aec_heap_alloc(RING_SAMPLES * sizeof(int16_t));
-    ESP_RETURN_ON_FALSE(ring, ESP_ERR_NO_MEM, TAG, "aec ring");
     aec_err_t err = aec_create(&cfg, &a.aec);
     if (err != AEC_OK) {
-        heap_caps_free(ring);
         ESP_LOGE(TAG, "aec create: %d", (int)err);
         return err == AEC_ERR_NO_MEM ? ESP_ERR_NO_MEM : ESP_ERR_INVALID_ARG;
+    }
+    int16_t *ring = aec_heap_alloc(RING_SAMPLES * sizeof(int16_t));
+    if (ring == NULL) {
+        aec_destroy(a.aec);
+        a.aec = NULL;
+        a.mem_internal = a.mem_psram = 0;
+        ESP_LOGE(TAG, "aec ring: no memory");
+        return ESP_ERR_NO_MEM;
     }
     aec_ring_init(&a.ring, ring, RING_SAMPLES);
     aec_get_config(a.aec, &cfg);

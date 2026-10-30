@@ -26,6 +26,9 @@ components/
                      Mutators change RAM only; the "dir_save" task writes snapshots (taken
                      under the lock) ~200 ms later, so the LVGL / sip tasks never wait for
                      flash; dir_flush() waits for the write (console commands use it).
+                     While a call exists (`phone.c` `update_power()` ->
+                     `dir_defer_writes()`) the writes wait until the call is over: see
+                     "Flash writes during calls" (Memory and tasks). dir_flush() writes anyway.
                      phone.c logs every ended call (dir_history_add; phone_log_* in
                      phone_logic.c: answered / missed / declined / DND, outgoing no-answer =
                      missed); the UI reads the lists through ui_actions_t (bridge); the model
@@ -155,6 +158,27 @@ internal heap back, a full-screen redraw now takes 20 flushes instead of 10);
 per direction (TX 4 x 320 B, RX 4 x 640 B for 32-bit mic slots); the 40 ms TX ring is the AEC
 delay `D` (see Echo canceller) and the main playout latency besides the jitter buffer.
 
+**Flash writes during calls**: a wear-levelled FAT sector write erases a 4 KB flash sector
+(~30-45 ms with the cache off). Core 1 then parks in IRAM and the audio tasks (flash-resident
+code, PSRAM data) cannot run for longer than the 40 ms I2S TX ring lasts: a click or a gap.
+So `directory` holds its writes back while a call exists (`dir_defer_writes()`, driven by
+`phone.c` `update_power()` together with the `call` power hold): history entries of a
+rejected or ended background call, missed-call "seen" marks and contact / speed-dial edits
+change RAM at once (the UI sees them), and the `dir_save` task writes them when the last call
+is gone (200 ms coalescing as usual). `dir_flush()` (console `contact` / `history` commands)
+writes regardless. A reboot during a call loses those changes, as a reset within the 200 ms
+coalescing window always did. NVS writes are not deferred: a volume change during a call is
+saved 3 s after the last key press (`vol_save_at` -> `settings_set`); an NVS write is mostly
+an entry append (no erase), but a full NVS page costs an erase too.
+
+**Heap debugging** (`sdkconfig.debug-heap` overlay, `HEAP_POISONING_COMPREHENSIVE`, console
+`heapwatch [ms [psram_s]]`): a background task runs `heap_caps_check_integrity` on the internal
+heap every `ms` (default 200; a few ms each) and on PSRAM only every `psram_s` seconds (default
+10, 0 = never). Each check holds that heap's spinlock for the whole walk (interrupts masked on
+the checking core, the other core spins on its next malloc); the 7.5 MB PSRAM walk with
+poison verification takes ~100 ms, longer than the 40 ms I2S ring, so every PSRAM check is
+an expected audio click / Wi-Fi hiccup in that build. Release builds have no `heapwatch`.
+
 **Tasks** (stack bytes; high water = least free ever. "QEMU worst" = least free over the smoke
 shards incl. calls with AEC, transfers, call waiting, CSV import; QEMU has no Wi-Fi radio or
 LCD, so its heap numbers are far too optimistic, stack numbers are representative)
@@ -260,6 +284,12 @@ Memory: allocated on first enable and kept; everything through `aec_set_allocato
 (audio: internal RAM while more than 64 KB internal would stay free, PSRAM beyond).
 At the default tail ~124 KB (93 KB fixed: MDF scratch + FFT tables + preprocessor;
 +7.7 KB per 320 samples of tail) + 8 KB ring; `aec` shows the internal/PSRAM split.
+The canceller state is allocated first (63 blocks, in SpeexDSP's init order), the ring last:
+the greedy split gives internal RAM to the state touched all over every frame, the ring
+(one sequential 640 B write and read per frame) gets internal only if everything fits. With
+the ring first, any create with 72-193 KB internal free put 8 KB of ring internal and the
+same 8 KB of canceller state in PSRAM. On the handset (internal free ~40-53 KB, below the
+64 KB reserve) all ~132 KB is PSRAM either way.
 SpeexDSP does not check its allocations, so `create` first checks that
 `aec_mem_estimate()` fits. Toggling on keeps what the filter learned; the stats
 restart.
@@ -379,7 +409,19 @@ full speed, no light sleep). Both drop when the phone is idle again.
     refresh rebuilds the whole model, so nothing that changed while dark is lost. Incoming
     call while dark: `on_event` calls `display_wake` (SLPOUT) before it kicks the bridge, so
     the incoming-call screen is rendered into the panel during its 120 ms start-up, before
-    the backlight lights (see Panel sleep).
+    the backlight lights (see Panel sleep). (`CALL_EVENT_SECOND` is the background call's
+    state change, not a per-second tick: the call timers come from the 1 s refresh above.)
+  - *UI updates* (`components/ui`): lit, every 1 s refresh with a changed model (the clock or
+    a call timer) runs the screen's update. The hot paths only touch what changed:
+    `ui_label_set_text_if_changed` (each `lv_label_set_text` frees and reallocates the text
+    in the PSRAM LVGL heap and invalidates the label), `ui_style_set_color` / `_num` /
+    `ui_set_text_color` (a style setter re-applies and invalidates even with the same value),
+    and the fitted labels (`ui_fit_set`, DOTS mode, whose LVGL buffer may end in "...")
+    remember their last text, start font and width (`fit_cache_t`, 84 B per fit plus its
+    delete callback, LVGL heap). In a call one tick rewrites the timer label only (was ~10 labels and colours); the home screen per
+    minute the clock only. A model whose only change is the RSSI (every 10 s) updates the
+    status bar alone (it redraws only on a new bar count); only Settings (About shows dBm)
+    still gets the screen update.
   - Left: net RSSI every 10 s (Wi-Fi driver call; the UI ignores it while dark), LVGL's 2 s
     max sleep, SNTP, Wi-Fi beacons.
 - **Automatic light sleep** (`power`, board Kconfig `SIPWIRE_POWER_LIGHT_SLEEP`, **default n**:
@@ -471,6 +513,48 @@ CONFIG_SIPWIRE_OTA_URL), `blf` (BLF keys, default none), `vm_number` (default `*
 `call_waiting` (default true), `dnd` (default false), `auto_answer` (default true).
 Set via UI settings, serial console (`sipwire>` REPL), or `config.json` on SD.
 
+## Flash mode (QIO, 80 MHz)
+`sdkconfig.defaults`: `CONFIG_ESPTOOLPY_FLASHMODE_QIO`, `CONFIG_ESPTOOLPY_FLASHFREQ_80M` (was
+DIO). Every flash cache miss (code not in IRAM, rodata, fonts) moves address and data over
+four lines instead of two, so a miss costs roughly half the time; nothing else changes (no
+HPM, no timing tuning at 80 MHz; the PSRAM is octal on its own pins).
+
+Who sets the mode:
+- The image header (offset 0x2, what esptool writes and the ROM reads) stays `dio` for a QIO
+  build (`CONFIG_ESPTOOLPY_FLASHMODE` = "dio"): the ROM loads the 2nd-stage bootloader in DIO.
+- The **bootloader** (built with QIO) reads the flash ID, sets the QE bit in the flash status
+  register (non-volatile; known chips by table, else the generic SR2 bit 1) and switches the
+  cache's SPI0 read mode to QIO before it loads the app. Boot log: `Enabling QIO for flash chip
+  ...` (or `Enabling default flash chip QIO`) and `SPI Mode : QIO`. If the QE bit does not
+  stick it logs `Failed to set QIE bit, not enabling QIO mode` and stays DIO.
+- The **app** never reprograms SPI0: code fetch runs in whatever mode the bootloader left.
+  Its own `esp_flash` driver (SPI1: NVS, FAT `storage`, OTA writes, partition reads) uses the
+  app's configured mode (log `spi_flash: flash io: qio`) and sets QE itself if needed.
+
+So the bootloader decides, and a unit has to be flashed over serial once (bootloader +
+partition table + otadata + app, `idf.py -p PORT flash`; NVS and `storage` are not touched,
+settings and contacts stay). Mixed cases:
+- DIO bootloader + QIO app (only `app-flash`, or an old unit): boots and works, the app sets
+  QE and its SPI1 accesses use QIO, but code still runs from a DIO cache (no gain) while the
+  app log says `flash io: qio`. Check the bootloader's `SPI Mode` line, not the app's.
+- OTA: `esp_https_ota` checks the app descriptor's `spi_flash_mode` against the running app
+  (`CONFIG_ESP_HTTPS_OTA_VERIFY_SPI_MODE`, default y; QIO = 1, DIO = 3). A DIO unit refuses
+  a QIO image at the first block (`SPI flash mode mismatch: running app has mode 3, new app
+  has mode 1`, `ESP_ERR_OTA_SPI_MODE_MISMATCH`, OTA FAILED before any image data is written,
+  boot slot unchanged) and a QIO unit
+  refuses a DIO image. OTA cannot migrate a unit, and cannot put a QIO app behind a DIO
+  bootloader; between QIO builds it works as before.
+
+QEMU (`tools/qemu/sdkconfig.qemu`) stays DIO: with QIO its flash controller model does not
+keep the quad read mode (bootloader `SPI Mode : SLOW READ`) and the FAT `storage` partition
+fails to mount even after formatting (smoke shards 30 and 40 fail). The QEMU smoke test
+therefore does not cover QIO; the handset does.
+
+An existing `sdkconfig` keeps its old choice over the new default. Delete every line
+containing `FLASHMODE` (`CONFIG_ESPTOOLPY_FLASHMODE_QIO/QOUT/DIO/DOUT`,
+`CONFIG_ESPTOOLPY_FLASHMODE`, `CONFIG_ESPTOOLPY_FLASHMODE_VAL` and the deprecated
+`CONFIG_FLASHMODE_QIO/QOUT/DIO/DOUT`), then `idf.py reconfigure`.
+
 ## OTA update (`components/ota`)
 `ota_start(url)` (console `ota [url]`, Settings > Update) downloads with
 `esp_https_ota` into the inactive slot (`partitions.csv`: ota_0 / ota_1, 3 MB
@@ -478,7 +562,9 @@ each) in its own task. Plain http is allowed (`CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP`,
 LAN update server; https uses the mbedtls cert bundle). Refused while a call is
 not idle or another update runs. After the first block and before anything
 else is written: the image header must be for esp32s3 (esp_https_ota rejects
-other chips) and the app descriptor's `project_name` must be `sipwire`. Events
+other chips, and an image whose flash mode differs from the running app's: see Flash mode)
+and the app descriptor's `project_name` must be `sipwire`. OTA never updates the
+bootloader. Events
 on `SIPWIRE_OTA_EVENT`: STARTED, PROGRESS {percent, bytes}, DONE, FAILED
 {esp_err, reason}; DONE reboots after 3 s.
 

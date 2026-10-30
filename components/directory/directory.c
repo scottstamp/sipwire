@@ -49,6 +49,12 @@ static uint32_t s_done_gen;         /* under s_lock: s_req_gen the writer has ca
 static esp_err_t s_last_err = ESP_OK;   /* under s_lock: result of the writer's last pass */
 static uint32_t s_hist_rev;         /* under s_lock: +1 per history change (dir_history_rev) */
 static dir_contact_t *s_snap;       /* writer only: copy of the contacts (PSRAM if present) */
+/* During calls (dir_defer_writes) the writer leaves dirty data in RAM: a wear-levelled sector
+ * write erases flash, the cache is off ~30-45 ms and every task not in IRAM stalls, the audio
+ * tasks included (40 ms I2S ring: a click). The call's end wakes the writer; dir_flush() sets
+ * s_force to write regardless. */
+static bool s_defer;                /* under s_lock (set before dir_init() without it) */
+static bool s_force;                /* under s_lock: a dir_flush() is waiting */
 #define WRITER_COALESCE_MS  200     /* several changes in a row (mark seen + clear...) = one write */
 
 esp_err_t dir_console_register(void);    /* dir_console.c */
@@ -173,6 +179,12 @@ static void writer_task(void *arg)
         size_t len = 0;
         dir_ctab_t contacts = { .v = s_snap, .n = 0, .cap = DIR_CONTACTS_MAX };
         xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (s_defer && !s_force) {
+            /* stays dirty; dir_defer_writes(false) or dir_flush() notifies again */
+            xSemaphoreGive(s_lock);
+            continue;
+        }
+        s_force = false;
         uint32_t gen = s_req_gen;
         bool hist = s_hist_dirty, con = s_contacts_dirty, spd = s_speed_dirty;
         if (hist) {
@@ -244,6 +256,10 @@ esp_err_t dir_flush(uint32_t timeout_ms)
     ESP_RETURN_ON_FALSE(s_lock, ESP_ERR_INVALID_STATE, TAG, "not initialised");
     xSemaphoreTake(s_lock, portMAX_DELAY);
     uint32_t want = s_req_gen;
+    if (s_defer && (int32_t)(s_done_gen - want) < 0 && s_writer != NULL) {
+        s_force = true;     /* write now, call or not */
+        xTaskNotifyGive(s_writer);
+    }
     xSemaphoreGive(s_lock);
     for (uint32_t waited = 0;; waited += 10) {
         xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -260,6 +276,25 @@ esp_err_t dir_flush(uint32_t timeout_ms)
             return ESP_ERR_TIMEOUT;
         }
         vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+void dir_defer_writes(bool defer)
+{
+    if (s_lock == NULL) {
+        s_defer = defer;    /* before dir_init(): no writer, nothing to write yet */
+        return;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool was = s_defer;
+    s_defer = defer;
+    bool pending = (int32_t)(s_done_gen - s_req_gen) < 0;
+    if (was && !defer && pending && s_writer != NULL) {
+        xTaskNotifyGive(s_writer);
+    }
+    xSemaphoreGive(s_lock);
+    if (defer != was) {
+        ESP_LOGD(TAG, "flash writes %s%s", defer ? "deferred" : "released", pending ? " (changes pending)" : "");
     }
 }
 

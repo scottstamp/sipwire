@@ -369,12 +369,24 @@ static int cmd_cpu(int argc, char **argv)
 
 #if CONFIG_HEAP_POISONING_COMPREHENSIVE || CONFIG_HEAP_POISONING_LIGHT
 /* Debug builds (sdkconfig.debug-heap): check the heaps in the background so a corruption is
- * reported close to when it happens, with both cores' backtraces from the abort. */
+ * reported close to when it happens, with both cores' backtraces from the abort.
+ *
+ * heap_caps_check_integrity() walks every block with that heap's lock held, and with
+ * HEAP_POISONING_COMPREHENSIVE it also verifies the fill pattern of every free byte. The heap
+ * lock is a spinlock (interrupts masked on this core, the other core spins as soon as it
+ * allocates): the ~300 KB internal heap takes a few ms, the ~7.5 MB PSRAM heap ~100 ms, which
+ * starves the I2S DMA refill (40 ms ring) and the Wi-Fi task -> audible clicks and dropped
+ * packets. So the internal heap is checked every interval and PSRAM only every psram_s seconds
+ * (default 10, 0 = never). */
 static volatile uint32_t s_heapwatch_ms;
+static volatile uint32_t s_heapwatch_psram_s = 10;
 
 static void heapwatch_task(void *arg)
 {
     (void)arg;
+    int64_t last_psram = 0;
+    int64_t last_log = 0;
+    int64_t psram_us = 0;
     for (;;) {
         uint32_t ms = s_heapwatch_ms;
         if (ms == 0) {
@@ -382,16 +394,22 @@ static void heapwatch_task(void *arg)
             continue;
         }
         int64_t t0 = esp_timer_get_time();
-        bool ok = heap_caps_check_integrity(MALLOC_CAP_SPIRAM, true) &&
-                  heap_caps_check_integrity(MALLOC_CAP_INTERNAL, true);
+        bool ok = heap_caps_check_integrity(MALLOC_CAP_INTERNAL, true);
+        int64_t t1 = esp_timer_get_time();
+        uint32_t psram_s = s_heapwatch_psram_s;
+        if (ok && psram_s != 0 && t1 - last_psram >= (int64_t)psram_s * 1000000LL) {
+            ok = heap_caps_check_integrity(MALLOC_CAP_SPIRAM, true);
+            last_psram = esp_timer_get_time();
+            psram_us = last_psram - t1;
+        }
         if (!ok) {
             ESP_LOGE(TAG, "heapwatch: heap corrupted (details above)");
             abort();
         }
-        static int64_t s_last_log;
-        if (t0 - s_last_log > 60 * 1000000LL) {
-            s_last_log = t0;
-            ESP_LOGI(TAG, "heapwatch: ok, one check %" PRId64 " ms", (esp_timer_get_time() - t0) / 1000);
+        if (t0 - last_log > 60 * 1000000LL) {
+            last_log = t0;
+            ESP_LOGI(TAG, "heapwatch: ok, internal check %" PRId64 " ms, last psram check %" PRId64 " ms",
+                     (t1 - t0) / 1000, psram_us / 1000);
         }
         vTaskDelay(pdMS_TO_TICKS(ms));
     }
@@ -401,14 +419,23 @@ static int cmd_heapwatch(int argc, char **argv)
 {
     static TaskHandle_t s_task;
     uint32_t ms = argc >= 2 ? (uint32_t)strtoul(argv[1], NULL, 10) : 200;
+    uint32_t psram_s = argc >= 3 ? (uint32_t)strtoul(argv[2], NULL, 10) : 10;
     if (s_task == NULL &&
         xTaskCreatePinnedToCore(heapwatch_task, "heapwatch", 3072, NULL, 1, &s_task, 0) != pdPASS) {
         printf("no memory for the task\n");
         return 1;
     }
+    s_heapwatch_psram_s = psram_s;
     s_heapwatch_ms = ms;
     xTaskNotifyGive(s_task);
-    printf(ms ? "heapwatch: checking every %" PRIu32 " ms\n" : "heapwatch: off\n", ms);
+    if (ms == 0) {
+        printf("heapwatch: off\n");
+    } else if (psram_s == 0) {
+        printf("heapwatch: internal every %" PRIu32 " ms, psram never\n", ms);
+    } else {
+        printf("heapwatch: internal every %" PRIu32 " ms, psram every %" PRIu32 " s (~100 ms with "
+               "interrupts masked: expect an audio click)\n", ms, psram_s);
+    }
     return 0;
 }
 #endif
@@ -477,8 +504,10 @@ esp_err_t console_start(void)
           .hint = "[seconds]", .func = cmd_cpu },
 #endif
 #if CONFIG_HEAP_POISONING_COMPREHENSIVE || CONFIG_HEAP_POISONING_LIGHT
-        { .command = "heapwatch", .help = "Debug: check heap integrity in the background, abort on corruption "
-                                          "(0 = off)", .hint = "[ms]", .func = cmd_heapwatch },
+        { .command = "heapwatch", .help = "Debug: check heap integrity in the background, abort on corruption. "
+                                          "Internal heap every ms (0 = off, default 200), PSRAM every "
+                                          "psram_s (default 10, 0 = never; ~100 ms stall each)",
+          .hint = "[ms [psram_s]]", .func = cmd_heapwatch },
 #endif
         { .command = "reboot", .help = "Restart the device", .func = cmd_reboot },
     };

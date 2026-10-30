@@ -103,11 +103,11 @@ static void texts_refresh(call_t *c, const ui_model_t *m)
 static void side_refresh(call_t *c, const ui_model_t *m)
 {
     if (m->call == UI_CALL_HELD) {
-        lv_label_set_text(c->side, "On hold");
-        lv_obj_set_style_text_color(c->side, UI_COL_WARN, 0);
+        ui_label_set_text_if_changed(c->side, "On hold");
+        ui_set_text_color(c->side, UI_COL_WARN);
     } else {
-        lv_label_set_text(c->side, c->echo);
-        lv_obj_set_style_text_color(c->side, UI_COL_BLUE, 0);
+        ui_label_set_text_if_changed(c->side, c->echo);
+        ui_set_text_color(c->side, UI_COL_BLUE);
     }
 }
 
@@ -436,8 +436,8 @@ static void status_refresh(call_t *c, const ui_model_t *m)
         t = buf;
         col = UI_COL_OK;
     }
-    lv_label_set_text(c->hold_lbl, t ? t : "");
-    lv_obj_set_style_text_color(c->hold_lbl, col, 0);
+    ui_label_set_text_if_changed(c->hold_lbl, t ? t : "");
+    ui_set_text_color(c->hold_lbl, col);
 }
 
 static void call_update(const ui_model_t *m)
@@ -473,16 +473,18 @@ static void call_update(const ui_model_t *m)
         texts_refresh(c, m);
     }
 
+    /* Runs every second (call timer): compare before set, only what changed is rewritten
+     * and redrawn. */
     char t[16];
     bool held = m->call == UI_CALL_HELD;
     bool answered = m->call == UI_CALL_ACTIVE || held;
     if (answered) {
         ui_fmt_duration(t, sizeof(t), m->call_seconds);
-        lv_label_set_text(c->timer, t);
+        ui_label_set_text_if_changed(c->timer, t);
     } else {
-        lv_label_set_text(c->timer, m->call == UI_CALL_RINGING_OUT ? "Ringing..." : "Calling...");
+        ui_label_set_text_if_changed(c->timer, m->call == UI_CALL_RINGING_OUT ? "Ringing..." : "Calling...");
     }
-    lv_obj_set_style_text_color(c->timer, held ? UI_COL_WARN : UI_COL_TEXT, 0);
+    ui_set_text_color(c->timer, held ? UI_COL_WARN : UI_COL_TEXT);
     status_refresh(c, m);
     side_refresh(c, m);
 
@@ -493,10 +495,12 @@ static void call_update(const ui_model_t *m)
                      m->xfer == UI_XFER_PROGRESS;
     set_enabled(c->xfer, answered && !xfer_busy);
     set_enabled(c->complete, answered);
-    lv_label_set_text(lv_obj_get_child(c->mute, 1), m->muted ? "Muted" : "Mute");
-    lv_label_set_text(lv_obj_get_child(c->hold, 0), held ? LV_SYMBOL_PLAY : LV_SYMBOL_PAUSE);
-    lv_label_set_text(lv_obj_get_child(c->hold, 1), held ? "Resume" : "Hold");
-    lv_label_set_text_fmt(c->vol_val, "%u", (unsigned)m->volume);
+    ui_label_set_text_if_changed(lv_obj_get_child(c->mute, 1), m->muted ? "Muted" : "Mute");
+    ui_label_set_text_if_changed(lv_obj_get_child(c->hold, 0), held ? LV_SYMBOL_PLAY : LV_SYMBOL_PAUSE);
+    ui_label_set_text_if_changed(lv_obj_get_child(c->hold, 1), held ? "Resume" : "Hold");
+    char vol[8];
+    snprintf(vol, sizeof(vol), "%u", (unsigned)m->volume);
+    ui_label_set_text_if_changed(c->vol_val, vol);
 
     /* held background call (or the original call during a consultation) */
     if (two) {
@@ -504,7 +508,7 @@ static void call_update(const ui_model_t *m)
         char d[16];
         ui_fmt_duration(d, sizeof(d), m->second_seconds);
         snprintf(tag, sizeof(tag), "%s  %s", consult ? "Original call, on hold" : "On hold", d);
-        lv_label_set_text(c->strip_tag, tag);
+        ui_label_set_text_if_changed(c->strip_tag, tag);
         const char *name = m->second_name[0] ? m->second_name : m->second_number;
         ui_fit_set(c->strip_who, name[0] ? name : "Unknown", &lv_font_montserrat_24,
                    !m->second_name[0]);

@@ -1,4 +1,6 @@
-# Debug overlay: heap corruption hunting (console `heapwatch [ms]`). Build with
+# Debug overlay: heap corruption hunting (console `heapwatch [ms [psram_s]]`: internal heap
+# every ms, PSRAM only every psram_s seconds, default 10; each PSRAM walk holds the heap
+# spinlock ~100 ms with comprehensive poisoning, i.e. one audio click / Wi-Fi hiccup). Build with
 #   idf.py -B build_heap -D SDKCONFIG=build_heap/sdkconfig \
 #          -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.debug-heap" build
 CONFIG_HEAP_POISONING_COMPREHENSIVE=y

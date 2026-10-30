@@ -110,7 +110,17 @@ void ui_update(const ui_model_t *model)
         return;
     }
     bool missed = model->missed_seq != s_model.missed_seq && model->missed_from[0];
+    /* Only the RSSI moved (every 10 s, often by 1 dBm): the status bar maps it to bars and
+     * redraws only on a new level; of the screens only Settings (About: "-63 dBm") shows it.
+     * The other screens' update would rewrite every label for nothing. */
+    int8_t old_rssi = s_model.rssi;
+    s_model.rssi = model->rssi;
+    bool rssi_only = old_rssi != model->rssi && memcmp(&s_model, model, sizeof(s_model)) == 0;
     s_model = *model;
+    if (rssi_only && s_kind != UI_SCR_SETTINGS) {
+        ui_statusbar_update(&s_model);
+        return;
+    }
 
     ui_screen_t want = s_kind;
     switch (model->call) {

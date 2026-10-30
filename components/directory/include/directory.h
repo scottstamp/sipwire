@@ -16,6 +16,8 @@
  * snapshot taken under the lock ~200 ms later (several changes in a row = one write), so no
  * caller (LVGL task, sip task) ever waits for flash. Their return value covers the change
  * itself, not the write; dir_flush() waits for the write and returns its result (console).
+ * While dir_defer_writes(true) is in effect (the phone sets it during calls) the write waits
+ * until it is released, unless dir_flush() asks for it.
  * Writes go to a temp file that is then renamed over the real one. If the partition
  * cannot be mounted the directory still works from RAM and the mutators return
  * ESP_ERR_INVALID_STATE (after changing RAM). */
@@ -121,3 +123,10 @@ bool dir_history_last_unseen_missed(dir_call_t *out);
  *  result of the last write (ESP_FAIL...), ESP_ERR_TIMEOUT, or ESP_ERR_INVALID_STATE when nothing
  *  is saved (not mounted). Not for the LVGL or sip task. */
 esp_err_t dir_flush(uint32_t timeout_ms);
+
+/** Hold back flash writes (true) while a call exists, release them (false) afterwards. A
+ *  wear-levelled sector write erases flash: the cache is off for ~30-45 ms, which stalls the
+ *  audio tasks past the 40 ms I2S ring (a click). Changes still apply to RAM at once and are
+ *  written when released; dir_flush() writes regardless. Any task, idempotent, may be called
+ *  before dir_init(). */
+void dir_defer_writes(bool defer);
