@@ -58,13 +58,18 @@ static void show(ui_screen_t kind, const char *arg, lv_screen_load_anim_t anim)
     ui_statusbar_update(&s_model);
     OPS[kind]->update(&s_model);
 
-    uint32_t t = (anim == LV_SCREEN_LOAD_ANIM_NONE) ? 0 : ANIM_MS;
-    lv_screen_load_anim(scr, anim, t, 0, false);
-    if (old && old != scr) {
-        /* Not before the transition is over, and never from inside a callback
-         * of the old screen itself. */
-        lv_obj_delete_delayed(old, t + 100);
+    if (anim == LV_SCREEN_LOAD_ANIM_NONE) {
+        lv_screen_load_anim(scr, anim, 0, 0, false);
+        if (old && old != scr) {
+            /* Never from inside a callback of the old screen itself. */
+            lv_obj_delete_delayed(old, 100);
+        }
+        return;
     }
+    /* LVGL deletes the old screen when the slide completes. A timed delete of our own could
+     * run first when a frame takes long (busy Wi-Fi, OTA flash writes): the end of the slide
+     * then lays out and sends events to the freed screen (display->prev_scr). */
+    lv_screen_load_anim(scr, anim, ANIM_MS, 0, true);
 }
 
 void ui_goto(ui_screen_t screen, const char *arg)
