@@ -37,14 +37,19 @@ static void show(sl_rgb_t c)
     grb[0] = c.g;
     grb[1] = c.r;
     grb[2] = c.b;
+    /* The channel is enabled only around a frame: an enabled RMT TX channel holds a
+     * CPU_FREQ_MAX PM lock, which kept DFS at 240 MHz all the time. A frame is 24 bits of
+     * 1.2 us, so waiting for it here (esp_timer task) costs ~30 us per colour change. */
     const rmt_transmit_config_t tx = { .loop_count = 0 };
-    if (rmt_tx_wait_all_done(s.chan, 0) != ESP_OK) {
-        return;                          /* previous frame still going; retry next tick */
+    if (rmt_enable(s.chan) != ESP_OK) {
+        return;                          /* retry next tick */
     }
-    if (rmt_transmit(s.chan, s.enc, grb, sizeof(grb), &tx) == ESP_OK) {
+    if (rmt_transmit(s.chan, s.enc, grb, sizeof(grb), &tx) == ESP_OK &&
+        rmt_tx_wait_all_done(s.chan, 10) == ESP_OK) {
         s.shown = c;
         s.shown_valid = true;
     }
+    rmt_disable(s.chan);
 }
 
 static void tick_cb(void *arg)
@@ -114,7 +119,6 @@ esp_err_t status_led_init(void)
         .flags.msb_first = 1,
     };
     ESP_RETURN_ON_ERROR(rmt_new_bytes_encoder(&enc_cfg, &s.enc), TAG, "rmt encoder");
-    ESP_RETURN_ON_ERROR(rmt_enable(s.chan), TAG, "rmt enable");
 
     ESP_RETURN_ON_ERROR(esp_event_handler_register(SIPWIRE_NET_EVENT, ESP_EVENT_ANY_ID, on_event, NULL),
                         TAG, "net events");
