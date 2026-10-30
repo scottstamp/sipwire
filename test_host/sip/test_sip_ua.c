@@ -1281,6 +1281,218 @@ static void test_answer_after_reported(void)
     TEST_ASSERT_EQUAL(-1, last_call_ev()->answer_after);
 }
 
+static bool alert_match_of(const char *hdrs, const char *marker)
+{
+    static char buf[1024];
+    static sip_msg_t m;
+    snprintf(buf, sizeof(buf),
+             "INVITE sip:1001@10.0.0.2 SIP/2.0\r\nVia: SIP/2.0/UDP 10.0.0.1;branch=z9hG4bKx\r\n"
+             "From: <sip:p@10.0.0.1>;tag=a\r\nTo: <sip:1001@10.0.0.2>\r\nCall-ID: c\r\nCSeq: 1 INVITE\r\n"
+             "%sContent-Length: 0\r\n\r\n", hdrs);
+    TEST_ASSERT_EQUAL(SIP_PARSE_OK, sip_msg_parse(&m, buf, strlen(buf)));
+    return sipua_alert_match(&m, marker);
+}
+
+static void test_alert_marker_parsing(void)
+{
+    TEST_ASSERT_FALSE(alert_match_of("", "find"));
+    TEST_ASSERT_TRUE(alert_match_of("Alert-Info: <http://x>;info=find\r\n", "find"));
+    TEST_ASSERT_TRUE(alert_match_of("Alert-Info: <http://x>;info=FIND;delay=0\r\n", "find"));
+    TEST_ASSERT_TRUE(alert_match_of("Alert-Info: find\r\n", "find"));
+    TEST_ASSERT_TRUE(alert_match_of("Alert-Info: Find;volume=max\r\n", "find"));
+    TEST_ASSERT_TRUE(alert_match_of("Alert-Info: info=find\r\n", "find"));
+    TEST_ASSERT_TRUE(alert_match_of("Alert-Info: <http://x/r.wav>;info=ring2, <sip:x>;info=find\r\n", "find"));
+    TEST_ASSERT_TRUE(alert_match_of("Alert-Info: <http://x>\r\nAlert-Info: find\r\n", "find"));
+    /* whole token only, never inside the URI, never without a marker */
+    TEST_ASSERT_FALSE(alert_match_of("Alert-Info: <http://x/find>\r\n", "find"));
+    TEST_ASSERT_FALSE(alert_match_of("Alert-Info: <http://x>;info=findme\r\n", "find"));
+    TEST_ASSERT_FALSE(alert_match_of("Alert-Info: finder\r\n", "find"));
+    TEST_ASSERT_FALSE(alert_match_of("Call-Info: <sip:x>;info=find\r\n", "find"));
+    TEST_ASSERT_FALSE(alert_match_of("Alert-Info: <http://x>;info=find\r\n", ""));
+    TEST_ASSERT_FALSE(alert_match_of("Alert-Info: <http://x>;info=find\r\n", NULL));
+    TEST_ASSERT_TRUE(alert_match_of("Alert-Info: <http://x>;info=locate\r\n", "locate"));
+}
+
+static void test_alert_marker_reported(void)
+{
+    fx_init(f, NULL);
+    TEST_ASSERT_EQUAL(SIP_ERR_ARG, sip_ua_set_alert_marker(f->ua, "two words"));
+    TEST_ASSERT_EQUAL(SIP_ERR_ARG, sip_ua_set_alert_marker(f->ua, "0123456789012345678901234567890123"));
+    /* no marker set: not reported */
+    inject_invite("am0@x", "z9hG4bKam0", 1, FX_SDP_PCMU, "Alert-Info: <http://x>;info=find\r\n");
+    TEST_ASSERT_FALSE(last_call_ev()->alert_match);
+    TEST_ASSERT_FALSE(f->screen_in.alert_match);
+    sip_call_reject(f->ua, last_call_ev()->call, 486);
+    TEST_ASSERT_EQUAL(SIP_OK, sip_ua_set_alert_marker(f->ua, "find"));
+    inject_invite("am1@x", "z9hG4bKam1", 1, FX_SDP_PCMU, "Alert-Info: <http://x>;info=find\r\n");
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_RINGING_IN, last_call_ev()->state);
+    TEST_ASSERT_TRUE(last_call_ev()->alert_match);
+    TEST_ASSERT_TRUE(f->screen_in.alert_match);
+    TEST_ASSERT_EQUAL(-1, f->screen_in.answer_after);
+    TEST_ASSERT_EQUAL_STRING("1002", f->screen_in.number);
+    sip_call_reject(f->ua, last_call_ev()->call, 486);
+    inject_invite("am2@x", "z9hG4bKam2", 1, FX_SDP_PCMU, NULL);
+    TEST_ASSERT_FALSE(last_call_ev()->alert_match);
+    TEST_ASSERT_EQUAL(SIP_OK, sip_ua_set_alert_marker(f->ua, NULL));
+}
+
+/* DND refuses everything, but the application may still let a call ring (find the
+ * handset); busy is reported and still wins over RING. */
+static void test_screen_ring_overrides_dnd(void)
+{
+    fx_init(f, NULL);
+    sip_ua_set_dnd(f->ua, true);
+    f->screen_on = true;
+    f->screen.action = SIP_SCREEN_RING;
+    inject_invite("sr1@x", "z9hG4bKsr1", 1, FX_SDP_PCMU, NULL);
+    TEST_ASSERT_EQUAL(1, f->n_screen);
+    TEST_ASSERT_FALSE(f->screen_in.busy);
+    TEST_ASSERT_EQUAL(1, fx_count(f, "SIP/2.0 180"));
+    TEST_ASSERT_EQUAL(0, fx_count(f, "SIP/2.0 486"));
+    sip_call_handle_t h = fx_last_ev(f, FXE_INCOMING)->call;
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_answer(f->ua, h));
+    const char *tag = to_tag_of(fx_find(f, "SIP/2.0 200", 0));
+    inject_from_bob("ACK", 1, "sr1@x", tag, "z9hG4bKack1", NULL);
+    /* call waiting off: a second call is busy, RING does not change that */
+    sip_ua_set_call_waiting(f->ua, false);
+    inject_fmt("INVITE sip:1001@10.0.0.2:5060 SIP/2.0\r\n"
+               "Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKsr2\r\n"
+               "From: <sip:1003@10.0.0.1>;tag=c3\r\nTo: <sip:1001@10.0.0.2>\r\n"
+               "Contact: <sip:x@10.0.0.1>\r\nCall-ID: sr2@x\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n");
+    TEST_ASSERT_EQUAL(2, f->n_screen);
+    TEST_ASSERT_TRUE(f->screen_in.busy);
+    TEST_ASSERT_EQUAL_STRING("1003", f->screen_in.number);
+    TEST_ASSERT_EQUAL(1, fx_count(f, "SIP/2.0 486"));
+    TEST_ASSERT_EQUAL(486, fx_last_ev(f, FXE_REJECTED)->code);
+    /* DEFAULT under DND: refused as before */
+    sip_call_hangup(f->ua, h);
+    f->screen.action = SIP_SCREEN_DEFAULT;
+    inject_invite("sr3@x", "z9hG4bKsr3", 1, FX_SDP_PCMU, NULL);
+    TEST_ASSERT_EQUAL(2, fx_count(f, "SIP/2.0 486"));
+    TEST_ASSERT_EQUAL(1, fx_count(f, "SIP/2.0 180"));
+}
+
+static void test_screen_reject(void)
+{
+    fx_init(f, NULL);
+    f->screen_on = true;
+    f->screen.action = SIP_SCREEN_REJECT;
+    f->screen.code = 480;
+    inject_invite("sj1@x", "z9hG4bKsj1", 4, FX_SDP_PCMU, NULL);
+    TEST_ASSERT_EQUAL(0, fx_count(f, "SIP/2.0 180"));
+    int r = fx_find(f, "SIP/2.0 480", 0);
+    TEST_ASSERT_TRUE(r >= 0);
+    TEST_ASSERT_EQUAL(0, fx_count_ev(f, FXE_INCOMING));
+    TEST_ASSERT_EQUAL(480, fx_last_ev(f, FXE_REJECTED)->code);
+    TEST_ASSERT_EQUAL_STRING("1002", fx_last_ev(f, FXE_REJECTED)->number);
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_call_slots(f->ua));
+    inject_from_bob("ACK", 4, "sj1@x", to_tag_of(r), "z9hG4bKsj1", NULL);
+    fx_advance(f, 10000);
+    TEST_ASSERT_EQUAL(1, fx_count(f, "SIP/2.0 480"));
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_txn_count(f->ua));
+    /* an out-of-range code becomes 486 */
+    f->screen.code = 200;
+    inject_invite("sj2@x", "z9hG4bKsj2", 1, FX_SDP_PCMU, NULL);
+    TEST_ASSERT_EQUAL(1, fx_count(f, "SIP/2.0 486"));
+}
+
+/* 302 Moved Temporarily without ringing: Contact = the target on our domain, To tag,
+ * the request's Via (with received/rport), CSeq; ACKed like any final error. */
+static void test_screen_redirect(void)
+{
+    fx_init(f, NULL);
+    f->screen_on = true;
+    f->screen.action = SIP_SCREEN_REDIRECT;
+    snprintf(f->screen.target, sizeof(f->screen.target), "1003");
+    inject_invite("rd1@x", "z9hG4bKrd1", 9, FX_SDP_PCMU, NULL);
+    TEST_ASSERT_EQUAL(0, fx_count(f, "SIP/2.0 180"));
+    int r = fx_find(f, "SIP/2.0 302 Moved Temporarily", 0);
+    TEST_ASSERT_TRUE(r >= 0);
+    TEST_ASSERT_EQUAL_STRING("<sip:1003@10.0.0.1>", fx_hdr(f, r, "Contact"));
+    const sip_msg_t *m = fx_parse(f, r);
+    TEST_ASSERT_EQUAL(302, m->status);
+    TEST_ASSERT_EQUAL(9, (int)m->cseq);
+    TEST_ASSERT_EQUAL(SIP_METHOD_INVITE, m->cseq_method);
+    TEST_ASSERT_TRUE(m->to.tag.len > 0);
+    TEST_ASSERT_NOT_NULL(strstr(fx_hdr(f, r, "Via"), "branch=z9hG4bKrd1"));
+    TEST_ASSERT_NOT_NULL(strstr(fx_hdr(f, r, "Via"), "rport=5060"));
+    TEST_ASSERT_EQUAL_STRING("rd1@x", call_id_of(r));
+    TEST_ASSERT_EQUAL(0, fx_count_ev(f, FXE_INCOMING));
+    TEST_ASSERT_EQUAL(302, fx_last_ev(f, FXE_REJECTED)->code);
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_call_slots(f->ua));
+    /* retransmitted until the ACK */
+    fx_advance(f, 510);
+    TEST_ASSERT_EQUAL(2, fx_count(f, "SIP/2.0 302"));
+    inject_from_bob("ACK", 9, "rd1@x", to_tag_of(r), "z9hG4bKrd1", NULL);
+    fx_advance(f, 10000);
+    TEST_ASSERT_EQUAL(2, fx_count(f, "SIP/2.0 302"));
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_txn_count(f->ua));
+
+    /* a full sip: URI is used as given; a number is escaped */
+    snprintf(f->screen.target, sizeof(f->screen.target), "sip:vm@pbx.example.com");
+    inject_invite("rd2@x", "z9hG4bKrd2", 1, FX_SDP_PCMU, NULL);
+    TEST_ASSERT_EQUAL_STRING("<sip:vm@pbx.example.com>", fx_hdr(f, fx_find(f, "SIP/2.0 302", 0), "Contact"));
+    snprintf(f->screen.target, sizeof(f->screen.target), "*72#");
+    inject_invite("rd3@x", "z9hG4bKrd3", 1, FX_SDP_PCMU, NULL);
+    TEST_ASSERT_EQUAL_STRING("<sip:*72%23@10.0.0.1>", fx_hdr(f, fx_find(f, "SIP/2.0 302", 0), "Contact"));
+
+    /* unusable targets: refused with 486 instead (never a broken Contact) */
+    int busy = fx_count(f, "SIP/2.0 486");
+    static const char *const bad[] = { "", "sip:a>b@x", "bad\001" };
+    for (int i = 0; i < 3; i++) {
+        snprintf(f->screen.target, sizeof(f->screen.target), "%s", bad[i]);
+        char cid[16];
+        snprintf(cid, sizeof(cid), "rdb%d@x", i);
+        inject_invite(cid, cid, 1, FX_SDP_PCMU, NULL);
+        TEST_ASSERT_EQUAL(busy + i + 1, fx_count(f, "SIP/2.0 486"));
+    }
+    /* longest target: 63 characters that need escaping (3 x 63 > the URI limit) */
+    memset(f->screen.target, '#', sizeof(f->screen.target) - 1);
+    f->screen.target[sizeof(f->screen.target) - 1] = '\0';
+    inject_invite("rdl@x", "z9hG4bKrdl", 1, FX_SDP_PCMU, NULL);
+    TEST_ASSERT_EQUAL(busy + 4, fx_count(f, "SIP/2.0 486"));
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_call_slots(f->ua));
+}
+
+/* No answer: the ringing call is redirected after its 180 (a final 3xx after a
+ * provisional response is fine); same To tag as the 180. */
+static void test_redirect_ringing_call(void)
+{
+    fx_init(f, NULL);
+    inject_invite("rr1@x", "z9hG4bKrr1", 2, FX_SDP_PCMU, NULL);
+    sip_call_handle_t h = fx_last_ev(f, FXE_INCOMING)->call;
+    char tag180[80];
+    snprintf(tag180, sizeof(tag180), "%s", to_tag_of(fx_find(f, "SIP/2.0 180", 0)));
+    char longest[SIP_UA_TARGET_MAX];
+    memset(longest, '#', sizeof(longest) - 1);
+    longest[sizeof(longest) - 1] = '\0';
+    TEST_ASSERT_EQUAL(SIP_ERR_ARG, sip_call_redirect(f->ua, h, ""));
+    TEST_ASSERT_EQUAL(SIP_ERR_ARG, sip_call_redirect(f->ua, h, NULL));
+    TEST_ASSERT_EQUAL(SIP_ERR_ARG, sip_call_redirect(f->ua, h, longest));
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_RINGING_IN, sip_call_state(f->ua, h));
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_redirect(f->ua, h, "1003"));
+    int r = fx_find(f, "SIP/2.0 302", 0);
+    TEST_ASSERT_TRUE(r >= 0);
+    TEST_ASSERT_EQUAL_STRING(tag180, to_tag_of(r));
+    TEST_ASSERT_EQUAL_STRING("<sip:1003@10.0.0.1>", fx_hdr(f, r, "Contact"));
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_ENDED, last_call_ev()->state);
+    TEST_ASSERT_EQUAL(SIP_END_LOCAL, last_call_ev()->reason);
+    TEST_ASSERT_EQUAL(302, last_call_ev()->code);
+    TEST_ASSERT_EQUAL(SIP_ERR_NOT_FOUND, sip_call_redirect(f->ua, h, "1003"));
+    inject_from_bob("ACK", 2, "rr1@x", tag180, "z9hG4bKrr1", NULL);
+    fx_advance(f, 10000);
+    TEST_ASSERT_EQUAL(1, fx_count(f, "SIP/2.0 302"));
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_txn_count(f->ua));
+    /* only a ringing incoming call */
+    const char *tag;
+    sip_call_handle_t a = establish_incoming("rr2@x", &tag);
+    TEST_ASSERT_EQUAL(SIP_ERR_STATE, sip_call_redirect(f->ua, a, "1003"));
+    sip_call_hangup(f->ua, a);
+    sip_call_handle_t o;
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_dial(f->ua, "600", &o));
+    TEST_ASSERT_EQUAL(SIP_ERR_STATE, sip_call_redirect(f->ua, o, "1003"));
+}
+
 /* ------------------------------------------------- hold glare / queue */
 
 static void test_hold_queued_while_reinvite_in_flight(void)
@@ -1893,6 +2105,12 @@ int main(void)
     RUN_TEST(test_dnd_rejects_without_ringing);
     RUN_TEST(test_answer_after_parsing);
     RUN_TEST(test_answer_after_reported);
+    RUN_TEST(test_alert_marker_parsing);
+    RUN_TEST(test_alert_marker_reported);
+    RUN_TEST(test_screen_ring_overrides_dnd);
+    RUN_TEST(test_screen_reject);
+    RUN_TEST(test_screen_redirect);
+    RUN_TEST(test_redirect_ringing_call);
     RUN_TEST(test_hold_queued_while_reinvite_in_flight);
     RUN_TEST(test_reinvite_491_retry_timing);
     RUN_TEST(test_blind_transfer_success);

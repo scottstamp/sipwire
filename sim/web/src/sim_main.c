@@ -126,6 +126,10 @@ static void push_model(void)
         }
     }
     s_model.now = s_hour >= 0 ? (int64_t)wall_at(0, s_hour, s_minute) : 0;
+    /* quiet hours as the bridge computes them (phone_quiet_window) */
+    int now_min = s_hour * 60 + s_minute, qs = s_model.quiet_start, qe = s_model.quiet_end;
+    s_model.quiet_active = s_model.quiet_hours && s_hour >= 0 && qs != qe &&
+                           (qs < qe ? (now_min >= qs && now_min < qe) : (now_min >= qs || now_min < qe));
     format_clock();
     ui_update(&s_model);
     js_model_changed();
@@ -463,6 +467,19 @@ static bool act_speed_get(void *ctx, int digit, ui_contact_t *out)
     return true;
 }
 
+static bool act_last_dialed(void *ctx, char *out, size_t cap)
+{
+    (void)ctx;
+    for (size_t i = 0; i < s_n_hist; i++) {     /* newest first */
+        if (s_hist[i].direction == UI_CALLDIR_OUT && s_hist[i].number[0]) {
+            snprintf(out, cap, "%s", s_hist[i].number);
+            sim_log("action last_dialed -> %s", out);
+            return true;
+        }
+    }
+    return false;
+}
+
 static size_t act_history_list(void *ctx, ui_call_t *out, size_t max)
 {
     (void)ctx;
@@ -545,6 +562,29 @@ static void act_save_call_features(void *ctx, bool cw, bool aa, bool dnd)
     s_model.call_waiting = cw;
     s_model.auto_answer = aa;
     s_model.dnd = dnd;
+    push_model();
+}
+
+static void act_save_quiet(void *ctx, bool on, uint16_t start, uint16_t end, bool allow)
+{
+    (void)ctx;
+    sim_log("action save_quiet(on=%d %02u:%02u-%02u:%02u contacts=%d)", on, start / 60, start % 60, end / 60,
+            end % 60, allow);
+    s_model.quiet_hours = on;
+    s_model.quiet_start = start;
+    s_model.quiet_end = end;
+    s_model.quiet_allow_contacts = allow;
+    push_model();
+}
+
+static void act_save_forward(void *ctx, const char *always, const char *busy, const char *noanswer, uint16_t secs)
+{
+    (void)ctx;
+    sim_log("action save_forward(always='%s' busy='%s' noanswer='%s' after %u s)", always, busy, noanswer, secs);
+    snprintf(s_model.fwd_always, sizeof(s_model.fwd_always), "%s", always);
+    snprintf(s_model.fwd_busy, sizeof(s_model.fwd_busy), "%s", busy);
+    snprintf(s_model.fwd_noanswer, sizeof(s_model.fwd_noanswer), "%s", noanswer);
+    s_model.fwd_noanswer_s = secs;
     push_model();
 }
 
@@ -1043,6 +1083,30 @@ EMSCRIPTEN_KEEPALIVE void sim_set_dnd(int on)
     push_model();
 }
 
+/* Quiet hours setting (start / end "HH:MM"). */
+EMSCRIPTEN_KEEPALIVE void sim_set_quiet(int on, const char *start, const char *end)
+{
+    int h, m;
+    s_model.quiet_hours = on != 0;
+    if (start && sscanf(start, "%d:%d", &h, &m) == 2 && h >= 0 && h < 24 && m >= 0 && m < 60) {
+        s_model.quiet_start = (uint16_t)(h * 60 + m);
+    }
+    if (end && sscanf(end, "%d:%d", &h, &m) == 2 && h >= 0 && h < 24 && m >= 0 && m < 60) {
+        s_model.quiet_end = (uint16_t)(h * 60 + m);
+    }
+    push_model();
+}
+
+/* Call forwarding setting (the always target drives the FWD badge). */
+EMSCRIPTEN_KEEPALIVE void sim_set_forward(const char *always, const char *busy, const char *noanswer, int secs)
+{
+    snprintf(s_model.fwd_always, sizeof(s_model.fwd_always), "%s", always ? always : "");
+    snprintf(s_model.fwd_busy, sizeof(s_model.fwd_busy), "%s", busy ? busy : "");
+    snprintf(s_model.fwd_noanswer, sizeof(s_model.fwd_noanswer), "%s", noanswer ? noanswer : "");
+    s_model.fwd_noanswer_s = (uint16_t)(secs >= 5 && secs <= 300 ? secs : 20);
+    push_model();
+}
+
 EMSCRIPTEN_KEEPALIVE void sim_set_page(int on)
 {
     s_model.auto_answered = on != 0;
@@ -1177,7 +1241,7 @@ EMSCRIPTEN_KEEPALIVE void sim_set_unseen(int n)
 /* Log a call now (direction 0 in / 1 out, result ui_call_result_t), like the phone at call end. */
 EMSCRIPTEN_KEEPALIVE void sim_history_add(int dir, int res, const char *number, const char *name, int seconds)
 {
-    hist_add(dir ? UI_CALLDIR_OUT : UI_CALLDIR_IN, res < UI_CALLRES_ANSWERED || res > UI_CALLRES_DND ? 0 : res,
+    hist_add(dir ? UI_CALLDIR_OUT : UI_CALLDIR_IN, res < UI_CALLRES_ANSWERED || res > UI_CALLRES_FORWARDED ? 0 : res,
              number, name, seconds > 0 ? (uint32_t)seconds : 0);
     push_model();
 }
@@ -1369,6 +1433,10 @@ int main(void)
     s_model.speaker_volume = 90;
     s_model.call_waiting = true;
     s_model.auto_answer = true;
+    s_model.quiet_start = 22 * 60;
+    s_model.quiet_end = 7 * 60;
+    s_model.quiet_allow_contacts = true;
+    s_model.fwd_noanswer_s = 20;
     seed_directory();
 
     s_actions = (ui_actions_t){
@@ -1402,12 +1470,15 @@ int main(void)
         .contact_delete = act_contact_delete,
         .speed_get = act_speed_get,
         .history_list = act_history_list,
+        .last_dialed = act_last_dialed,
         .history_clear = act_history_clear,
         .history_mark_seen = act_history_mark_seen,
         .ringtone_name = act_ringtone_name,
         .ringtone_preview = act_ringtone_preview,
         .save_sounds = act_save_sounds,
         .save_call_features = act_save_call_features,
+        .save_quiet = act_save_quiet,
+        .save_forward = act_save_forward,
     };
 
     ui_init(disp, &s_actions);

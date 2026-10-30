@@ -6,7 +6,8 @@
  * fixed height, so the keypad never moves while typing. Holding 2-9 on the physical or the
  * on-screen keypad calls the speed dial entry of that key when the number is still empty
  * (physical: just that digit). A lone 2-9 that has an entry shows "Hold 5 to call Bob" in the
- * first row.
+ * first row. Call with no number fills in the last dialled one (call history); Call again
+ * dials it (redial; also long '#' with nothing typed).
  *
  * Layout (240x320): status bar 0-21, number 22-58, matches 60-136 (3 x 24 + 2 x 2),
  * keypad 139-273, Back | Call | Backspace 276-317. */
@@ -147,7 +148,17 @@ static void do_call(dialer_t *d)
 {
     if (d->len) {
         ui_act_dial(d->buf);
+        return;
     }
+    /* redial: fill in the last outgoing number, the next Call dials it */
+    char last[UI_NUMBER_LEN];
+    if (!ui_act_last_dialed(last, sizeof(last))) {
+        ui_toast("No number to redial");
+        return;
+    }
+    snprintf(d->buf, sizeof(d->buf), "%s", last);
+    d->len = strlen(d->buf);
+    refresh(d);
 }
 
 static void on_key(char key, bool long_press, void *user)

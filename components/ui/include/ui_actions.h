@@ -86,6 +86,9 @@ typedef struct {
     void (*history_clear)(void *ctx);
     /* Mark all missed calls seen (the badge count follows in the model). */
     void (*history_mark_seen)(void *ctx);
+    /* Redial: the number of the newest outgoing call in the history into `out` (cap bytes);
+     * false when there is none. */
+    bool (*last_dialed)(void *ctx, char *out, size_t cap);
 
     /* ---- sounds / call features ---- */
     const char *(*ringtone_name)(void *ctx, int idx);   /* NULL out of range */
@@ -97,4 +100,10 @@ typedef struct {
                         uint8_t speaker_volume);
     /* Persist the call feature switches (applied live). */
     void (*save_call_features)(void *ctx, bool call_waiting, bool auto_answer, bool dnd);
+    /* Persist the quiet hours (start / end: minutes after midnight 0-1439). */
+    void (*save_quiet)(void *ctx, bool on, uint16_t start_min, uint16_t end_min, bool allow_contacts);
+    /* Persist call forwarding: targets ("" = off; dialable characters or a sip: URI, < 32 chars)
+     * and the no-answer delay (5-300 s). */
+    void (*save_forward)(void *ctx, const char *always, const char *busy, const char *noanswer,
+                         uint16_t noanswer_s);
 } ui_actions_t;

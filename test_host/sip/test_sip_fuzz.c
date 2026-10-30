@@ -34,6 +34,8 @@ static const char *seeds[] = {
     "Call-ID: fuzz1@10.0.0.1\r\n"
     "CSeq: 100 INVITE\r\n"
     "Supported: timer, replaces\r\n"
+    "Alert-Info: <http://x/r.wav>;info=find, find;x=1, info=intercom\r\n"
+    "Call-Info: <sip:10.0.0.1>;answer-after=0\r\n"
     "Content-Type: application/sdp\r\n"
     "\r\n" /* no Content-Length: rest of datagram (§18.3) */
     "v=0\r\n"
@@ -284,7 +286,14 @@ static void test_fuzz_ua(void)
     static char work[SIP_MAX_MSG_IN + 256];
     fx_init(&f, quiet_cfg);
     sip_ua_register(f.ua);
+    TEST_ASSERT_EQUAL(SIP_OK, sip_ua_set_alert_marker(f.ua, "find"));
+    static const char *const targets[] = { "1003", "sip:vm@10.0.0.1", "", "#*+1 (555)", "sip:bad>uri" };
     for (int it = 0; it < FUZZ_ITERATIONS / 5; it++) {
+        /* screening churn: default, ring, reject, redirect (incl. unusable targets) */
+        f.screen_on = it % 3 != 0;
+        f.screen.action = (sip_screen_action_t)(fx_rand(&rng) % 4);
+        f.screen.code = (int)(fx_rand(&rng) % 800);
+        snprintf(f.screen.target, sizeof(f.screen.target), "%s", targets[fx_rand(&rng) % 5]);
         const char *seed = seeds[fx_rand(&rng) % (sizeof(seeds) / sizeof(seeds[0]))];
         size_t len = mutate(work, sizeof(work), seed, strlen(seed));
         char *exact = malloc(len ? len : 1);
@@ -298,6 +307,9 @@ static void test_fuzz_ua(void)
         if (it % 97 == 0) {
             sip_call_handle_t h;
             sip_call_dial(f.ua, "600", &h);
+        }
+        if (it % 83 == 0 && f.n_ev) {
+            sip_call_redirect(f.ua, f.ev[f.n_ev - 1].call, targets[fx_rand(&rng) % 5]);
         }
         if (it % 89 == 0 && f.n_ev) {
             sip_call_answer(f.ua, f.ev[f.n_ev - 1].call);

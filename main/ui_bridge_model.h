@@ -43,9 +43,16 @@ typedef struct {
     uint8_t ringtone_count;
     uint8_t ring_tone, ring_volume, call_volume, speaker_volume;
     bool call_waiting, auto_answer;
+    /* quiet hours (settings) */
+    bool quiet_hours, quiet_allow_contacts;
+    uint16_t quiet_start, quiet_end;
+    /* call forwarding (settings) */
+    char fwd_always[UI_NUMBER_LEN], fwd_busy[UI_NUMBER_LEN], fwd_noanswer[UI_NUMBER_LEN];
+    uint16_t fwd_noanswer_s;
     /* last CALL_EVENT_MISSED (call refused without ringing) */
     uint16_t missed_seq;            /* +1 per event */
     bool missed_dnd;
+    bool missed_quiet;
     char missed_from[64];           /* name, else number */
     /* keypad lock when the display goes dark (ui_model_t keypad_autolock); default off.
      * Set it under b.mtx, e.g. in update_settings_locked() from a settings switch. */
@@ -81,6 +88,14 @@ void ui_bridge_fill_dnd(ui_bridge_local_t *loc, bool dnd);
 void ui_bridge_fill_sounds(ui_bridge_local_t *loc, int ringtone_count, uint8_t ring_tone, uint8_t ring_volume,
                            uint8_t call_volume, uint8_t speaker_volume, bool call_waiting, bool auto_answer,
                            bool dnd);
+
+/** Quiet hours settings (Settings > Call features prefill, status bar). */
+void ui_bridge_fill_quiet(ui_bridge_local_t *loc, bool on, uint16_t start_min, uint16_t end_min,
+                          bool allow_contacts);
+
+/** Call forwarding settings (Settings > Forwarding prefill, status bar FWD). NULL = "". */
+void ui_bridge_fill_forward(ui_bridge_local_t *loc, const char *always, const char *busy, const char *noanswer,
+                            uint16_t noanswer_s);
 
 ui_blf_state_t ui_bridge_map_blf(blf_state_t st);
 

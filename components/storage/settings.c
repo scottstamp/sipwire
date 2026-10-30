@@ -50,6 +50,15 @@ static const char *TAG = "storage";
 #define K_CALL_WAIT   "call_waiting"
 #define K_DND         "dnd"
 #define K_AUTO_ANSWER "auto_answer"
+#define K_FIND_ALERT  "find_alert"
+#define K_QUIET       "quiet_hours"
+#define K_QUIET_START "quiet_start"
+#define K_QUIET_END   "quiet_end"
+#define K_QUIET_CONT  "quiet_contacts"
+#define K_FWD_ALWAYS  "fwd_always"
+#define K_FWD_BUSY    "fwd_busy"
+#define K_FWD_NOANS   "fwd_noans"
+#define K_FWD_NOANS_S "fwd_noans_s"
 #define K_RING_VOL    "ring_vol"
 #define K_CALL_VOL    "call_vol"
 #define K_MIC_GAIN    "mic_gain"
@@ -81,6 +90,12 @@ static const settings_t s_defaults = {
     .call_waiting = true,
     .dnd = false,
     .auto_answer = true,
+    .find_alert = "find",
+    .quiet_hours = false,
+    .quiet_start = 22 * 60,
+    .quiet_end = 7 * 60,
+    .quiet_allow_contacts = true,
+    .fwd_noanswer_s = 20,
     .ring_volume = 70,
     .call_volume = 60,
     .mic_gain = 50,
@@ -113,6 +128,44 @@ static void settings_defaults(settings_t *s)
 static settings_t *alloc_settings(void)
 {
     return heap_caps_malloc_prefer(sizeof(settings_t), 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, MALLOC_CAP_8BIT);
+}
+
+/* ---- value rules ---- */
+
+/* SIP token characters (RFC 3261 §25.1): the alert marker must be one. */
+static bool token_ok(const char *s)
+{
+    for (; *s; s++) {
+        if (!((*s >= '0' && *s <= '9') || (*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') ||
+              strchr("-.!%*_+`'~", *s))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool settings_fwd_target_ok(const char *s)
+{
+    if (s == NULL) {
+        return false;
+    }
+    if (strncmp(s, "sip:", 4) == 0) {
+        if (s[4] == '\0') {
+            return false;
+        }
+        for (const char *p = s + 4; *p; p++) {
+            if (*p <= ' ' || *p >= 0x7f || strchr("<>\"", *p)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    for (; *s; s++) {
+        if (!sipwire_blf_ext_char_ok(*s)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /* ---- NVS load: a missing (or unusable) key leaves the default in place ---- */
@@ -187,6 +240,38 @@ static void load_all(nvs_handle_t h, settings_t *s)
     if (nvs_get_u8(h, K_AUTO_ANSWER, &u8) == ESP_OK) {
         s->auto_answer = u8 != 0;
     }
+    load_str_or_keep(h, K_FIND_ALERT, s->find_alert, sizeof(s->find_alert));
+    if (!token_ok(s->find_alert)) {
+        strcpy(s->find_alert, s_defaults.find_alert);
+    }
+    if (nvs_get_u8(h, K_QUIET, &u8) == ESP_OK) {
+        s->quiet_hours = u8 != 0;
+    }
+    if (nvs_get_u16(h, K_QUIET_START, &u16) == ESP_OK && u16 < SETTINGS_MINUTES_PER_DAY) {
+        s->quiet_start = u16;
+    }
+    if (nvs_get_u16(h, K_QUIET_END, &u16) == ESP_OK && u16 < SETTINGS_MINUTES_PER_DAY) {
+        s->quiet_end = u16;
+    }
+    if (nvs_get_u8(h, K_QUIET_CONT, &u8) == ESP_OK) {
+        s->quiet_allow_contacts = u8 != 0;
+    }
+    load_str_or_keep(h, K_FWD_ALWAYS, s->fwd_always, sizeof(s->fwd_always));
+    load_str_or_keep(h, K_FWD_BUSY, s->fwd_busy, sizeof(s->fwd_busy));
+    load_str_or_keep(h, K_FWD_NOANS, s->fwd_noanswer, sizeof(s->fwd_noanswer));
+    if (!settings_fwd_target_ok(s->fwd_always)) {
+        s->fwd_always[0] = '\0';
+    }
+    if (!settings_fwd_target_ok(s->fwd_busy)) {
+        s->fwd_busy[0] = '\0';
+    }
+    if (!settings_fwd_target_ok(s->fwd_noanswer)) {
+        s->fwd_noanswer[0] = '\0';
+    }
+    if (nvs_get_u16(h, K_FWD_NOANS_S, &u16) == ESP_OK && u16 >= SETTINGS_FWD_NOANSWER_MIN &&
+        u16 <= SETTINGS_FWD_NOANSWER_MAX) {
+        s->fwd_noanswer_s = u16;
+    }
 
     if (nvs_get_u16(h, K_SIP_PORT, &u16) == ESP_OK && u16 != 0) {
         s->sip_port = u16;
@@ -243,7 +328,11 @@ static esp_err_t validate(const settings_t *s)
                         str_ok(s->vm_number, sizeof(s->vm_number)) &&
                         str_ok(s->ntp_server, sizeof(s->ntp_server)) &&
                         str_ok(s->tz, sizeof(s->tz)) &&
-                        str_ok(s->ota_url, sizeof(s->ota_url)),
+                        str_ok(s->ota_url, sizeof(s->ota_url)) &&
+                        str_ok(s->find_alert, sizeof(s->find_alert)) &&
+                        str_ok(s->fwd_always, sizeof(s->fwd_always)) &&
+                        str_ok(s->fwd_busy, sizeof(s->fwd_busy)) &&
+                        str_ok(s->fwd_noanswer, sizeof(s->fwd_noanswer)),
                         ESP_ERR_INVALID_ARG, TAG, "string not NUL-terminated");
     ESP_RETURN_ON_FALSE(s->ntp_server[0] != '\0' && s->tz[0] != '\0', ESP_ERR_INVALID_ARG, TAG,
                         "ntp_server and tz must not be empty");
@@ -254,6 +343,16 @@ static esp_err_t validate(const settings_t *s)
                         "bad sip_transport");
     ESP_RETURN_ON_FALSE(s->ring_volume <= 100 && s->call_volume <= 100 && s->speaker_volume <= 100 && s->mic_gain <= 100 &&
                         s->backlight <= 100, ESP_ERR_INVALID_ARG, TAG, "value out of range 0-100");
+    ESP_RETURN_ON_FALSE(token_ok(s->find_alert), ESP_ERR_INVALID_ARG, TAG,
+                        "find_alert: letters, digits and - . ! %% * _ + ` ' ~ only");
+    ESP_RETURN_ON_FALSE(s->quiet_start < SETTINGS_MINUTES_PER_DAY && s->quiet_end < SETTINGS_MINUTES_PER_DAY,
+                        ESP_ERR_INVALID_ARG, TAG, "quiet_start / quiet_end: 00:00-23:59");
+    ESP_RETURN_ON_FALSE(settings_fwd_target_ok(s->fwd_always) && settings_fwd_target_ok(s->fwd_busy) &&
+                        settings_fwd_target_ok(s->fwd_noanswer), ESP_ERR_INVALID_ARG, TAG,
+                        "forward target: a number (0-9 a-z * # + . _ -) or a sip: URI");
+    ESP_RETURN_ON_FALSE(s->fwd_noanswer_s >= SETTINGS_FWD_NOANSWER_MIN && s->fwd_noanswer_s <= SETTINGS_FWD_NOANSWER_MAX,
+                        ESP_ERR_INVALID_ARG, TAG, "fwd_noanswer_s: %d-%d", SETTINGS_FWD_NOANSWER_MIN,
+                        SETTINGS_FWD_NOANSWER_MAX);
     ESP_RETURN_ON_FALSE(s->aec_suppress <= SETTINGS_AEC_SUPPRESS_MAX && s->aec_suppress_act <= SETTINGS_AEC_SUPPRESS_MAX,
                         ESP_ERR_INVALID_ARG, TAG, "aec_suppress: 0-%d dB", SETTINGS_AEC_SUPPRESS_MAX);
     return ESP_OK;
@@ -303,6 +402,19 @@ static esp_err_t store_changed(nvs_handle_t h, const settings_t *in)
     if (in->auto_answer != s_cur->auto_answer) {
         ESP_RETURN_ON_ERROR(nvs_set_u8(h, K_AUTO_ANSWER, in->auto_answer ? 1 : 0), TAG, K_AUTO_ANSWER);
     }
+    STORE_STR(K_FIND_ALERT, find_alert);
+    if (in->quiet_hours != s_cur->quiet_hours) {
+        ESP_RETURN_ON_ERROR(nvs_set_u8(h, K_QUIET, in->quiet_hours ? 1 : 0), TAG, K_QUIET);
+    }
+    STORE_NUM(nvs_set_u16, K_QUIET_START, quiet_start);
+    STORE_NUM(nvs_set_u16, K_QUIET_END, quiet_end);
+    if (in->quiet_allow_contacts != s_cur->quiet_allow_contacts) {
+        ESP_RETURN_ON_ERROR(nvs_set_u8(h, K_QUIET_CONT, in->quiet_allow_contacts ? 1 : 0), TAG, K_QUIET_CONT);
+    }
+    STORE_STR(K_FWD_ALWAYS, fwd_always);
+    STORE_STR(K_FWD_BUSY, fwd_busy);
+    STORE_STR(K_FWD_NOANS, fwd_noanswer);
+    STORE_NUM(nvs_set_u16, K_FWD_NOANS_S, fwd_noanswer_s);
 
     STORE_NUM(nvs_set_u16, K_SIP_PORT, sip_port);
     if (in->sip_transport != s_cur->sip_transport) {

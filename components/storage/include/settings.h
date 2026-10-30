@@ -17,6 +17,9 @@ typedef struct {
 } settings_touch_cal_t;
 
 #define SETTINGS_AEC_SUPPRESS_MAX  90  /* dB, the canceller's limit (AEC_SUPPRESS_MIN_DB) */
+#define SETTINGS_MINUTES_PER_DAY   1440    /* quiet_start / quiet_end: 0..1439 */
+#define SETTINGS_FWD_NOANSWER_MIN  5       /* fwd_noanswer_s range, seconds */
+#define SETTINGS_FWD_NOANSWER_MAX  300
 
 typedef struct {
     /* wifi */
@@ -39,6 +42,16 @@ typedef struct {
     bool call_waiting;         /* offer a second incoming call during a call, default true */
     bool dnd;                  /* do not disturb: refuse incoming calls with 486, default false */
     bool auto_answer;          /* answer pages / intercom calls (Call-Info answer-after...), default true */
+    char find_alert[32];       /* Alert-Info marker of a find-the-handset call (rings at full volume
+                                * through DND and quiet hours), default "find"; "" = off; SIP token */
+    bool quiet_hours;          /* quiet hours on (only with the clock set), default false */
+    uint16_t quiet_start;      /* minutes after midnight 0-1439, default 22:00 (1320) */
+    uint16_t quiet_end;        /* default 07:00 (420); end <= start wraps past midnight; equal = never */
+    bool quiet_allow_contacts; /* callers in the contacts still ring in quiet hours, default true */
+    char fwd_always[32];       /* forward every incoming call (302) here; "" = off. Number or sip: URI */
+    char fwd_busy[32];         /* ... when busy (no free line) or declined; "" = off */
+    char fwd_noanswer[32];     /* ... when not answered within fwd_noanswer_s; "" = off */
+    uint16_t fwd_noanswer_s;   /* 5-300, default 20 */
     /* audio */
     uint8_t ring_volume;       /* 0-100 */
     uint8_t call_volume;       /* 0-100 */
@@ -95,6 +108,10 @@ esp_err_t settings_set_field(size_t off, const void *src, size_t len);
     settings_get_field(offsetof(settings_t, field), (ptr), SETTINGS_CHECKED_SIZE_(field, ptr))
 #define SETTINGS_SET(field, ptr) \
     settings_set_field(offsetof(settings_t, field), (ptr), SETTINGS_CHECKED_SIZE_(field, ptr))
+
+/** A forwarding target (fwd_*): "" (off), a dialable number (0-9 A-Z a-z * # + . _ -) or a
+ *  "sip:" URI without spaces, quotes or angle brackets. */
+bool settings_fwd_target_ok(const char *s);
 
 /** Restore defaults (keeps nothing), persist, post SETTINGS_EVENT_CHANGED. */
 esp_err_t settings_reset(void);

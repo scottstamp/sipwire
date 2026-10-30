@@ -363,6 +363,7 @@ const char *sip_reason_phrase(int code)
     case 180: return "Ringing";
     case 183: return "Session Progress";
     case 200: return "OK";
+    case 302: return "Moved Temporarily";
     case 400: return "Bad Request";
     case 401: return "Unauthorized";
     case 403: return "Forbidden";
@@ -387,6 +388,7 @@ const char *sip_reason_phrase(int code)
     default: break;
     }
     if (code >= 200 && code < 300) return "OK";
+    if (code >= 300 && code < 400) return "Redirection";
     if (code >= 400 && code < 500) return "Client Error";
     if (code >= 500 && code < 600) return "Server Error";
     if (code >= 600) return "Global Failure";

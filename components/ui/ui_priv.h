@@ -81,11 +81,14 @@ bool ui_act_speed_get(int digit, ui_contact_t *out);
 size_t ui_act_history_list(ui_call_t *out, size_t max);
 void ui_act_history_clear(void);
 void ui_act_history_mark_seen(void);
+bool ui_act_last_dialed(char *out, size_t cap);
 /* sounds */
 const char *ui_act_ringtone_name(int idx);
 void ui_act_ringtone_preview(int idx);   /* idx < 0 stops */
 void ui_act_save_sounds(uint8_t tone, uint8_t ring_vol, uint8_t call_vol, uint8_t spk_vol);
 void ui_act_save_call_features(bool call_waiting, bool auto_answer, bool dnd);
+void ui_act_save_quiet(bool on, uint16_t start_min, uint16_t end_min, bool allow_contacts);
+void ui_act_save_forward(const char *always, const char *busy, const char *noanswer, uint16_t noanswer_s);
 void ui_act_touch_cal_begin(void);
 void ui_act_touch_cal_end(const ui_touch_cal_t *cal_or_null);
 

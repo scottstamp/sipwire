@@ -26,6 +26,10 @@ components/ota/      firmware update over HTTP(S) (`ota <url>`, Settings > Updat
 components/sip/      own SIP UA incl. BLF (dialog) / MWI (message-summary) subscriptions;
                      setting `blf` (e.g. `cfg set blf "1002:Bob,1003"`), `vm_number`
                      (no managed component added)
+components/phone/    call features: settings `find_alert` (find the handset, default "find"),
+                     `quiet_hours` + `quiet_start` / `quiet_end` (HH:MM) + `quiet_allow_contacts`,
+                     `fwd_always` / `fwd_busy` / `fwd_noanswer` + `fwd_noanswer_s` (302
+                     forwarding), console `redial` (also: Call on an empty dialer)
 sdkconfig.defaults   FreeRTOS + LVGL Kconfig defaults
 ```
 

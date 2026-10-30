@@ -547,6 +547,17 @@ const dir_call_t *dir_hist_last_unseen_missed(const dir_hist_t *h)
     return NULL;
 }
 
+const dir_call_t *dir_hist_last_dialed(const dir_hist_t *h)
+{
+    for (size_t i = 0; i < h->count; i++) {
+        const dir_call_t *c = dir_hist_get(h, i);
+        if (c->direction == DIR_CALL_OUT && c->number[0]) {
+            return c;
+        }
+    }
+    return NULL;
+}
+
 bool dir_hist_mark_seen(dir_hist_t *h)
 {
     bool changed = false;
@@ -633,7 +644,7 @@ int dir_hist_deserialize(dir_hist_t *h, const uint8_t *buf, size_t len)
     }
     const uint8_t *rec = buf + DIR_HIST_HDR_SIZE;
     for (size_t k = 0; k < count; k++, rec += DIR_HIST_REC_SIZE) {
-        if (rec[0] > DIR_CALL_OUT || rec[1] > DIR_RES_DND) {
+        if (rec[0] > DIR_CALL_OUT || rec[1] > DIR_RES_FORWARDED) {
             h->head = 0;
             h->count = 0;
             return -1;

@@ -1,8 +1,10 @@
-/* Incoming call: caller + big Answer / Decline. */
+/* Incoming call: caller + big Answer / Decline. A find-the-handset call says so in the
+ * title (amber). */
 
 #include "ui_priv.h"
 
 typedef struct {
+    lv_obj_t *title;
     lv_obj_t *who;
     lv_obj_t *sub;
 } incoming_t;
@@ -41,9 +43,9 @@ static lv_obj_t *incoming_create(const char *arg)
     lv_obj_add_event_cb(scr, on_delete, LV_EVENT_DELETE, i);
     ui_statusbar_create(scr);
 
-    lv_obj_t *title = ui_label_create(scr, &lv_font_montserrat_14, UI_COL_OK, "INCOMING CALL");
-    lv_obj_set_style_text_letter_space(title, 2, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 32);
+    i->title = ui_label_create(scr, &lv_font_montserrat_14, UI_COL_OK, "INCOMING CALL");
+    lv_obj_set_style_text_letter_space(i->title, 2, 0);
+    lv_obj_align(i->title, LV_ALIGN_TOP_MID, 0, 32);
 
     ui_avatar_create(scr, LV_SYMBOL_BELL, UI_COL_OK, 54);
     i->who = ui_fit_create(scr, 6, 144, 228, 42, UI_COL_TEXT);
@@ -75,6 +77,9 @@ static void incoming_update(const ui_model_t *m)
     ui_remote_texts(m, &main_txt, &sub_txt);
     ui_fit_set(i->who, main_txt, &lv_font_montserrat_32, !m->remote_name[0]);
     ui_fit_set(i->sub, sub_txt, &lv_font_montserrat_14, true);
+    if (ui_label_set_text_if_changed(i->title, m->find_ringing ? "FIND HANDSET" : "INCOMING CALL")) {
+        lv_obj_set_style_text_color(i->title, m->find_ringing ? UI_COL_WARN : UI_COL_OK, 0);
+    }
 }
 
 static void incoming_key(char key, ui_key_action_t action)

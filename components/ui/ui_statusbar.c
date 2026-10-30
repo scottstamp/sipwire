@@ -1,7 +1,9 @@
 /* Status bar shown at the top of every screen: Wi-Fi bars, SIP registration
  * dot, clock, battery. While voicemail is waiting an amber envelope (with the
  * number of new messages) takes the place of the "SIP" caption. Do not disturb: a dim bell left of
- * the battery (tap = on) or a red "DND" badge (tap = off). Each screen owns its own bar; only the newest one is
+ * the battery (tap = on) or a red "DND" badge (tap = off); inside quiet hours (DND off) a blue "Zz"
+ * badge in its place (tap = DND on); with always-forward set an amber "FWD" badge takes the
+ * place of both (calls are forwarded then, not refused; tap still toggles DND). Each screen owns its own bar; only the newest one is
  * kept up to date. */
 
 #include "ui_priv.h"
@@ -33,6 +35,8 @@ typedef struct {
     bool mwi_waiting;
     uint16_t mwi_new;
     bool dnd_on;
+    bool quiet_on;
+    bool fwd_on;
 } statusbar_t;
 
 static statusbar_t *s_sb;
@@ -181,7 +185,10 @@ void ui_statusbar_update(const ui_model_t *m)
         sb->reg = m->reg;
     }
 
-    bool dnd_changed = !sb->valid || m->dnd != sb->dnd_on;
+    bool fwd = m->fwd_always[0] != '\0';
+    bool quiet = m->quiet_active && !m->dnd && !fwd;
+    bool dnd_changed = !sb->valid || m->dnd != sb->dnd_on || quiet != sb->quiet_on || fwd != sb->fwd_on;
+    bool badge = fwd || m->dnd || quiet;    /* FWD, DND or Zz badge: needs the room on the left too */
     bool mwi_changed = !sb->valid || m->mwi_waiting != sb->mwi_waiting || m->mwi_new != sb->mwi_new;
     if (mwi_changed || dnd_changed) {
         if (m->mwi_waiting) {
@@ -192,8 +199,8 @@ void ui_statusbar_update(const ui_model_t *m)
             }
         }
         /* with DND on the badge needs the room: caption and envelope make way */
-        lv_obj_set_hidden(sb->mwi, !m->mwi_waiting || m->dnd);
-        lv_obj_set_hidden(sb->reg_lbl, m->mwi_waiting || m->dnd);
+        lv_obj_set_hidden(sb->mwi, !m->mwi_waiting || badge);
+        lv_obj_set_hidden(sb->reg_lbl, m->mwi_waiting || badge);
         sb->mwi_waiting = m->mwi_waiting;
         sb->mwi_new = m->mwi_new;
     }
@@ -221,13 +228,16 @@ void ui_statusbar_update(const ui_model_t *m)
     }
 
     if (dnd_changed) {
-        lv_label_set_text(sb->dnd_lbl, m->dnd ? "DND" : LV_SYMBOL_BELL);
-        lv_obj_set_style_text_color(sb->dnd_lbl, m->dnd ? UI_COL_TEXT : lv_color_hex(0x7D8996), 0);
-        lv_obj_set_style_bg_color(sb->dnd, UI_COL_RED, 0);
-        lv_obj_set_style_bg_opa(sb->dnd, m->dnd ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-        lv_obj_set_width(sb->dnd, m->dnd ? 30 : 18);
+        lv_label_set_text(sb->dnd_lbl, fwd ? "FWD" : m->dnd ? "DND" : quiet ? "Zz" : LV_SYMBOL_BELL);
+        lv_obj_set_style_text_color(sb->dnd_lbl, fwd ? UI_COL_BG : badge ? UI_COL_TEXT : lv_color_hex(0x7D8996), 0);
+        lv_obj_set_style_bg_color(sb->dnd, fwd ? UI_COL_WARN : m->dnd ? UI_COL_RED : UI_COL_BLUE, 0);
+        lv_obj_set_style_bg_opa(sb->dnd, badge ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        lv_obj_set_style_text_letter_space(sb->dnd_lbl, fwd ? -1 : 0, 0);   /* "FWD" in 32 px */
+        lv_obj_set_width(sb->dnd, fwd ? 32 : badge ? 30 : 18);
         lv_obj_center(sb->dnd_lbl);
         sb->dnd_on = m->dnd;
+        sb->quiet_on = quiet;
+        sb->fwd_on = fwd;
     }
 
     /* Right to left: battery at the edge, the DND bell / badge left of it, the clock centred
@@ -244,19 +254,19 @@ void ui_statusbar_update(const ui_model_t *m)
 
         lv_obj_update_layout(sb->time);
         int32_t tw = lv_obj_get_width(sb->time);
-        int32_t left = m->dnd ? 66 : (m->mwi_waiting ? (m->mwi_new >= 10 ? 104 : 96) : 96);
+        int32_t left = badge ? 66 : (m->mwi_waiting ? (m->mwi_new >= 10 ? 104 : 96) : 96);
         int32_t x = UI_W / 2 - tw / 2 + (strchr(m->time_hhmm, ' ') ? 8 : 0);
         if (x + tw > dnd_x - 6) {
             x = dnd_x - 6 - tw;
         }
         /* A wide right side (battery % + charging + bell) pushes a 12 h clock into the SIP
          * caption / envelope: they make way, as for the DND badge (the dot stays). */
-        bool squeezed = !m->dnd && left + tw > dnd_x - 4;
+        bool squeezed = !badge && left + tw > dnd_x - 4;
         if (squeezed) {
             left = 66;
         }
-        lv_obj_set_hidden(sb->mwi, !m->mwi_waiting || m->dnd || squeezed);
-        lv_obj_set_hidden(sb->reg_lbl, m->mwi_waiting || m->dnd || squeezed);
+        lv_obj_set_hidden(sb->mwi, !m->mwi_waiting || badge || squeezed);
+        lv_obj_set_hidden(sb->reg_lbl, m->mwi_waiting || badge || squeezed);
         if (x < left) {
             x = left;
             if (x + tw > dnd_x - 4) { /* still too tight: drop the badge's padding gap, never overlap */

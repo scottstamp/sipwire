@@ -177,7 +177,7 @@ void ui_update(const ui_model_t *model)
     if (missed) {
         char txt[sizeof(model->missed_from) + 40];
         snprintf(txt, sizeof(txt), LV_SYMBOL_CALL " Missed call: %s\n%s", model->missed_from,
-                 model->missed_dnd ? "(do not disturb)" : "(busy)");
+                 model->missed_quiet ? "(quiet hours)" : model->missed_dnd ? "(do not disturb)" : "(busy)");
         ui_toast_for(txt, 4000);
     }
 }
@@ -401,6 +401,15 @@ void ui_act_history_mark_seen(void)
     }
 }
 
+bool ui_act_last_dialed(char *out, size_t cap)
+{
+    if (cap == 0) {
+        return false;
+    }
+    out[0] = '\0';
+    return s_actions && s_actions->last_dialed && s_actions->last_dialed(s_actions->ctx, out, cap) && out[0];
+}
+
 /* ---- sounds ---- */
 
 const char *ui_act_ringtone_name(int idx)
@@ -426,6 +435,20 @@ void ui_act_save_call_features(bool call_waiting, bool auto_answer, bool dnd)
 {
     if (s_actions && s_actions->save_call_features) {
         s_actions->save_call_features(s_actions->ctx, call_waiting, auto_answer, dnd);
+    }
+}
+
+void ui_act_save_quiet(bool on, uint16_t start_min, uint16_t end_min, bool allow_contacts)
+{
+    if (s_actions && s_actions->save_quiet && start_min < 1440 && end_min < 1440) {
+        s_actions->save_quiet(s_actions->ctx, on, start_min, end_min, allow_contacts);
+    }
+}
+
+void ui_act_save_forward(const char *always, const char *busy, const char *noanswer, uint16_t noanswer_s)
+{
+    if (s_actions && s_actions->save_forward) {
+        s_actions->save_forward(s_actions->ctx, always, busy, noanswer, noanswer_s);
     }
 }
 

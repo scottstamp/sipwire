@@ -44,6 +44,26 @@
  * exists; during a call it is a normal waiting call; under DND it is refused
  * like any other call (DND wins).
  *
+ * Quiet hours (settings `quiet_hours`, `quiet_start` / `quiet_end` local time, wrapping
+ * past midnight, `quiet_allow_contacts`): while the clock is set (SNTP) and inside the
+ * window, incoming calls are refused with 486 like DND (logged as DND, CALL_EVENT_MISSED
+ * with dnd + quiet), except callers found in the contacts (when allowed) and find the
+ * handset calls.
+ *
+ * Call forwarding (settings `fwd_always`, `fwd_busy`, `fwd_noanswer` + `fwd_noanswer_s`,
+ * a number or sip: URI each, "" = off), done locally with 302 Moved Temporarily (Contact =
+ * the target on our domain; the PBX follows it): always = every new INVITE, before DND /
+ * quiet hours, without ringing; busy = instead of 486 when there is no free line (call
+ * waiting off or two calls) and when the user declines a ringing call; no answer = the
+ * foreground ringing call after fwd_noanswer_s (302 after the 180). Find the handset calls
+ * are never forwarded except when busy. Forwarded calls are logged as DIR_RES_FORWARDED
+ * (no missed-call notice).
+ *
+ * Find the handset (setting `find_alert`, default "find"): an INVITE whose Alert-Info
+ * carries the marker rings at full volume with its own pattern (and wakes the
+ * screen), even with DND on; never auto-answered. During a call it waits like any
+ * other call (refused as busy without a free line).
+ *
  * Transfers report through CALL_EVENT_TRANSFER and `xfer`. Blind: REFER of
  * the foreground call; on success (2xx sipfrag) the call is hung up, on
  * failure it is kept (resumed if it was on hold). Attended: start holds the
@@ -83,6 +103,7 @@ typedef struct {
     int64_t call_start_us;          /* esp_timer time the call was answered, 0 = not yet */
     uint8_t line;                   /* line of the foreground call: 1 or 2, 0 = none */
     bool auto_answered;             /* answered automatically (page / intercom) */
+    bool find;                      /* ringing as find-the-handset (Alert-Info find_alert) */
 
     /* background call: waiting (CALL_RINGING_IN) or on hold (CALL_HELD,
      * CALL_ACTIVE until the hold is confirmed); call == CALL_IDLE: none */
@@ -206,3 +227,8 @@ void phone_set_volume(uint8_t volume);
 
 /** Consistent snapshot of the phone state. */
 void phone_get_status(phone_status_t *out);
+
+/** Quiet hours window: `now_min` (local minutes after midnight, 0-1439; < 0 = clock not
+ *  set) inside [start_min, end_min). end <= start wraps past midnight (22:00-07:00);
+ *  start == end is an empty window. Pure (also used by the UI bridge). */
+bool phone_quiet_window(uint16_t start_min, uint16_t end_min, int now_min);

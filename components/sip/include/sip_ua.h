@@ -56,6 +56,21 @@
  * optional ";delay=N") reports answer_after = N (seconds, else -1) in
  * sip_call_info_t. The UA does not answer by itself.
  *
+ * Alert marker (sip_ua_set_alert_marker, e.g. "find" for find-the-handset):
+ * an incoming INVITE whose Alert-Info carries it ("Alert-Info: <...>;info=find"
+ * or "Alert-Info: find", case-insensitive, whole token) is reported with
+ * alert_match = true in sip_call_info_t and sip_screen_info_t.
+ *
+ * Screening (cb.screen, optional): called synchronously for every new INVITE
+ * the UA could take (after the 100 Trying, before any other response), with
+ * the caller, the auto-answer / alert-marker flags and whether the UA would
+ * refuse it as busy. The application answers RING (offer it even with DND
+ * on), REJECT (final 4xx-6xx without ringing) or REDIRECT (302 Moved
+ * Temporarily with Contact: <target>), or DEFAULT (the UA's own policy: DND
+ * → 486, busy → 486, else ring). Refused and redirected INVITEs are reported
+ * through cb.call_rejected (code 302 for a redirect). A ringing incoming call
+ * can be redirected later with sip_call_redirect() (e.g. no answer).
+ *
  * Subscriptions (RFC 6665): up to SIP_UA_MAX_BLF "dialog" subscriptions (BLF,
  * RFC 4235) and one "message-summary" subscription (MWI, RFC 3842). They are
  * sent once the registration is up, refreshed, re-established with backoff
@@ -78,6 +93,8 @@ extern "C" {
 #define SIP_UA_MAX_BLF      8                   /* "dialog" subscriptions */
 #define SIP_UA_MAX_SUBS     (SIP_UA_MAX_BLF + 1) /* + one "message-summary" */
 #define SIP_UA_EXT_MAX      32                  /* BLF target incl. NUL */
+#define SIP_UA_TARGET_MAX   64                  /* redirect target (number or sip: URI) incl. NUL */
+#define SIP_UA_MARKER_MAX   32                  /* alert marker incl. NUL */
 
 typedef enum {
     SIP_OK            = 0,
@@ -168,7 +185,30 @@ typedef struct {
     const char *number;               /* remote user part, unescaped */
     const char *display_name;         /* may be "" */
     int answer_after;                 /* incoming: auto answer requested after N s, -1 = no */
+    bool alert_match;                 /* incoming: Alert-Info carries the alert marker */
 } sip_call_info_t;
+
+/* Incoming call screening (cb.screen). */
+typedef enum {
+    SIP_SCREEN_DEFAULT,               /* UA policy: DND → 486, busy → 486, else ring */
+    SIP_SCREEN_RING,                  /* ring even with DND on (busy still refuses) */
+    SIP_SCREEN_REJECT,                /* refuse with `code` (400-699; else 486) */
+    SIP_SCREEN_REDIRECT,              /* 302 to `target` (number or sip: URI) */
+} sip_screen_action_t;
+
+typedef struct {
+    const char *number;               /* caller user part, unescaped */
+    const char *display_name;         /* may be "" */
+    int answer_after;                 /* as in sip_call_info_t */
+    bool alert_match;                 /* Alert-Info carries the alert marker */
+    bool busy;                        /* DEFAULT would refuse it as busy (no free line) */
+} sip_screen_info_t;
+
+typedef struct {
+    sip_screen_action_t action;
+    int code;                         /* REJECT */
+    char target[SIP_UA_TARGET_MAX];   /* REDIRECT */
+} sip_screen_t;
 
 /* Transfer progress (cb.transfer). */
 typedef enum {
@@ -207,8 +247,13 @@ typedef struct {
     void (*mwi)(void *ctx, bool waiting, int new_msgs, int old_msgs);
     /* Transfer (REFER) of `call` progressed. */
     void (*transfer)(void *ctx, sip_call_handle_t call, sip_xfer_state_t state, int code);
-    /* An incoming INVITE was refused without being offered (busy, DND). */
+    /* An incoming INVITE was refused without being offered (busy, DND, screened;
+     * code 302 = redirected). */
     void (*call_rejected)(void *ctx, const char *number, const char *display_name, int code);
+    /* Screening of a new incoming INVITE. Unlike the others it runs
+     * SYNCHRONOUSLY while the INVITE is processed: it must not call any
+     * sip_ua / sip_call function. `out` arrives as DEFAULT. NULL = DEFAULT. */
+    void (*screen)(void *ctx, const sip_screen_info_t *in, sip_screen_t *out);
     void *ctx;
 } sip_ua_callbacks_t;
 
@@ -335,6 +380,12 @@ sip_err_t sip_call_answer(sip_ua_t *ua, sip_call_handle_t call);
 /* Reject an incoming ringing call with a 4xx-6xx code (486, 603, ...). */
 sip_err_t sip_call_reject(sip_ua_t *ua, sip_call_handle_t call, int code);
 
+/* Redirect an incoming ringing call: 302 Moved Temporarily with
+ * Contact: <sip:target@domain> (or the sip: URI as given); the call ends
+ * (SIP_END_LOCAL, status 302). SIP_ERR_ARG for an empty / too long /
+ * undialable target, SIP_ERR_STATE if the call is not ringing in. */
+sip_err_t sip_call_redirect(sip_ua_t *ua, sip_call_handle_t call, const char *target);
+
 /* End the call whatever its state: CANCEL (outgoing, early), 486 (incoming
  * ringing) or BYE (established). ENDED is reported immediately; protocol
  * cleanup (waiting for 487, 200/CANCEL race → ACK+BYE) continues internally. */
@@ -360,6 +411,10 @@ sip_err_t sip_call_send_info_dtmf(sip_ua_t *ua, sip_call_handle_t call, char dig
 /* Incoming call policy (default: call waiting on, DND off). */
 void sip_ua_set_call_waiting(sip_ua_t *ua, bool on);
 void sip_ua_set_dnd(sip_ua_t *ua, bool on);
+
+/* Alert-Info marker reported as alert_match ("" or NULL = none, the default).
+ * SIP_ERR_ARG if longer than SIP_UA_MARKER_MAX - 1 or not a token. */
+sip_err_t sip_ua_set_alert_marker(sip_ua_t *ua, const char *marker);
 
 /* Current state of a call, SIP_UA_CALL_IDLE if unknown. */
 sip_ua_call_state_t sip_call_state(const sip_ua_t *ua, sip_call_handle_t call);

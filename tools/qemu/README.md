@@ -47,6 +47,7 @@ include `_boot.inc` / `_account.inc` (boot, account config, registration) as com
 | `40-ota` | live time settings, the real OTA update, reboot, boot from `ota_1`, marked valid | 18 s |
 | `50-call-waiting` | DND (486 + missed call event), page auto answer (Asterisk ext 650: Dial with a `Call-Info: answer-after=0` pre-dial header), call waiting answer2/swap/hangup → held call promoted, reject2 | 12 s |
 | `60-transfer` | blind transfer of a bridged inbound call (REFER → ext 603, sipfrag 200, we hang up), failed transfer (404) keeps the call, attended transfer (consultation call to 600, REFER with Replaces), core dump (`coredump` with none, `coredump crash` panic, reboot warning, decoded summary, `coredump erase`) | 15 s |
+| `70-call-features` | cfg keys (quiet hours HH:MM, forwarding validation), find the handset through DND (ext 652: Alert-Info info=find), 302 forwarding always / declined (busy) / no answer, history "forwarded", redial | 19 s |
 
 Add a shard by dropping a file in `smoke.d/`; keep the slowest one near the others (the run
 takes as long as the slowest shard).

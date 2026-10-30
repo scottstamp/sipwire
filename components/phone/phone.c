@@ -100,6 +100,8 @@ typedef struct {
     char name[64];
     int64_t start_us;
     bool rej;                           /* the user declined it (call log) */
+    bool find;                          /* find-the-handset call */
+    bool fwd;                           /* sent on with a 302 (call log: forwarded) */
     bool media_valid;
     sip_media_info_t media;
 } phone_line_t;
@@ -144,6 +146,10 @@ static struct {
     uint8_t line;                       /* foreground line number, 0 = none */
     bool rej;                           /* foreground: the user declined the ringing call (call log) */
     int answer_after;                   /* foreground: caller asked for auto answer, -1 = no */
+    bool find;                          /* foreground: find-the-handset call (full volume, own ring) */
+    bool fwd;                           /* foreground: redirected (302), call log: forwarded */
+    bool fwd_pending;                   /* no-answer forwarding due at fwd_at */
+    uint64_t fwd_at;
     bool aa_pending;                    /* auto answer due at aa_at */
     uint64_t aa_at;
     bool fg_media_valid;                /* last media of the foreground call */
@@ -153,6 +159,8 @@ static struct {
     sip_call_handle_t xfer_h, xfer_consult;
     /* call features (settings) */
     bool f_dnd, f_cw, f_aa;
+    /* last screening decision (ua_screen), for the call_rejected report of the same INVITE */
+    phone_screen_t scr_last;
     /* BLF: the parsed `blf` setting and one subscription per entry */
     char blf_list[SIPWIRE_BLF_LIST_MAX];
     sipwire_blf_entry_t blf[SIPWIRE_BLF_MAX];
@@ -170,6 +178,20 @@ static settings_t *s_cfg;
 static uint64_t now_ms(void)
 {
     return (uint64_t)(esp_timer_get_time() / 1000);
+}
+
+#define TIME_VALID_AFTER        1700000000  /* 2023-11: anything earlier = clock not set (no SNTP) */
+
+/* Local minutes after midnight (TZ applied by the UI bridge), -1 while the clock is not set:
+ * quiet hours only apply with a valid clock. */
+static int local_minutes(void)
+{
+    time_t now = time(NULL);
+    struct tm tm;
+    if (now < TIME_VALID_AFTER || localtime_r(&now, &tm) == NULL) {
+        return -1;
+    }
+    return tm.tm_hour * 60 + tm.tm_min;
 }
 
 /* The sip task blocks in select() until its next deadline; anything another task hands it
@@ -334,7 +356,8 @@ static void apply_aec(const settings_t *st)
 static void apply_volume(void)
 {
     st_lock();
-    uint8_t v = *current_volume_locked();
+    /* find the handset: full volume while it rings (+/- still changes the ring volume) */
+    uint8_t v = s.vstate == SIP_UA_CALL_RINGING_IN && s.st.find ? 100 : *current_volume_locked();
     s.st.volume = v;
     st_unlock();
     audio_set_volume(v);
@@ -373,6 +396,7 @@ static void publish_call_state(void)
 
     st_lock();
     s.st.line = s.line;
+    s.st.find = s.find && s.state == SIP_UA_CALL_RINGING_IN;
     st_unlock();
 
     update_power();                     /* before media/tones: PS off ahead of RTP */
@@ -382,6 +406,9 @@ static void publish_call_state(void)
                   (s.state == SIP_UA_CALL_ACTIVE || s.state == SIP_UA_CALL_HELD ||
                    ((s.state == SIP_UA_CALL_DIALING || s.state == SIP_UA_CALL_RINGING_OUT) && early));
     phone_tone_t tone = phone_tone_for(s.state, s.outgoing, early, s.end_code);
+    if (tone == PHONE_TONE_RING && s.find) {
+        tone = PHONE_TONE_FIND;
+    }
     tone = phone_tone_waiting(tone, s.state, s.bg.h ? s.bg.state : SIP_UA_CALL_IDLE);
     phone_media_audio(stream, tone);
     apply_volume();
@@ -471,6 +498,8 @@ static void fg_save(phone_line_t *l)
     l->outgoing = s.outgoing;
     l->answer_after = s.answer_after;
     l->rej = s.rej;
+    l->find = s.find;
+    l->fwd = s.fwd;
     l->line = s.line;
     l->media_valid = s.fg_media_valid;
     l->media = s.fg_media;
@@ -488,6 +517,9 @@ static void fg_load(const phone_line_t *l)
     s.outgoing = l->outgoing;
     s.answer_after = l->answer_after;
     s.rej = l->rej;
+    s.find = l->find;
+    s.fwd = l->fwd;
+    s.fwd_pending = false;
     s.line = l->line;
     s.end_code = 0;
     s.fg_media_valid = l->media_valid;
@@ -602,11 +634,16 @@ static void xfer_call_gone(sip_call_handle_t h, int end_code)
 }
 
 /* The foreground call is gone: the background call (if any) moves up. */
+static void arm_noanswer(void);
+
 static void promote_bg(void)
 {
     phone_line_t l = s.bg;
     memset(&s.bg, 0, sizeof(s.bg));
     fg_load(&l);
+    if (s.state == SIP_UA_CALL_RINGING_IN) {
+        arm_noanswer();
+    }
     post_second(CALL_IDLE, 0, l.number, l.name);
     if (s.fg_media_valid) {
         phone_media_update(&s.fg_media);
@@ -617,17 +654,19 @@ static void promote_bg(void)
 /* ---- call log (directory history) ---- */
 
 _Static_assert((int)PHONE_LOG_ANSWERED == DIR_RES_ANSWERED && (int)PHONE_LOG_MISSED == DIR_RES_MISSED &&
-               (int)PHONE_LOG_REJECTED == DIR_RES_REJECTED && (int)PHONE_LOG_DND == DIR_RES_DND,
+               (int)PHONE_LOG_REJECTED == DIR_RES_REJECTED && (int)PHONE_LOG_DND == DIR_RES_DND &&
+               (int)PHONE_LOG_FORWARDED == DIR_RES_FORWARDED,
                "phone_log_result_t must match dir_result_t");
 
 /* One history entry per ended call. Unnamed numbers are named from the contacts by
  * dir_history_add(). `start_us` != 0: the call was answered (talk time since). */
-static void log_call(bool outgoing, const char *number, const char *name, int64_t start_us, bool rej, bool dnd)
+static void log_call(bool outgoing, const char *number, const char *name, int64_t start_us, bool rej, bool dnd,
+                     bool fwd)
 {
     dir_call_t c;
     memset(&c, 0, sizeof(c));
     c.direction = outgoing ? DIR_CALL_OUT : DIR_CALL_IN;
-    c.result = (uint8_t)phone_log_result(outgoing, start_us != 0, rej, dnd);
+    c.result = (uint8_t)phone_log_result(outgoing, start_us != 0, rej, dnd, fwd);
     c.duration_s = phone_log_duration_s(start_us, esp_timer_get_time());
     c.start = (time_t)phone_log_start((int64_t)time(NULL) > 1700000000 ? (int64_t)time(NULL) : 0, c.duration_s);
     strlcpy(c.number, number ? number : "", sizeof(c.number));
@@ -647,8 +686,11 @@ static void call_ended(int end_code)
     st_lock();
     int64_t start_us = s.st.call_start_us;
     st_unlock();
-    log_call(s.outgoing, s.st.number, s.st.name, start_us, s.rej, false);   /* before promote_bg() */
+    log_call(s.outgoing, s.st.number, s.st.name, start_us, s.rej, false, s.fwd);   /* before promote_bg() */
     s.rej = false;
+    s.find = false;
+    s.fwd = false;
+    s.fwd_pending = false;
     phone_media_teardown();
     phone_dtmf_seq_clear(&s.dtmf);
     reset_call_audio_prefs();
@@ -669,7 +711,7 @@ static void bg_ended(int end_code)
 {
     phone_line_t l = s.bg;
     memset(&s.bg, 0, sizeof(s.bg));
-    log_call(l.outgoing, l.number, l.name, l.start_us, l.rej, false);
+    log_call(l.outgoing, l.number, l.name, l.start_us, l.rej, false, l.fwd);
     post_second(CALL_ENDED, end_code, l.number, l.name);
     publish_call_state();               /* stop the call-waiting beep */
 }
@@ -894,6 +936,9 @@ static void on_incoming(void *ctx, sip_call_handle_t call, const char *number, c
     s.end_code = 0;
     s.line = 1;
     s.rej = false;
+    s.find = false;
+    s.fwd = false;
+    s.fwd_pending = false;
     s.answer_after = -1;
     s.aa_pending = false;
     s.fg_media_valid = false;
@@ -914,6 +959,7 @@ static bool auto_answer_now(void)
         return false;
     }
     ESP_LOGI(TAG, "auto answered %s (page / intercom)", s.st.number);
+    s.fwd_pending = false;
     st_lock();
     s.st.auto_answered = true;
     st_unlock();
@@ -940,6 +986,7 @@ static void on_bg_state(sip_call_handle_t call, const sip_call_info_t *info)
     }
     if (info->state == SIP_UA_CALL_RINGING_IN) {
         s.bg.answer_after = info->answer_after;  /* a page during a call just waits */
+        s.bg.find = info->alert_match;           /* ... and so does a find-the-handset call */
     }
     bool changed = s.bg.state != info->state;
     s.bg.state = info->state;
@@ -980,7 +1027,13 @@ static void on_call_state(void *ctx, sip_call_handle_t call, const sip_call_info
     }
     if (info->state == SIP_UA_CALL_RINGING_IN && s.state != SIP_UA_CALL_RINGING_IN) {
         s.answer_after = info->answer_after;
-        if (phone_auto_answer(info->answer_after, s.f_aa, s.bg.h != 0)) {
+        s.find = info->alert_match;
+        if (!s.find) {
+            arm_noanswer();
+        }
+        if (s.find) {
+            ESP_LOGI(TAG, "find the handset: ringing at full volume");
+        } else if (phone_auto_answer(info->answer_after, s.f_aa, s.bg.h != 0)) {
             s.state = SIP_UA_CALL_RINGING_IN;
             if (info->answer_after == 0 && auto_answer_now()) {
                 return;                 /* ACTIVE follows; never rings */
@@ -991,6 +1044,9 @@ static void on_call_state(void *ctx, sip_call_handle_t call, const sip_call_info
         }
     }
     s.state = info->state;
+    if (s.state != SIP_UA_CALL_RINGING_IN) {
+        s.fwd_pending = false;
+    }
     publish_call_state();
 }
 
@@ -1027,6 +1083,124 @@ static void on_xfer(void *ctx, sip_call_handle_t call, sip_xfer_state_t st, int 
     }
 }
 
+/* ---- call forwarding (settings fwd_*) ---- */
+
+#define FWD_ALWAYS      0
+#define FWD_BUSY        1
+#define FWD_NOANSWER    2
+#define FWD_TARGET_LEN  SETTINGS_FIELD_SIZE(fwd_always)
+
+_Static_assert(SETTINGS_FIELD_SIZE(fwd_busy) == FWD_TARGET_LEN && SETTINGS_FIELD_SIZE(fwd_noanswer) == FWD_TARGET_LEN,
+               "forwarding targets share one size");
+
+/* Setting fwd_always / fwd_busy / fwd_noanswer into `out` ("" = off). */
+static void fwd_target(int which, char out[FWD_TARGET_LEN])
+{
+    size_t off = which == FWD_ALWAYS ? offsetof(settings_t, fwd_always)
+               : which == FWD_BUSY   ? offsetof(settings_t, fwd_busy)
+                                     : offsetof(settings_t, fwd_noanswer);
+    settings_get_field(off, out, FWD_TARGET_LEN);
+}
+
+/* The foreground call starts ringing: forward it after fwd_noanswer_s unless answered. */
+static void arm_noanswer(void)
+{
+    char t[FWD_TARGET_LEN];
+    fwd_target(FWD_NOANSWER, t);
+    s.fwd_pending = t[0] != '\0';
+    if (s.fwd_pending) {
+        uint16_t secs;
+        SETTINGS_GET(fwd_noanswer_s, &secs);
+        s.fwd_at = now_ms() + (uint64_t)secs * 1000u;
+    }
+}
+
+/* 302 a ringing incoming call (foreground or waiting) to forwarding target `which`. *fwd (the
+ * line's call-log flag) is set before the redirect: the ENDED it causes is reported inside
+ * sip_call_redirect. False when that target is off or the redirect failed (then the caller
+ * does what it would have done without forwarding). */
+static bool redirect_call(sip_call_handle_t h, int which, bool *fwd)
+{
+    char t[FWD_TARGET_LEN];
+    fwd_target(which, t);
+    if (s.ua == NULL || h == 0 || t[0] == '\0') {
+        return false;
+    }
+    *fwd = true;
+    sip_err_t err = sip_call_redirect(s.ua, h, t);
+    if (err != SIP_OK) {
+        *fwd = false;
+        ESP_LOGW(TAG, "forward to %s: %s", t, esp_err_to_name(map_sip_err(err)));
+        return false;
+    }
+    ESP_LOGI(TAG, "call forwarded (%s) to %s", which == FWD_BUSY ? "busy / declined" : "no answer", t);
+    return true;
+}
+
+/* Screening of a new INVITE (sip_ua cb.screen): runs synchronously inside the UA, so only
+ * settings / directory lookups here, no UA calls. The decision is kept for on_rejected,
+ * which reports the same INVITE when it is refused. */
+static void ua_screen(void *ctx, const sip_screen_info_t *in, sip_screen_t *out)
+{
+    (void)ctx;
+    char fa[SETTINGS_FIELD_SIZE(fwd_always)], fb[SETTINGS_FIELD_SIZE(fwd_busy)];
+    fwd_target(FWD_ALWAYS, fa);
+    fwd_target(FWD_BUSY, fb);
+    phone_screen_in_t p = {
+        .find = in->alert_match,
+        .dnd = s.f_dnd,
+        .busy = in->busy,
+        .fwd_always = fa[0] != '\0',
+        .fwd_busy = fb[0] != '\0',
+    };
+    bool quiet_on, allow;
+    SETTINGS_GET(quiet_hours, &quiet_on);
+    if (quiet_on) {
+        uint16_t start, end;
+        SETTINGS_GET(quiet_start, &start);
+        SETTINGS_GET(quiet_end, &end);
+        SETTINGS_GET(quiet_allow_contacts, &allow);
+        p.quiet = phone_quiet_window(start, end, local_minutes());
+        if (p.quiet && allow && in->number[0]) {
+            char name[DIR_NAME_MAX];
+            p.caller_allowed = dir_contact_lookup(in->number, name, sizeof(name));
+        }
+    }
+    phone_screen_t d = phone_screen_decide(&p);
+    s.scr_last = d;
+    switch (d) {
+    case PHONE_SCREEN_FIND:
+        out->action = SIP_SCREEN_RING;
+        ESP_LOGI(TAG, "find the handset call from %s", in->number);
+        break;
+    case PHONE_SCREEN_QUIET:
+        out->action = SIP_SCREEN_REJECT;
+        out->code = 486;                /* like DND */
+        break;
+    case PHONE_SCREEN_FWD_ALWAYS:
+    case PHONE_SCREEN_FWD_BUSY:
+        out->action = SIP_SCREEN_REDIRECT;
+        strlcpy(out->target, d == PHONE_SCREEN_FWD_ALWAYS ? fa : fb, sizeof(out->target));
+        ESP_LOGI(TAG, "forwarding %s (%s) to %s", in->number, d == PHONE_SCREEN_FWD_ALWAYS ? "always" : "busy",
+                 out->target);
+        break;
+    default:
+        if (p.quiet && p.caller_allowed) {
+            ESP_LOGI(TAG, "quiet hours: %s is a contact, ringing", in->number);
+        }
+        break;
+    }
+}
+
+/* Setting `find_alert` -> the UA's Alert-Info marker. */
+static void apply_alert_marker(const char *marker)
+{
+    if (s.ua && sip_ua_set_alert_marker(s.ua, marker) != SIP_OK) {
+        ESP_LOGW(TAG, "find_alert '%s' unusable: find the handset is off", marker);
+        sip_ua_set_alert_marker(s.ua, "");
+    }
+}
+
 static void on_rejected(void *ctx, const char *number, const char *name, int code)
 {
     (void)ctx;
@@ -1035,10 +1209,15 @@ static void on_rejected(void *ctx, const char *number, const char *name, int cod
     strlcpy(ev.number, number ? number : "", sizeof(ev.number));
     strlcpy(ev.name, name ? name : "", sizeof(ev.name));
     ev.code = code;
-    ev.dnd = s.f_dnd;
-    log_call(false, ev.number, ev.name, 0, false, ev.dnd);
-    ESP_LOGI(TAG, "missed call from %s \"%s\" (%s, %d)", ev.number, ev.name, ev.dnd ? "do not disturb" : "busy",
-             code);
+    if (code == 302) {
+        log_call(false, ev.number, ev.name, 0, false, false, true);    /* forwarded: history only */
+        return;
+    }
+    ev.quiet = s.scr_last == PHONE_SCREEN_QUIET;
+    ev.dnd = s.f_dnd || ev.quiet;       /* quiet hours: logged and shown like DND */
+    log_call(false, ev.number, ev.name, 0, false, ev.dnd, false);
+    ESP_LOGI(TAG, "missed call from %s \"%s\" (%s, %d)", ev.number, ev.name,
+             ev.quiet ? "quiet hours" : ev.dnd ? "do not disturb" : "busy", code);
     esp_err_t err = esp_event_post(SIPWIRE_CALL_EVENT, CALL_EVENT_MISSED, &ev, sizeof(ev), EVENT_POST_TIMEOUT);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "post missed call event: %s", esp_err_to_name(err));
@@ -1207,6 +1386,7 @@ static void ua_create(uint64_t now)
             .mwi = on_mwi,
             .transfer = on_xfer,
             .call_rejected = on_rejected,
+            .screen = ua_screen,
         },
     };
     cfg.n_codecs = (uint8_t)phone_codec_pref_parse(s.acc.codec_pref, cfg.codecs, SIP_UA_MAX_CODECS);
@@ -1228,6 +1408,7 @@ static void ua_create(uint64_t now)
     s.ua_ip = lip;
     sip_ua_set_dnd(s.ua, s.f_dnd);
     sip_ua_set_call_waiting(s.ua, s.f_cw);
+    apply_alert_marker(s.acc.find_alert);
     phone_media_set_server_ip(srv.ip);
 
     char ip[16];
@@ -1287,7 +1468,7 @@ static void on_net_up(uint64_t now)
     (void)now;
 }
 
-/* Settings `dnd`, `call_waiting`, `auto_answer`, live. */
+/* Settings `dnd`, `call_waiting`, `auto_answer`, `find_alert`, live. */
 static void apply_features(const settings_t *st)
 {
     if (st->dnd != s.f_dnd) {
@@ -1305,6 +1486,7 @@ static void apply_features(const settings_t *st)
         sip_ua_set_dnd(s.ua, s.f_dnd);
         sip_ua_set_call_waiting(s.ua, s.f_cw);
     }
+    apply_alert_marker(st->find_alert);
 }
 
 static void on_settings(uint64_t now)
@@ -1347,6 +1529,7 @@ static void cmd_dial(const char *number)
     }
     s.outgoing = true;
     s.rej = false;
+    s.find = false;
     s.end_code = 0;
     s.line = 1;
     s.answer_after = -1;
@@ -1461,6 +1644,7 @@ static sip_err_t cmd_xfer_start(const char *target)
     s.call = 0;
     s.outgoing = true;
     s.rej = false;
+    s.find = false;
     s.end_code = 0;
     s.line = line;
     s.answer_after = -1;
@@ -1531,7 +1715,8 @@ static void handle_cmd(const phone_cmd_t *c, uint64_t now)
     case CMD_REJECT_WAITING:
         if (s.ua && s.bg.h && s.bg.state == SIP_UA_CALL_RINGING_IN) {
             s.bg.rej = true;
-            err = sip_call_reject(s.ua, s.bg.h, WAITING_REJECT_CODE);
+            bool fwd = !s.bg.find && redirect_call(s.bg.h, FWD_BUSY, &s.bg.fwd);   /* declined: busy fwd */
+            err = fwd ? SIP_OK : sip_call_reject(s.ua, s.bg.h, WAITING_REJECT_CODE);
         } else {
             ESP_LOGW(TAG, "reject2: no waiting call");
         }
@@ -1564,15 +1749,18 @@ static void handle_cmd(const phone_cmd_t *c, uint64_t now)
     case CMD_REJECT:
         if (s.ua && s.call && s.state == SIP_UA_CALL_RINGING_IN) {
             s.rej = true;
-            err = sip_call_reject(s.ua, s.call, c->code);
+            bool fwd = !s.find && redirect_call(s.call, FWD_BUSY, &s.fwd);   /* declined: busy fwd */
+            err = fwd ? SIP_OK : sip_call_reject(s.ua, s.call, c->code);
         } else {
             ESP_LOGW(TAG, "reject: no ringing call");
         }
         break;
     case CMD_HANGUP:
         if (s.ua && s.call) {
-            s.rej = s.rej || (s.state == SIP_UA_CALL_RINGING_IN && !s.outgoing);
-            err = sip_call_hangup(s.ua, s.call);
+            bool decline = s.state == SIP_UA_CALL_RINGING_IN && !s.outgoing;
+            s.rej = s.rej || decline;
+            bool fwd = decline && !s.find && redirect_call(s.call, FWD_BUSY, &s.fwd);   /* busy fwd */
+            err = fwd ? SIP_OK : sip_call_hangup(s.ua, s.call);
         } else if (s.state == SIP_UA_CALL_ENDED) {
             go_idle();
         }
@@ -1617,6 +1805,13 @@ static void housekeeping(uint64_t now)
 
     if (s.state == SIP_UA_CALL_ENDED && now >= s.ended_until) {
         go_idle();
+    }
+
+    if (s.fwd_pending && now >= s.fwd_at) {
+        s.fwd_pending = false;
+        if (s.state == SIP_UA_CALL_RINGING_IN && s.call && !s.outgoing) {
+            redirect_call(s.call, FWD_NOANSWER, &s.fwd);     /* ENDED (302) follows inside */
+        }
     }
 
     if (s.aa_pending && now >= s.aa_at) {
@@ -1691,6 +1886,9 @@ static uint64_t next_deadline(void)
     }
     if (s.aa_pending) {
         d = phone_deadline_min(d, s.aa_at);
+    }
+    if (s.fwd_pending) {
+        d = phone_deadline_min(d, s.fwd_at);
     }
     d = phone_deadline_min(d, phone_dtmf_seq_next_ms(&s.dtmf));
     st_lock();

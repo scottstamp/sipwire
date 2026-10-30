@@ -56,6 +56,8 @@ unsigned dir_hist_unseen_missed(const dir_hist_t *h);
 /* Newest missed incoming call not yet seen, NULL if none. */
 const dir_call_t *dir_hist_last_unseen_missed(const dir_hist_t *h);
 bool dir_hist_mark_seen(dir_hist_t *h);                          /* true if anything changed */
+/* Newest outgoing call with a number (redial), NULL if none. */
+const dir_call_t *dir_hist_last_dialed(const dir_hist_t *h);
 
 #define DIR_HIST_REC_SIZE 80
 #define DIR_HIST_HDR_SIZE 12

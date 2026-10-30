@@ -223,12 +223,12 @@ static int cmd_history(int argc, char **argv)
         printf("missed calls marked seen\n");
         return 0;
     }
-    static const char *const res[] = { "answered", "missed", "rejected", "dnd" };
+    static const char *const res[] = { "answered", "missed", "rejected", "dnd", "forwarded" };
     if (argc >= 5 && argc <= 6 && strcmp(argv[1], "add") == 0) {
         /* test aid until phone.c logs calls itself: history add <in|out> <result> <number> [duration_s] */
         dir_call_t e = { .start = time(NULL), .duration_s = argc == 6 ? (uint32_t)atoi(argv[5]) : 0 };
         e.direction = strcmp(argv[2], "out") == 0 ? DIR_CALL_OUT : DIR_CALL_IN;
-        for (uint8_t r = 0; r < 4; r++) {
+        for (uint8_t r = 0; r < 5; r++) {
             if (strcmp(argv[3], res[r]) == 0) {
                 e.result = r;
             }
@@ -239,7 +239,7 @@ static int cmd_history(int argc, char **argv)
         return err == ESP_OK ? 0 : 1;
     }
     if (argc != 1) {
-        printf("usage: history [clear | seen | add <in|out> <answered|missed|rejected|dnd> <number> [secs]]\n");
+        printf("usage: history [clear | seen | add <in|out> <answered|missed|rejected|dnd|forwarded> <number> [secs]]\n");
         return 1;
     }
     dir_call_t *c = console_alloc(DIR_HISTORY_MAX * sizeof(*c));
@@ -255,7 +255,7 @@ static int cmd_history(int argc, char **argv)
             strftime(when, sizeof(when), "%m-%d %H:%M", &tm);
         }
         printf("%-11s %-3s %-8s %-4s %4us %-16s %s\n", when, c[i].direction == DIR_CALL_IN ? "in" : "out",
-               res[c[i].result & 3], c[i].seen ? "" : "NEW", (unsigned)c[i].duration_s, c[i].number, c[i].name);
+               res[c[i].result <= DIR_RES_FORWARDED ? c[i].result : DIR_RES_MISSED], c[i].seen ? "" : "NEW", (unsigned)c[i].duration_s, c[i].number, c[i].name);
     }
     printf("%u calls, %u unseen missed\n", (unsigned)n, dir_history_unseen_missed());
     free(c);

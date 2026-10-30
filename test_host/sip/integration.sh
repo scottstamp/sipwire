@@ -5,6 +5,8 @@
 #   test_host/sip/integration.sh            (builds sipcli if needed)
 #   KEEP_STATE=1 ... keeps the Asterisk state dir for inspection
 #   VERBOSE=1 ...    prints full SIP traces
+#   ONLY=features    only the call feature scenarios (10-12: find the handset,
+#                    forwarding); the G.722 cross-check still runs
 #
 # Starts Asterisk, runs the scenarios, stops only the Asterisk it started.
 set -euo pipefail
@@ -110,6 +112,8 @@ echo "G.722 encode and decode bit-exact with Asterisk ($(stat -c %s "$X/ours.g72
 V=()
 [ "${VERBOSE:-0}" = 1 ] && V=(-v)
 
+rc=0
+if [ "${ONLY:-}" != features ]; then
 set +e
 "$SIPCLI" "${V[@]}" --server "127.0.0.1:$PORT" --local-ip 127.0.0.1 --user 1001 --pass secret1001 --rtp 40000 \
     "echo:1 register 1001 with digest auth" \
@@ -206,6 +210,49 @@ if [ "$rc" -eq 0 ]; then
             "shell:rm -f $VMDIR/1002/INBOX/*" expect-mwi:no:0:15 unregister \
             2>&1 | tee -a "$STATE/sipcli.log" | grep -E "^(===|STEP|EVENT|RESULT|FAIL|LOG \[[EW]\])"
         rc=${PIPESTATUS[0]}
+    fi
+    set -e
+fi
+fi # ONLY
+
+if [ "$rc" -eq 0 ]; then
+    # Call features. 1002 runs in the background and answers the two calls that 1001
+    # forwards to it; 1001 screens like the phone does (sipcli forward / alert-marker).
+    CLI=("$SIPCLI" "${V[@]}" --server "127.0.0.1:$PORT" --local-ip 127.0.0.1)
+    WAIT_1002="for i in \$(seq 50); do $ASTX 'pjsip show contacts' | grep -q '1002/sip:1002@' && exit 0; sleep 0.2; done; exit 1"
+    set +e
+    "${CLI[@]}" --user 1002 --pass secret1002 --rtp 40004 \
+        register incoming:40 answer wait:active wait:ended:15 \
+        incoming:40 answer wait:active wait:ended:15 sleep:1 unregister \
+        >"$STATE/sipcli-1002.log" 2>&1 &
+    B_PID=$!
+    "${CLI[@]}" --user 1001 --pass secret1001 --rtp 40006 \
+        "echo:10 find the handset: 652 dials 1001 with Alert-Info info=find; it rings through DND" \
+        register alert-marker:find dnd:on \
+        "shell:($ASTX 'channel originate PJSIP/1001 application Wait 2' >/dev/null 2>&1 &)" \
+        expect-rejected:486 \
+        "shell:($ASTX 'channel originate Local/652@sipwire-test application Wait 2' >/dev/null 2>&1 &)" \
+        incoming:10 expect-alert hangup sleep:1 dnd:off \
+        \
+        "echo:11 forward always: 1001 answers 302 Contact sip:1002; Asterisk's Dial follows it to 1002" \
+        "shell:$WAIT_1002" forward:1002 \
+        "shell:($ASTX 'channel originate Local/1001@sipwire-test application Wait 3' >/dev/null 2>&1 &)" \
+        expect-rejected:302 forward-off sleep:5 \
+        "shell:grep -q 'EVENT incoming call=.* from=' '$STATE/sipcli-1002.log'" \
+        \
+        "echo:12 no answer: 1001 rings, then redirects the ringing call (302 after 180) to 1002" \
+        "shell:($ASTX 'channel originate Local/1001@sipwire-test application Wait 3' >/dev/null 2>&1 &)" \
+        incoming:10 sleep:2 redirect:1002 wait:ended:5 expect-end:local \
+        unregister \
+        2>&1 | tee -a "$STATE/sipcli.log" | grep -E "^(===|STEP|EVENT|RESULT|FAIL|LOG \[[EW]\])"
+    rc=${PIPESTATUS[0]}
+    wait "$B_PID"
+    b_rc=$?
+    if [ "$rc" -eq 0 ] && [ "$b_rc" -ne 0 ]; then
+        echo "--- the forwarding target (1002) failed:"; tail -n 20 "$STATE/sipcli-1002.log"; rc=1
+    fi
+    if [ "$rc" -eq 0 ] && [ "$(grep -c 'EVENT call=.* state=active' "$STATE/sipcli-1002.log")" -lt 2 ]; then
+        echo "--- 1002 did not get both forwarded calls:"; tail -n 20 "$STATE/sipcli-1002.log"; rc=1
     fi
     set -e
 fi

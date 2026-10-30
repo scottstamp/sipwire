@@ -88,7 +88,8 @@ typedef enum {
     UI_CALLRES_ANSWERED,
     UI_CALLRES_MISSED,         /* incoming: not answered; outgoing: no answer / failed */
     UI_CALLRES_REJECTED,       /* declined by the user */
-    UI_CALLRES_DND,            /* refused by do-not-disturb */
+    UI_CALLRES_DND,            /* refused by do-not-disturb (or quiet hours) */
+    UI_CALLRES_FORWARDED,      /* sent on by call forwarding */
 } ui_call_result_t;
 
 typedef struct {
@@ -158,6 +159,7 @@ typedef struct {
      * held one (UI_CALL_HELD); UI_CALL_IDLE = none. */
     bool dnd;                  /* do not disturb on */
     bool auto_answered;        /* foreground call was answered automatically (page / intercom) */
+    bool find_ringing;         /* the ringing call is a find-the-handset call (full volume) */
     ui_call_state_t second_call;
     char second_number[64];
     char second_name[64];      /* may be empty */
@@ -175,7 +177,8 @@ typedef struct {
     /* incoming call refused without ringing (do not disturb, or busy without call waiting):
      * missed_seq counts up once per call, the UI shows a short notice */
     uint16_t missed_seq;
-    bool missed_dnd;           /* that call was refused because of do not disturb */
+    bool missed_dnd;           /* that call was refused because of do not disturb (or quiet hours) */
+    bool missed_quiet;         /* ... because of quiet hours */
     char missed_from[64];      /* its caller: name, else number */
     int64_t now;               /* wall clock, seconds since the epoch rounded down to the minute;
                                 * 0 until the clock is set */
@@ -197,4 +200,17 @@ typedef struct {
      * (ui_display_off). */
     uint16_t call_touch_lock_s;
     bool keypad_autolock;
+    /* quiet hours (Settings > Call features): incoming calls refused like DND inside the
+     * window, except contacts when allowed; quiet_active = inside it now (status bar) */
+    bool quiet_hours;
+    uint16_t quiet_start;      /* minutes after midnight, local time */
+    uint16_t quiet_end;        /* end <= start wraps past midnight */
+    bool quiet_allow_contacts;
+    bool quiet_active;
+    /* call forwarding (Settings > Forwarding): number or sip: URI, "" = off; the status bar
+     * shows FWD while fwd_always is set */
+    char fwd_always[UI_NUMBER_LEN];
+    char fwd_busy[UI_NUMBER_LEN];
+    char fwd_noanswer[UI_NUMBER_LEN];
+    uint16_t fwd_noanswer_s;   /* seconds of ringing before the no-answer forward (5-300) */
 } ui_model_t;

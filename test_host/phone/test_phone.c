@@ -50,6 +50,10 @@ static void test_end_codes(void)
     TEST_ASSERT_EQUAL(408, phone_end_code(SIP_END_TIMEOUT, 0));
     TEST_ASSERT_EQUAL(408, phone_end_code(SIP_END_TIMEOUT, 408));
     TEST_ASSERT_EQUAL(488, phone_end_code(SIP_END_ERROR, 488));
+    /* we declined (603 is a normal local end) or forwarded the call (302 shown as such) */
+    TEST_ASSERT_EQUAL(0, phone_end_code(SIP_END_LOCAL, 603));
+    TEST_ASSERT_EQUAL(302, phone_end_code(SIP_END_LOCAL, 302));
+    TEST_ASSERT_FALSE(phone_end_is_busy(false, 302));
 }
 
 static void test_ended_hold_time(void)
@@ -436,6 +440,7 @@ static void test_model_call_features(void)
     ph.second.call_start_us = 0;
     ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
     TEST_ASSERT_TRUE(m.auto_answered);
+    TEST_ASSERT_FALSE(m.find_ringing);
     TEST_ASSERT_EQUAL(UI_CALL_RINGING_IN, m.second_call);
     TEST_ASSERT_EQUAL_STRING("1002", m.second_number);
     TEST_ASSERT_EQUAL_STRING("Carol", m.second_name);
@@ -474,6 +479,50 @@ static void test_model_call_features(void)
     ph.call = CALL_IDLE;
     ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
     TEST_ASSERT_FALSE(m.auto_answered);
+
+    /* find the handset: only while that call rings */
+    ph.find = true;
+    ph.call = CALL_RINGING_IN;
+    ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
+    TEST_ASSERT_TRUE(m.find_ringing);
+    ph.call = CALL_ACTIVE;
+    ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
+    TEST_ASSERT_FALSE(m.find_ringing);
+    ph.find = false;
+    ph.call = CALL_IDLE;
+
+    /* quiet hours: settings passed through, active only inside the window with the clock set */
+    ui_bridge_fill_quiet(&loc, true, 22 * 60, 7 * 60, true);
+    loc.time_valid = true;
+    loc.hour = 23;
+    loc.minute = 15;
+    ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
+    TEST_ASSERT_TRUE(m.quiet_hours);
+    TEST_ASSERT_EQUAL_UINT16(22 * 60, m.quiet_start);
+    TEST_ASSERT_EQUAL_UINT16(7 * 60, m.quiet_end);
+    TEST_ASSERT_TRUE(m.quiet_allow_contacts);
+    TEST_ASSERT_TRUE(m.quiet_active);
+    loc.hour = 12;
+    ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
+    TEST_ASSERT_FALSE(m.quiet_active);
+    loc.hour = 6;
+    loc.time_valid = false;     /* no SNTP yet */
+    ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
+    TEST_ASSERT_FALSE(m.quiet_active);
+    ui_bridge_fill_quiet(&loc, false, 22 * 60, 7 * 60, true);
+    loc.time_valid = true;
+    ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
+    TEST_ASSERT_FALSE(m.quiet_active);
+    loc.time_valid = false;
+
+    /* call forwarding settings pass through (NULL = "") */
+    ui_bridge_fill_forward(&loc, "1003", NULL, "sip:vm@pbx", 25);
+    ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
+    TEST_ASSERT_EQUAL_STRING("1003", m.fwd_always);
+    TEST_ASSERT_EQUAL_STRING("", m.fwd_busy);
+    TEST_ASSERT_EQUAL_STRING("sip:vm@pbx", m.fwd_noanswer);
+    TEST_ASSERT_EQUAL_UINT16(25, m.fwd_noanswer_s);
+    ui_bridge_fill_forward(&loc, "", "", "", 20);
 
     /* transfer states, attended flag, code and target */
     ph.xfer.state = XFER_FAILED;
@@ -801,13 +850,78 @@ static void test_xfer_map(void)
 
 static void test_call_log_classify(void)
 {
-    TEST_ASSERT_EQUAL(PHONE_LOG_ANSWERED, phone_log_result(false, true, false, false));
-    TEST_ASSERT_EQUAL(PHONE_LOG_ANSWERED, phone_log_result(true, true, false, false));
-    TEST_ASSERT_EQUAL(PHONE_LOG_MISSED, phone_log_result(false, false, false, false));
-    TEST_ASSERT_EQUAL(PHONE_LOG_REJECTED, phone_log_result(false, false, true, false));
-    TEST_ASSERT_EQUAL(PHONE_LOG_DND, phone_log_result(false, false, false, true));
-    TEST_ASSERT_EQUAL(PHONE_LOG_MISSED, phone_log_result(true, false, false, false));
-    TEST_ASSERT_EQUAL(PHONE_LOG_MISSED, phone_log_result(true, false, true, false));
+    TEST_ASSERT_EQUAL(PHONE_LOG_ANSWERED, phone_log_result(false, true, false, false, false));
+    TEST_ASSERT_EQUAL(PHONE_LOG_ANSWERED, phone_log_result(true, true, false, false, false));
+    TEST_ASSERT_EQUAL(PHONE_LOG_MISSED, phone_log_result(false, false, false, false, false));
+    TEST_ASSERT_EQUAL(PHONE_LOG_REJECTED, phone_log_result(false, false, true, false, false));
+    TEST_ASSERT_EQUAL(PHONE_LOG_DND, phone_log_result(false, false, false, true, false));
+    TEST_ASSERT_EQUAL(PHONE_LOG_MISSED, phone_log_result(true, false, false, false, false));
+    TEST_ASSERT_EQUAL(PHONE_LOG_MISSED, phone_log_result(true, false, true, false, false));
+    /* forwarded (302): also when the user declined it with busy forwarding set */
+    TEST_ASSERT_EQUAL(PHONE_LOG_FORWARDED, phone_log_result(false, false, false, false, true));
+    TEST_ASSERT_EQUAL(PHONE_LOG_FORWARDED, phone_log_result(false, false, true, false, true));
+    TEST_ASSERT_EQUAL(PHONE_LOG_ANSWERED, phone_log_result(false, true, false, false, true));
+}
+
+static phone_screen_t screen(bool find, bool dnd, bool quiet, bool allowed, bool busy, bool fa, bool fb)
+{
+    const phone_screen_in_t in = {
+        .find = find, .dnd = dnd, .quiet = quiet, .caller_allowed = allowed,
+        .busy = busy, .fwd_always = fa, .fwd_busy = fb,
+    };
+    return phone_screen_decide(&in);
+}
+
+static void test_screen_policy(void)
+{
+    /*                                       find   dnd    quiet  allow  busy   fwdA   fwdB */
+    TEST_ASSERT_EQUAL(PHONE_SCREEN_NORMAL, screen(false, false, false, false, false, false, false));
+    /* find the handset: through DND, quiet hours and always-forward; not when busy */
+    TEST_ASSERT_EQUAL(PHONE_SCREEN_FIND, screen(true, true, true, false, false, true, true));
+    TEST_ASSERT_EQUAL(PHONE_SCREEN_NORMAL, screen(true, false, false, false, true, false, false));
+    TEST_ASSERT_EQUAL(PHONE_SCREEN_FWD_BUSY, screen(true, false, false, false, true, false, true));
+    /* always-forward beats DND and quiet hours */
+    TEST_ASSERT_EQUAL(PHONE_SCREEN_FWD_ALWAYS, screen(false, true, true, false, true, true, true));
+    /* DND: the UA refuses (normal), quiet hours never apply on top */
+    TEST_ASSERT_EQUAL(PHONE_SCREEN_NORMAL, screen(false, true, true, false, false, false, true));
+    /* quiet hours: refused unless the caller is an allowed contact */
+    TEST_ASSERT_EQUAL(PHONE_SCREEN_QUIET, screen(false, false, true, false, false, false, false));
+    TEST_ASSERT_EQUAL(PHONE_SCREEN_QUIET, screen(false, false, true, false, true, false, true));
+    TEST_ASSERT_EQUAL(PHONE_SCREEN_NORMAL, screen(false, false, true, true, false, false, false));
+    /* busy-forward only when busy */
+    TEST_ASSERT_EQUAL(PHONE_SCREEN_FWD_BUSY, screen(false, false, false, false, true, false, true));
+    TEST_ASSERT_EQUAL(PHONE_SCREEN_NORMAL, screen(false, false, false, false, false, false, true));
+    TEST_ASSERT_EQUAL(PHONE_SCREEN_NORMAL, screen(false, false, false, false, true, false, false));
+    TEST_ASSERT_EQUAL(PHONE_SCREEN_FWD_BUSY, screen(false, false, true, true, true, false, true));
+}
+
+#define HM(h, m) ((h) * 60 + (m))
+
+static void test_quiet_window(void)
+{
+    /* same day: 13:00-14:30 */
+    TEST_ASSERT_FALSE(phone_quiet_window(HM(13, 0), HM(14, 30), HM(12, 59)));
+    TEST_ASSERT_TRUE(phone_quiet_window(HM(13, 0), HM(14, 30), HM(13, 0)));
+    TEST_ASSERT_TRUE(phone_quiet_window(HM(13, 0), HM(14, 30), HM(14, 29)));
+    TEST_ASSERT_FALSE(phone_quiet_window(HM(13, 0), HM(14, 30), HM(14, 30)));
+    /* wraps past midnight: 22:00-07:00 */
+    TEST_ASSERT_FALSE(phone_quiet_window(HM(22, 0), HM(7, 0), HM(21, 59)));
+    TEST_ASSERT_TRUE(phone_quiet_window(HM(22, 0), HM(7, 0), HM(22, 0)));
+    TEST_ASSERT_TRUE(phone_quiet_window(HM(22, 0), HM(7, 0), HM(23, 59)));
+    TEST_ASSERT_TRUE(phone_quiet_window(HM(22, 0), HM(7, 0), 0));
+    TEST_ASSERT_TRUE(phone_quiet_window(HM(22, 0), HM(7, 0), HM(6, 59)));
+    TEST_ASSERT_FALSE(phone_quiet_window(HM(22, 0), HM(7, 0), HM(7, 0)));
+    TEST_ASSERT_FALSE(phone_quiet_window(HM(22, 0), HM(7, 0), HM(12, 0)));
+    /* from midnight / until midnight */
+    TEST_ASSERT_TRUE(phone_quiet_window(0, HM(6, 0), 0));
+    TEST_ASSERT_FALSE(phone_quiet_window(0, HM(6, 0), HM(23, 59)));
+    TEST_ASSERT_TRUE(phone_quiet_window(HM(20, 0), 0, HM(23, 59)));
+    TEST_ASSERT_FALSE(phone_quiet_window(HM(20, 0), 0, 0));
+    /* start == end: empty; clock not set or out of range: never */
+    TEST_ASSERT_FALSE(phone_quiet_window(HM(8, 0), HM(8, 0), HM(8, 0)));
+    TEST_ASSERT_FALSE(phone_quiet_window(HM(22, 0), HM(7, 0), -1));
+    TEST_ASSERT_FALSE(phone_quiet_window(HM(22, 0), HM(7, 0), 1440));
+    TEST_ASSERT_FALSE(phone_quiet_window(1440, HM(7, 0), HM(3, 0)));
 }
 
 static void test_call_log_times(void)
@@ -843,6 +957,8 @@ int main(void)
     RUN_TEST(test_volume_kind);
     RUN_TEST(test_fill_sounds);
     RUN_TEST(test_call_log_classify);
+    RUN_TEST(test_screen_policy);
+    RUN_TEST(test_quiet_window);
     RUN_TEST(test_call_log_times);
     RUN_TEST(test_codec_names);
     RUN_TEST(test_codec_pref_parse);

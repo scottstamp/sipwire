@@ -49,7 +49,8 @@ typedef enum {
     DIR_RES_ANSWERED = 0,   /* connected (outgoing: the far end answered) */
     DIR_RES_MISSED = 1,     /* incoming: not answered; outgoing: no answer / failed */
     DIR_RES_REJECTED = 2,   /* incoming: declined by the user */
-    DIR_RES_DND = 3,        /* incoming: auto-rejected by do-not-disturb */
+    DIR_RES_DND = 3,        /* incoming: auto-rejected by do-not-disturb (or quiet hours) */
+    DIR_RES_FORWARDED = 4,  /* incoming: sent on with a 302 (call forwarding) */
 } dir_result_t;
 
 typedef struct {
@@ -116,6 +117,8 @@ esp_err_t dir_history_mark_seen(void);
 uint32_t dir_history_rev(void);
 /** Newest missed incoming call not yet seen; false if there is none. */
 bool dir_history_last_unseen_missed(dir_call_t *out);
+/** Number of the newest outgoing call (redial), false if there is none. */
+bool dir_history_last_dialed(char *number, size_t cap);
 
 /* ---- persistence ---- */
 

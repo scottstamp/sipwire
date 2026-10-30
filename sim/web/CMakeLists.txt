@@ -42,7 +42,7 @@ set(SIM_EXPORTS
     _main _sim_set_net _sim_set_reg _sim_set_battery _sim_incoming
     _sim_remote_hangup _sim_set_call _sim_key _sim_set_time _sim_set_clock24 _sim_set_ota _sim_touch_raw _sim_get_model_json
     _sim_set_blf_count _sim_set_blf _sim_set_mwi
-    _sim_set_second _sim_set_xfer _sim_set_dnd _sim_set_page _sim_waiting
+    _sim_set_second _sim_set_xfer _sim_set_dnd _sim_set_quiet _sim_set_forward _sim_set_page _sim_waiting
     _sim_set_unseen _sim_clear_directory _sim_history_add _sim_missed
     _sim_set_touch_lock _sim_set_keypad_autolock _sim_display_off)
 list(JOIN SIM_EXPORTS "," SIM_EXPORTS_CSV)

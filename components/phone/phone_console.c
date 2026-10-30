@@ -7,6 +7,7 @@
 
 #include "audio.h"
 #include "console.h"
+#include "directory.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
@@ -64,6 +65,22 @@ static int cmd_call(int argc, char **argv)
         return 1;
     }
     return report(phone_dial(argv[1]), "call");
+}
+
+static int cmd_redial(int argc, char **argv)
+{
+    (void)argv;
+    if (argc != 1) {
+        printf("usage: redial\n");
+        return 1;
+    }
+    char number[DIR_NUMBER_MAX];
+    if (!dir_history_last_dialed(number, sizeof(number))) {
+        printf("redial: no outgoing call in the history\n");
+        return 1;
+    }
+    printf("redial %s\n", number);
+    return report(phone_dial(number), "redial");
 }
 
 static int cmd_answer(int argc, char **argv)
@@ -410,6 +427,7 @@ esp_err_t phone_console_register(void)
 {
     static const esp_console_cmd_t cmds[] = {
         { .command = "call", .help = "Dial a number or sip: URI", .hint = "<number>", .func = cmd_call },
+        { .command = "redial", .help = "Dial the last outgoing number again (call history)", .func = cmd_redial },
         { .command = "answer", .help = "Answer the incoming call", .func = cmd_answer },
         { .command = "hangup", .help = "End / cancel / reject the call", .func = cmd_hangup },
         { .command = "reject", .help = "Reject the incoming call", .hint = "[code]", .func = cmd_reject },

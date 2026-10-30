@@ -1,0 +1,87 @@
+# Shard: find the handset (through DND), call forwarding (302 always / declined / no
+# answer), redial, the new cfg keys. (A number at the end of an expect is its timeout: values
+# that end in digits are anchored with $.) Quiet hours need a set clock (no SNTP in QEMU): host-tested.
+include _account.inc
+
+# cfg: quiet hours times as HH:MM (or minutes), range checks
+do cfg set quiet_start 23:30
+expect ^quiet_start\s+= 23:30
+do cfg set quiet_end 450
+expect ^quiet_end\s+= 07:30
+do cfg set quiet_start 24:00
+expect quiet_start: expected HH:MM
+do cfg set fwd_noanswer_s 2
+expect ^rejected:
+do cfg set fwd_always 10<03
+expect ^rejected:
+do cfg show
+expect ^find_alert\s+= find
+expect ^fwd_noanswer_s\s+= 20$
+
+# find the handset: 652 dials us with Alert-Info info=find; it rings although DND is on
+do dnd on
+expect phone: do not disturb on 5
+shell ($ASTX 'channel originate Local/652@sipwire-test/n application Wait 1' >/dev/null 2>&1 &)
+expect find the handset call from 10
+expect find the handset: ringing at full volume 5
+expect call: ringing-in 5
+do hangup
+expect call: ended 5
+do hangup
+expect call: idle 5
+do dnd off
+expect phone: do not disturb off 5
+
+# always: 302 to 1002 without ringing, logged as forwarded
+do cfg set fwd_always 1002
+expect ^fwd_always\s+= 1002$
+shell ($ASTX 'channel originate PJSIP/1001 application Wait 1' >/dev/null 2>&1 &)
+expect forwarding .* \(always\) to 1002$ 10
+absent call: ringing-in 1
+do cfg set fwd_always
+expect ^fwd_always\s+=
+
+# busy forwarding: a declined ringing call is redirected instead of refused
+do cfg set fwd_busy 1003
+expect ^fwd_busy\s+= 1003$
+shell ($ASTX 'channel originate PJSIP/1001 application Wait 1' >/dev/null 2>&1 &)
+expect call: ringing-in 10
+do reject
+# the ENDED (302) is reported inside the redirect, before its log line
+expect call: ended .*\(code 302\) 5
+expect call forwarded \(busy / declined\) to 1003$ 5
+do cfg set fwd_busy
+expect ^fwd_busy\s+=
+
+# no answer: redirected after fwd_noanswer_s of ringing
+do cfg set fwd_noanswer_s 5
+expect ^fwd_noanswer_s\s+= 5$
+do cfg set fwd_noanswer 1003
+expect ^fwd_noanswer\s+= 1003$
+shell ($ASTX 'channel originate PJSIP/1001 application Wait 1' >/dev/null 2>&1 &)
+expect call: ringing-in 10
+absent call forwarded 3
+expect call: ended .*\(code 302\) 5
+expect call forwarded \(no answer\) to 1003$ 5
+do cfg set fwd_noanswer
+expect ^fwd_noanswer\s+=
+
+# the three forwarded calls are in the history (not as unseen missed calls)
+do history
+expect \sin\s+forwarded\s
+expect ^[0-9]+ calls, 0 unseen missed
+
+# redial: the newest outgoing call
+do redial
+expect redial: no outgoing call
+do call 601
+expect call: active 601 15
+expect call: ended 601 10
+poll 10 idle :: sip
+do redial
+expect ^redial 601$
+expect call: active 601 15
+do hangup
+expect call: ended 601 5
+# stack high-water marks after the screening / redirect paths (docs/ARCHITECTURE.md "Memory and tasks")
+do tasks

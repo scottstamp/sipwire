@@ -449,6 +449,7 @@ static audio_tone_t to_audio_tone(phone_tone_t t)
     case PHONE_TONE_RING:     return AUDIO_TONE_RING;
     case PHONE_TONE_BUSY:     return AUDIO_TONE_BUSY;
     case PHONE_TONE_CALL_WAITING: return AUDIO_TONE_CALL_WAITING;
+    case PHONE_TONE_FIND:     return AUDIO_TONE_RING;     /* 1000/1200 Hz warble: unlike any ringtone */
     case PHONE_TONE_NONE:
     default:                  return AUDIO_TONE_NONE;
     }

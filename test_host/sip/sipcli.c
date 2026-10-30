@@ -31,6 +31,14 @@
  *   subscribe-mwi                  "message-summary" subscription (our AOR)
  *   expect-mwi:<yes|no>[:<min_new>[:<sec>]]  wait (10 s) for that MWI state
  *                                  (subscription or unsolicited NOTIFY)
+ *   dnd:<on|off>                   sip_ua_set_dnd
+ *   alert-marker:<m>               sip_ua_set_alert_marker; a matching call rings
+ *                                  even with DND on (screen RING, as the phone does)
+ *   expect-alert                   the last incoming call carried the marker
+ *   forward:<target>               screen every new INVITE to a 302 to <target>
+ *   forward-off
+ *   redirect:<target>              302 the current ringing call (no answer)
+ *   expect-rejected:<code>         the last refused / redirected INVITE got <code>
  */
 
 #include <errno.h>
@@ -60,6 +68,10 @@ static sip_ua_end_reason_t end_reason;
 static bool have_media;
 static sip_media_info_t media;
 static bool got_incoming;
+static bool last_alert;         /* last RINGING_IN carried the alert marker */
+static bool find_ring;          /* alert-marker set: ring matching calls through DND */
+static char fwd_target[64];     /* forward: every new INVITE gets a 302 here */
+static int last_rejected;       /* code of the last call_rejected report, 0 = none */
 static char *logs[MAX_LOG];
 static int n_logs;
 
@@ -138,6 +150,30 @@ static void call_cb(void *ctx, sip_call_handle_t call, const sip_call_info_t *in
     if (call == cur_call) {
         call_state = info->state;
         end_reason = info->end_reason;
+    }
+    if (info->state == SIP_UA_CALL_RINGING_IN) {
+        last_alert = info->alert_match;
+        if (last_alert) {
+            printf("EVENT call=%d alert marker\n", call);
+        }
+    }
+}
+
+static void rejected_cb(void *ctx, const char *number, const char *name, int code)
+{
+    (void)ctx;
+    printf("EVENT rejected from=%s name=\"%s\" code=%d\n", number, name, code);
+    last_rejected = code;
+}
+
+static void screen_cb(void *ctx, const sip_screen_info_t *in, sip_screen_t *out)
+{
+    (void)ctx;
+    if (fwd_target[0]) {
+        out->action = SIP_SCREEN_REDIRECT;
+        snprintf(out->target, sizeof(out->target), "%s", fwd_target);
+    } else if (find_ring && in->alert_match) {
+        out->action = SIP_SCREEN_RING;
     }
 }
 
@@ -538,6 +574,45 @@ static bool step(const char *st)
         }
         return ok;
     }
+    if (!strcmp(cmd, "dnd") && arg) {
+        sip_ua_set_dnd(ua, !strcmp(arg, "on"));
+        return true;
+    }
+    if (!strcmp(cmd, "alert-marker") && arg) {
+        find_ring = true;
+        return sip_ua_set_alert_marker(ua, arg) == SIP_OK;
+    }
+    if (!strcmp(cmd, "expect-alert")) {
+        if (!last_alert) {
+            printf("FAIL: the last incoming call did not carry the alert marker\n");
+        }
+        return last_alert;
+    }
+    if (!strcmp(cmd, "forward")) {
+        snprintf(fwd_target, sizeof(fwd_target), "%s", arg ? arg : "");
+        return true;
+    }
+    if (!strcmp(cmd, "forward-off")) {
+        fwd_target[0] = '\0';
+        return true;
+    }
+    if (!strcmp(cmd, "redirect") && arg) {
+        return sip_call_redirect(ua, cur_call, arg) == SIP_OK;
+    }
+    if (!strcmp(cmd, "expect-rejected") && arg) {
+        int want = atoi(arg);
+        bool ok = last_rejected == want;
+        uint64_t end = now_ms() + 10000;
+        while (!ok && now_ms() < end) {
+            run_for(20);
+            ok = last_rejected == want;
+        }
+        if (!ok) {
+            printf("FAIL rejected: last code %d, want %d\n", last_rejected, want);
+        }
+        last_rejected = 0;
+        return ok;
+    }
     if (!strcmp(cmd, "shell") && arg) {
         int rc = system(st + 6);
         return rc == 0;
@@ -625,7 +700,8 @@ int main(int argc, char **argv)
         .log = log_cb,
         .log_level = SIP_LOG_VERBOSE,
         .cb = { .reg_state = reg_cb, .incoming_call = incoming_cb, .call_state = call_cb, .media = media_cb,
-                .blf_state = blf_cb, .mwi = mwi_cb, .transfer = xfer_cb },
+                .blf_state = blf_cb, .mwi = mwi_cb, .transfer = xfer_cb, .call_rejected = rejected_cb,
+                .screen = screen_cb },
     };
     memcpy(cfg.codecs, codecs, sizeof(cfg.codecs));
     cfg.n_codecs = (uint8_t)n_codecs;

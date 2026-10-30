@@ -14,7 +14,8 @@ components/
   rtp/               RTP tx/rx, RFC 3550, RFC 2833 DTMF, adaptive jitter buffer
   sip/               minimal SIP UA: parser, digest auth, transactions, dialogs,
                      REGISTER / INVITE / ACK / BYE / CANCEL / OPTIONS, SDP,
-                     SUBSCRIBE/NOTIFY for BLF (dialog) and MWI (message-summary)
+                     SUBSCRIBE/NOTIFY for BLF (dialog) and MWI (message-summary),
+                     incoming screening hook, 302 redirect, Alert-Info marker
   power/             DFS policy (esp_pm, CPU_FREQ_MAX holds: call, display), console `power`
   cli/               serial REPL (esp_console): cfg/wifi/ip/free/tasks/coredump; console_register_command()
   net/               wifi manager, reconnect, roaming, weak-signal warning (console `wlan`),
@@ -105,8 +106,41 @@ sim/web/             Emscripten build of components/ui + mock model → browser
   during a call it waits like any call; DND wins, a page is refused). DTMF falls back to SIP
   INFO (application/dtmf-relay) when the peer has no telephone-event. Hold/resume re-INVITEs
   are queued per call and retried after 491 (RFC 3261 §14.1 delay). Console: `answer2`,
-  `reject2`, `swap`, `xfer <n>`, `axfer <n>|complete|cancel`, `dnd [on|off]`; `sip` shows
-  the second call, transfer and features.
+  `reject2`, `swap`, `xfer <n>`, `axfer <n>|complete|cancel`, `dnd [on|off]`, `redial`; `sip`
+  shows the second call, transfer and features.
+- Incoming call screening (`phone.c` `ua_screen`, the UA's synchronous `cb.screen` hook, policy
+  in `phone_screen_decide()`, host-tested): find the handset (unless busy) > always-forward >
+  DND (the UA's 486) > quiet hours (486; contacts pass when allowed) > busy-forward (only when
+  the UA reports busy) > normal. The decision of the last INVITE is kept for `call_rejected`,
+  which classifies the refusal (quiet hours log as DND, a 302 as forwarded).
+  - Find the handset: setting `find_alert` (default "find") is the UA's Alert-Info marker
+    (`sip_ua_set_alert_marker`); a matching INVITE rings through DND and quiet hours at volume
+    100 (`apply_volume`) with `PHONE_TONE_FIND` = `AUDIO_TONE_RING` (1000/1200 Hz warble, unlike
+    every ringtone), is never auto-answered, `phone_status_t.find` -> model `find_ringing`
+    (incoming screen title "FIND HANDSET"); the incoming call wakes the screen as usual. Dev
+    PBX: `*44<ext>` (`tools/asterisk/conf/extensions.conf`, pre-dial handler adds
+    `Alert-Info: <http://localhost>;info=find`).
+  - Quiet hours: `quiet_hours`, `quiet_start` / `quiet_end` (minutes after midnight, local
+    time, end <= start wraps past midnight, equal = never), `quiet_allow_contacts`
+    (`dir_contact_lookup` of the caller). Only with the clock set (time > 2023-11, i.e. SNTP);
+    `phone_quiet_window()` is shared with the bridge (model `quiet_active`: blue "Zz" badge in
+    the status bar in place of the DND bell). CALL_EVENT_MISSED gains `quiet` (toast "(quiet
+    hours)").
+  - Call forwarding: `fwd_always`, `fwd_busy`, `fwd_noanswer` (number or sip: URI) +
+    `fwd_noanswer_s` (5-300, default 20). Always / busy: the screen hook answers REDIRECT (302,
+    Contact <sip:target@domain>, no ringing). Busy also covers a declined ringing call
+    (Decline, `reject`, `reject2`: `sip_call_redirect` instead of 486/603). No answer: armed
+    when the foreground call starts ringing (or a waiting call is promoted ringing), deadline
+    `fwd_at` in `next_deadline()`, then `sip_call_redirect` (302 after the 180). Asterisk's
+    Dial follows the 302 to the target (PJSIP `redirect_method` default `user`; checked in
+    `test_host/sip/integration.sh` scenarios 11-12). Logged as `DIR_RES_FORWARDED` (history
+    "Forwarded", blue arrow, no missed notice), ended screen "Forwarded" (end_code 302). Status
+    bar: amber "FWD" badge while `fwd_always` is set (wins over DND / Zz).
+  - Redial: `dir_history_last_dialed()` (newest outgoing call). Dialer: Call (or long '#') with
+    nothing typed fills it in, Call again dials; console `redial`.
+- Settings UI for the above: Call features page (Quiet hours switch, From / Until dropdowns in
+  30 min steps, "Contacts ring"; action `save_quiet`), Forwarding page (form: three targets,
+  ring time; action `save_forward`), dialer redial (action `last_dialed`).
 - Call feature UI (`ui_model_t` "call features" block, `ui_actions_t` answer_waiting / reject_waiting /
   swap / transfer_blind / transfer_attended_start|complete|cancel / set_dnd; the bridge maps
   `phone_status_t.second/xfer/auto_answered` and the `dnd` setting). Call screen: Transfer button opens
@@ -217,7 +251,7 @@ LCD, so its heap numbers are far too optimistic, stack numbers are representativ
 | audio_tx | 1 | 22 | 6144 | (call only) | 2664 | frames + rtp decode |
 | audio_rx | 1 | 22 | 6144 | (call only) | 2628 | AEC (~5-6 ms per 20 ms frame) |
 | rtp_rx | 1 | 21 | 4096 | 3336 | 2616 | |
-| sip | 0 | 5 | 8192 -> **7168** | 4580 | 3504 (4.7 KB used) | ~2.5 KB margin |
+| sip | 0 | 5 | 8192 -> **7168** | 4580 | 2864 (4.2 KB used; screening / redirect +~130 B) | ~2.8 KB margin |
 | taskLVGL | 0 | 4 | 8192 | 2264 | 2448 | software rendering, history page on stack |
 | ui_bridge | 0 | 3 | 6144 | 2172 | 2004 | |
 | console_repl | any | 2 | 6144 | 4748 | 2044 | `contact import`, `cfg show`: keep |
@@ -600,7 +634,11 @@ CONFIG_SIPWIRE_TZ), `clock_24h` (default false = 12 h), `aec` (echo canceller,
 default false until verified on hardware, applied live), `aec_suppress` /
 `aec_suppress_act` (dB, default 40 / 15), `ota_url` (default
 CONFIG_SIPWIRE_OTA_URL), `blf` (BLF keys, default none), `vm_number` (default `*97`),
-`call_waiting` (default true), `dnd` (default false), `auto_answer` (default true).
+`call_waiting` (default true), `dnd` (default false), `auto_answer` (default true),
+`find_alert` (default `find`), `quiet_hours` (default false), `quiet_start` / `quiet_end`
+(default 22:00 / 07:00; console `cfg set quiet_start 22:30` or minutes), `quiet_allow_contacts`
+(default true), `fwd_always` / `fwd_busy` / `fwd_noanswer` (default empty = off),
+`fwd_noanswer_s` (default 20, 5-300).
 Set via UI settings, serial console (`sipwire>` REPL), or `config.json` on SD.
 
 ## Flash mode (QIO, 80 MHz)

@@ -111,7 +111,10 @@ Functions return `sip_err_t` (0 / negative) because the core cannot depend on
   `sip_call_state`, `sip_call_transfer(target)` (blind REFER),
   `sip_call_transfer_replace(call, consult)` (attended, Refer-To with Replaces),
   `sip_call_send_info_dtmf(digit, ms)` (INFO application/dtmf-relay)
-* incoming policy: `sip_ua_set_call_waiting(bool)` (default on), `sip_ua_set_dnd(bool)`
+* incoming policy: `sip_ua_set_call_waiting(bool)` (default on), `sip_ua_set_dnd(bool)`,
+  `sip_ua_set_alert_marker(marker)` (Alert-Info token reported as `alert_match`, "" = off),
+  `cb.screen` (per new INVITE, synchronous: DEFAULT / RING through DND / REJECT code /
+  REDIRECT target), `sip_call_redirect(call, target)` (302 for a ringing incoming call)
 * subscriptions: `sip_ua_subscribe_blf(ua, ext, &handle)` (≤ `SIP_UA_MAX_BLF` = 8),
   `sip_ua_subscribe_mwi(ua, &handle)` (one), `sip_ua_unsubscribe(ua, handle)`,
   `sip_ua_blf_state(ua, handle)`; `cfg.sub_expires` (default 600 s)
@@ -123,7 +126,9 @@ Functions return `sip_err_t` (0 / negative) because the core cannot depend on
   `mwi(waiting, new, old)` (on change; subscription or unsolicited NOTIFY),
   `transfer(handle, state, code)` (TRYING / ACCEPTED / PROGRESS / SUCCESS / FAILED),
   `call_rejected(number, name, code)` (INVITE refused without being offered:
-  busy, DND); `sip_call_info_t.answer_after` (auto answer request, -1 = none)
+  busy, DND, screened; 302 = redirected); `sip_call_info_t.answer_after` (auto answer
+  request, -1 = none), `.alert_match` (Alert-Info carries the alert marker);
+  `screen(info, out)` (the one synchronous hook: must not call the UA)
 
 ### Callback rules
 
@@ -173,6 +178,15 @@ Not thread-safe: use one task.
 * Auto answer: `Call-Info: <...>;answer-after=N`, or Alert-Info with
   `info=alert-autoanswer` / `Ring Answer` / `intercom` / `auto answer`
   (outside the `<URI>`, optional `;delay=N`) → `answer_after` = N (else 0).
+* Alert marker (find the handset): an Alert-Info item `<...>;info=<marker>`, a bare
+  `<marker>` or `info=<marker>` (whole token, case-insensitive, never inside the `<URI>`).
+* Screening / redirect: the screen hook sees caller, `answer_after`, `alert_match` and
+  `busy` (the UA would refuse it: no free line). REDIRECT answers `302 Moved Temporarily`
+  with `Contact: <sip:target@domain>` (number escaped like a dial string) or the given
+  `sip:` URI, To tag, the request's Via; an empty, undialable or > `SIP_URI_MAX` target
+  falls back to 486. `sip_call_redirect` does the same on the INVITE transaction of a
+  ringing call (after the 180, same To tag) and ends it (`SIP_END_LOCAL`, 302). Both
+  wait for the ACK like any final error (timers G/H/I).
 * Hangup on an incoming ringing call sends 486; `sip_call_reject` lets the
   app pick (e.g. 603). Hangup of an answered call before its ACK waits for the
   ACK (or its timeout) before sending BYE (§15).

@@ -37,6 +37,37 @@ bool phone_auto_answer(int answer_after, bool setting_on, bool other_call)
     return answer_after >= 0 && setting_on && !other_call;
 }
 
+phone_screen_t phone_screen_decide(const phone_screen_in_t *in)
+{
+    if (in->find && !in->busy) {
+        return PHONE_SCREEN_FIND;
+    }
+    if (in->fwd_always) {
+        return PHONE_SCREEN_FWD_ALWAYS;
+    }
+    if (in->dnd) {
+        return PHONE_SCREEN_NORMAL;     /* the UA refuses it (DND) */
+    }
+    if (in->quiet && !in->caller_allowed) {
+        return PHONE_SCREEN_QUIET;
+    }
+    if (in->busy && in->fwd_busy) {
+        return PHONE_SCREEN_FWD_BUSY;
+    }
+    return PHONE_SCREEN_NORMAL;
+}
+
+bool phone_quiet_window(uint16_t start_min, uint16_t end_min, int now_min)
+{
+    if (now_min < 0 || now_min >= 24 * 60 || start_min >= 24 * 60 || end_min >= 24 * 60 || start_min == end_min) {
+        return false;
+    }
+    if (start_min < end_min) {
+        return now_min >= start_min && now_min < end_min;
+    }
+    return now_min >= start_min || now_min < end_min;     /* wraps past midnight */
+}
+
 xfer_state_t phone_xfer_map(sip_xfer_state_t st)
 {
     switch (st) {
@@ -52,8 +83,9 @@ xfer_state_t phone_xfer_map(sip_xfer_state_t st)
 int phone_end_code(sip_ua_end_reason_t reason, int status_code)
 {
     switch (reason) {
-    case SIP_END_NONE:
     case SIP_END_LOCAL:
+        return status_code == 302 ? 302 : 0;    /* we forwarded it (302); else a normal hangup */
+    case SIP_END_NONE:
     case SIP_END_REMOTE:
         return 0;
     case SIP_END_CANCELLED:
@@ -325,13 +357,16 @@ const char *phone_blf_state_name(blf_state_t st)
 
 /* ---- call log ---- */
 
-phone_log_result_t phone_log_result(bool outgoing, bool answered, bool rejected_local, bool dnd)
+phone_log_result_t phone_log_result(bool outgoing, bool answered, bool rejected_local, bool dnd, bool forwarded)
 {
     if (answered) {
         return PHONE_LOG_ANSWERED;
     }
     if (outgoing) {
         return PHONE_LOG_MISSED;
+    }
+    if (forwarded) {
+        return PHONE_LOG_FORWARDED;
     }
     if (dnd) {
         return PHONE_LOG_DND;

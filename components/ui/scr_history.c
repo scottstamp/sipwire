@@ -79,6 +79,9 @@ static const char *icon_for(const ui_call_t *c, lv_color_t *col)
     case UI_CALLRES_REJECTED:
         *col = UI_COL_WARN;
         return LV_SYMBOL_CLOSE;
+    case UI_CALLRES_FORWARDED:
+        *col = UI_COL_BLUE;
+        return LV_SYMBOL_RIGHT;
     case UI_CALLRES_DND:
     default:
         *col = UI_COL_DIM;
@@ -92,6 +95,7 @@ static const char *status_for(const ui_call_t *c)
     case UI_CALLRES_MISSED:   return c->direction == UI_CALLDIR_OUT ? "No answer" : "Missed";
     case UI_CALLRES_REJECTED: return "Declined";
     case UI_CALLRES_DND:      return "Do not disturb";
+    case UI_CALLRES_FORWARDED: return "Forwarded";
     default:                  return "";
     }
 }

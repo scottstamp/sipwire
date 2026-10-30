@@ -1,4 +1,4 @@
-/* Settings: scrolling list -> Wi-Fi / SIP account / BLF keys / Time / Update
+/* Settings: scrolling list -> Wi-Fi / SIP account / BLF keys / Time / Forwarding / Update
  * forms (on-screen keyboard) / About / touch calibration screen. The forms are prefilled from the model when opened
  * (passwords are never in the model: an empty field keeps the stored one).
  * All pages live in one screen and are switched by hiding; the keyboard is
@@ -18,7 +18,7 @@
 #define OTA_URL_MAX_CHARS 191       /* ota.h OTA_URL_MAX - 1 */
 
 typedef enum {
-    PG_LIST, PG_WIFI, PG_ACCOUNT, PG_BLF, PG_TIME, PG_UPDATE, PG_ABOUT,
+    PG_LIST, PG_WIFI, PG_ACCOUNT, PG_BLF, PG_TIME, PG_FORWARD, PG_UPDATE, PG_ABOUT,
     PG_SOUNDS, PG_FEATURES,     /* no keyboard, apply immediately */
     PG_COUNT
 } page_t;
@@ -81,6 +81,7 @@ typedef struct {
     lv_obj_t *ntp, *tz_dd, *tz_custom, *h24;
     uint32_t tz_prev;               /* dropdown index before the last change */
     lv_obj_t *fw, *ota_url, *ota_btn, *ota_bar, *ota_msg;
+    lv_obj_t *fwd_always, *fwd_busy, *fwd_noans, *fwd_secs;   /* Forwarding page */
 
     /* BLF keys page: the entries being edited (saved as a whole) */
     lv_obj_t *blf_cap, *blf_rows, *blf_ext, *blf_label, *blf_add, *vm;
@@ -100,12 +101,14 @@ typedef struct {
 
     /* Call features page */
     lv_obj_t *sw_cw, *sw_aa, *sw_dnd;
+    lv_obj_t *sw_quiet, *sw_qallow, *dd_qstart, *dd_qend;
+    uint16_t q_start, q_end;        /* minutes; a dropdown only replaces its own on change */
 } settings_t;
 
 static settings_t *s_s;
 
-static const char *const TITLES[PG_COUNT] = {"Settings", "Wi-Fi", "Account", "BLF", "Time", "Update",
-                                             "About", "Sounds", "Call features"};
+static const char *const TITLES[PG_COUNT] = {"Settings", "Wi-Fi", "Account", "BLF", "Time", "Forward",
+                                             "Update", "About", "Sounds", "Call features"};
 
 static void on_delete(lv_event_t *e)
 {
@@ -120,7 +123,7 @@ static void on_delete(lv_event_t *e)
 
 static bool is_form(page_t p)
 {
-    return p == PG_WIFI || p == PG_ACCOUNT || p == PG_BLF || p == PG_TIME || p == PG_UPDATE;
+    return p == PG_WIFI || p == PG_ACCOUNT || p == PG_BLF || p == PG_TIME || p == PG_FORWARD || p == PG_UPDATE;
 }
 
 static void kb_hide(settings_t *s)
@@ -141,8 +144,9 @@ static void field_clicked(lv_event_t *e)
 {
     settings_t *s = lv_event_get_user_data(e);
     lv_obj_t *ta = lv_event_get_target_obj(e);
-    lv_keyboard_set_mode(s->kb, ta == s->port                        ? LV_KEYBOARD_MODE_NUMBER
-                                : (ta == s->blf_ext || ta == s->vm) ? LV_KEYBOARD_MODE_USER_1
+    bool dial = ta == s->blf_ext || ta == s->vm || ta == s->fwd_always || ta == s->fwd_busy || ta == s->fwd_noans;
+    lv_keyboard_set_mode(s->kb, (ta == s->port || ta == s->fwd_secs) ? LV_KEYBOARD_MODE_NUMBER
+                                : dial                              ? LV_KEYBOARD_MODE_USER_1
                                                                     : LV_KEYBOARD_MODE_TEXT_LOWER);
     lv_keyboard_set_textarea(s->kb, ta);
     lv_obj_set_hidden(s->kb, false);
@@ -229,6 +233,13 @@ static void prefill(settings_t *s, page_t p)
         blf_rebuild(s);
     } else if (p == PG_TIME) {
         prefill_time(s, m);
+    } else if (p == PG_FORWARD) {
+        char secs[8];
+        snprintf(secs, sizeof(secs), "%u", (unsigned)m->fwd_noanswer_s);
+        lv_textarea_set_text(s->fwd_always, m->fwd_always);
+        lv_textarea_set_text(s->fwd_busy, m->fwd_busy);
+        lv_textarea_set_text(s->fwd_noans, m->fwd_noanswer);
+        lv_textarea_set_text(s->fwd_secs, secs);
     } else if (p == PG_UPDATE) {
         lv_textarea_set_text(s->ota_url, m->ota_url);
         lv_obj_update_layout(s->ota_url);
@@ -567,6 +578,16 @@ static void blf_add_clicked(lv_event_t *e)
     blf_rebuild(s);
 }
 
+/* A forwarding target as the form accepts it: a dialable number, or a sip: URI kept from the
+ * console (settings_fwd_target_ok has the full rule). */
+static bool fwd_ok(const char *t)
+{
+    if (strncmp(t, "sip:", 4) == 0) {
+        return t[4] != '\0' && strlen(t) < UI_NUMBER_LEN && !strpbrk(t, " <>\"");
+    }
+    return strlen(t) < UI_NUMBER_LEN && blf_ext_ok(t);
+}
+
 static void settings_toast_back(settings_t *s, const char *msg)
 {
     ui_toast(msg);
@@ -616,6 +637,23 @@ static void on_save(lv_event_t *e)
         ui_act_save_blf(list);
         ui_act_save_vm_number(vm);
         settings_toast_back(s, "BLF keys saved");
+    } else if (s->cur == PG_FORWARD) {
+        const char *a = lv_textarea_get_text(s->fwd_always);
+        const char *b = lv_textarea_get_text(s->fwd_busy);
+        const char *n = lv_textarea_get_text(s->fwd_noans);
+        const char *st = lv_textarea_get_text(s->fwd_secs);
+        /* the form types numbers; a sip: URI set from the console is kept as it is */
+        if ((a[0] && !fwd_ok(a)) || (b[0] && !fwd_ok(b)) || (n[0] && !fwd_ok(n))) {
+            ui_toast("Number: 0-9 a-z * # + . _ -");
+            return;
+        }
+        long secs = st[0] ? strtol(st, NULL, 10) : 20;
+        if (secs < 5 || secs > 300) {
+            ui_toast("Ring time: 5-300 seconds");
+            return;
+        }
+        ui_act_save_forward(a, b, n, (uint16_t)secs);
+        settings_toast_back(s, a[0] ? "Forwarding all calls" : "Forwarding saved");
     } else if (s->cur == PG_TIME) {
         const char *ntp = lv_textarea_get_text(s->ntp);
         uint32_t idx = lv_dropdown_get_selected(s->tz_dd);
@@ -778,15 +816,83 @@ static void set_switch(lv_obj_t *sw, bool on)
     }
 }
 
+#define QUIET_STEP_MIN 30           /* dropdown granularity (console `cfg` takes any minute) */
+#define QUIET_STEPS (1440 / QUIET_STEP_MIN)
+
+static void quiet_save(settings_t *s)
+{
+    ui_act_save_quiet(lv_obj_has_state(s->sw_quiet, LV_STATE_CHECKED), s->q_start, s->q_end,
+                      lv_obj_has_state(s->sw_qallow, LV_STATE_CHECKED));
+}
+
+static void on_quiet(lv_event_t *e)
+{
+    settings_t *s = s_s;
+    if (!s) {
+        return;
+    }
+    lv_obj_t *t = lv_event_get_target_obj(e);
+    if (t == s->dd_qstart) {
+        s->q_start = (uint16_t)(lv_dropdown_get_selected(t) * QUIET_STEP_MIN);
+    } else if (t == s->dd_qend) {
+        s->q_end = (uint16_t)(lv_dropdown_get_selected(t) * QUIET_STEP_MIN);
+    }
+    quiet_save(s);
+}
+
+/* "22:00\n22:30..." or "10:00 PM..." per the clock setting (LVGL heap, copied by the dropdown). */
+static void quiet_options(lv_obj_t *dd, bool h24)
+{
+    char *buf = lv_malloc(QUIET_STEPS * 10);
+    if (!buf) {
+        return;
+    }
+    size_t n = 0;
+    for (int i = 0; i < QUIET_STEPS; i++) {
+        int h = i * QUIET_STEP_MIN / 60, m = i * QUIET_STEP_MIN % 60;
+        if (h24) {
+            n += (size_t)lv_snprintf(buf + n, QUIET_STEPS * 10 - n, "%s%02d:%02d", i ? "\n" : "", h, m);
+        } else {
+            n += (size_t)lv_snprintf(buf + n, QUIET_STEPS * 10 - n, "%s%d:%02d %s", i ? "\n" : "",
+                                     h % 12 ? h % 12 : 12, m, h < 12 ? "AM" : "PM");
+        }
+    }
+    lv_dropdown_set_options(dd, buf);
+    lv_free(buf);
+}
+
 static void features_prefill(settings_t *s)
 {
     const ui_model_t *m = ui_model();
     set_switch(s->sw_cw, m->call_waiting);
     set_switch(s->sw_aa, m->auto_answer);
     set_switch(s->sw_dnd, m->dnd);
+    set_switch(s->sw_quiet, m->quiet_hours);
+    set_switch(s->sw_qallow, m->quiet_allow_contacts);
+    s->q_start = m->quiet_start < 1440 ? m->quiet_start : 0;
+    s->q_end = m->quiet_end < 1440 ? m->quiet_end : 0;
+    quiet_options(s->dd_qstart, m->clock_24h);
+    quiet_options(s->dd_qend, m->clock_24h);
+    lv_dropdown_set_selected(s->dd_qstart, s->q_start / QUIET_STEP_MIN);
+    lv_dropdown_set_selected(s->dd_qend, s->q_end / QUIET_STEP_MIN);
+    lv_obj_scroll_to_y(s->page[PG_FEATURES], 0, LV_ANIM_OFF);
 }
 
-static lv_obj_t *feature_row(lv_obj_t *page, const char *title, const char *desc)
+/* "From" / "Until" + a time dropdown, one row. */
+static lv_obj_t *quiet_time_row(lv_obj_t *page, const char *caption)
+{
+    lv_obj_t *row = ui_box_create(page, 0, 0, 228, FIELD_H + 4);
+    lv_obj_t *t = ui_label_create(row, &lv_font_montserrat_24, UI_COL_TEXT, caption);
+    lv_obj_align(t, LV_ALIGN_LEFT_MID, 4, 0);
+    lv_obj_t *dd = lv_dropdown_create(row);
+    lv_obj_set_size(dd, 150, FIELD_H);
+    lv_obj_align(dd, LV_ALIGN_RIGHT_MID, -2, 0);
+    ui_style_dropdown(dd);
+    lv_obj_add_event_cb(dd, on_quiet, LV_EVENT_VALUE_CHANGED, NULL);
+    return dd;
+}
+
+static lv_obj_t *feature_row(lv_obj_t *page, const char *title, const char *desc, lv_event_cb_t cb)
 {
     lv_obj_t *row = ui_box_create(page, 0, 0, 228, 64);
     lv_obj_t *t = ui_label_create(row, &lv_font_montserrat_24, UI_COL_TEXT, title);
@@ -799,7 +905,7 @@ static lv_obj_t *feature_row(lv_obj_t *page, const char *title, const char *desc
     lv_obj_set_style_bg_color(sw, UI_COL_SURFACE2, 0);
     lv_obj_set_style_bg_color(sw, UI_COL_GREEN, LV_PART_INDICATOR | LV_STATE_CHECKED);
     lv_obj_set_style_bg_color(sw, UI_COL_TEXT, LV_PART_KNOB);
-    lv_obj_add_event_cb(sw, on_feature, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(sw, cb, LV_EVENT_VALUE_CHANGED, NULL);
     return sw;
 }
 
@@ -830,6 +936,7 @@ static lv_obj_t *settings_create(const char *arg)
     list_row(list, PG_COUNT, LV_SYMBOL_EDIT, "Calibrate");
     list_row(list, PG_SOUNDS, LV_SYMBOL_VOLUME_MAX, "Sounds");
     list_row(list, PG_FEATURES, LV_SYMBOL_SHUFFLE, "Call features");
+    list_row(list, PG_FORWARD, LV_SYMBOL_NEXT, "Forwarding");
     list_row(list, PG_TIME, LV_SYMBOL_BELL, "Time");
     list_row(list, PG_UPDATE, LV_SYMBOL_DOWNLOAD, "Update");
     list_row(list, PG_ABOUT, LV_SYMBOL_LIST, "About");
@@ -847,6 +954,7 @@ static lv_obj_t *settings_create(const char *arg)
     s->dname = field_create(s, s->page[PG_ACCOUNT], "Display name", "Optional", 63, false);
 
     static const char DIAL_CHARS[] = "0123456789*#+._-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    static const char FWD_CHARS[] = "0123456789*#+._-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ:@;=";
     lv_obj_t *bf = form_create(s, scr);
     s->page[PG_BLF] = bf;
     s->blf_cap = ui_label_create(bf, &lv_font_montserrat_14, UI_COL_DIM, "");
@@ -889,6 +997,17 @@ static lv_obj_t *settings_create(const char *arg)
     lv_obj_set_style_bg_color(s->h24, UI_COL_TEXT, LV_PART_KNOB);
     lv_obj_add_event_cb(s->h24, tz_pressed, LV_EVENT_PRESSED, s);
 
+    lv_obj_t *fwf = form_create(s, scr);
+    s->page[PG_FORWARD] = fwf;
+    s->fwd_always = field_create(s, fwf, "Always forward to (empty = off)", "Off", UI_NUMBER_LEN - 1, false);
+    s->fwd_busy = field_create(s, fwf, "When busy or declined", "Off", UI_NUMBER_LEN - 1, false);
+    s->fwd_noans = field_create(s, fwf, "When not answered", "Off", UI_NUMBER_LEN - 1, false);
+    s->fwd_secs = field_create(s, fwf, "... after ringing (seconds)", "20", 3, false);
+    lv_textarea_set_accepted_chars(s->fwd_secs, "0123456789");
+    lv_textarea_set_accepted_chars(s->fwd_always, FWD_CHARS);
+    lv_textarea_set_accepted_chars(s->fwd_busy, FWD_CHARS);
+    lv_textarea_set_accepted_chars(s->fwd_noans, FWD_CHARS);
+
     lv_obj_t *uf = form_create(s, scr);
     s->page[PG_UPDATE] = uf;
     lv_obj_t *fwcap = ui_label_create(uf, &lv_font_montserrat_14, UI_COL_DIM, "Firmware - running slot");
@@ -928,9 +1047,13 @@ static lv_obj_t *settings_create(const char *arg)
 
     lv_obj_t *ff = form_create(s, scr);
     s->page[PG_FEATURES] = ff;
-    s->sw_cw = feature_row(ff, "Call waiting", "Beep for a second call");
-    s->sw_aa = feature_row(ff, "Auto-answer", "Pages on the loudspeaker");
-    s->sw_dnd = feature_row(ff, "Don't disturb", "Refuse calls silently");
+    s->sw_cw = feature_row(ff, "Call waiting", "Beep for a second call", on_feature);
+    s->sw_aa = feature_row(ff, "Auto-answer", "Pages on the loudspeaker", on_feature);
+    s->sw_dnd = feature_row(ff, "Don't disturb", "Refuse calls silently", on_feature);
+    s->sw_quiet = feature_row(ff, "Quiet hours", "Like DND, every day", on_quiet);
+    s->dd_qstart = quiet_time_row(ff, "From");
+    s->dd_qend = quiet_time_row(ff, "Until");
+    s->sw_qallow = feature_row(ff, "Contacts ring", "Even in quiet hours", on_quiet);
 
     lv_obj_t *about = ui_box_create(scr, 0, BODY_Y, UI_W, BODY_H);
     s->page[PG_ABOUT] = about;
