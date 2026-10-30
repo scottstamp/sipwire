@@ -13,6 +13,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "linenoise/linenoise.h"
@@ -366,6 +367,52 @@ static int cmd_cpu(int argc, char **argv)
 }
 #endif
 
+#if CONFIG_HEAP_POISONING_COMPREHENSIVE || CONFIG_HEAP_POISONING_LIGHT
+/* Debug builds (sdkconfig.debug-heap): check the heaps in the background so a corruption is
+ * reported close to when it happens, with both cores' backtraces from the abort. */
+static volatile uint32_t s_heapwatch_ms;
+
+static void heapwatch_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        uint32_t ms = s_heapwatch_ms;
+        if (ms == 0) {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            continue;
+        }
+        int64_t t0 = esp_timer_get_time();
+        bool ok = heap_caps_check_integrity(MALLOC_CAP_SPIRAM, true) &&
+                  heap_caps_check_integrity(MALLOC_CAP_INTERNAL, true);
+        if (!ok) {
+            ESP_LOGE(TAG, "heapwatch: heap corrupted (details above)");
+            abort();
+        }
+        static int64_t s_last_log;
+        if (t0 - s_last_log > 60 * 1000000LL) {
+            s_last_log = t0;
+            ESP_LOGI(TAG, "heapwatch: ok, one check %" PRId64 " ms", (esp_timer_get_time() - t0) / 1000);
+        }
+        vTaskDelay(pdMS_TO_TICKS(ms));
+    }
+}
+
+static int cmd_heapwatch(int argc, char **argv)
+{
+    static TaskHandle_t s_task;
+    uint32_t ms = argc >= 2 ? (uint32_t)strtoul(argv[1], NULL, 10) : 200;
+    if (s_task == NULL &&
+        xTaskCreatePinnedToCore(heapwatch_task, "heapwatch", 3072, NULL, 1, &s_task, 0) != pdPASS) {
+        printf("no memory for the task\n");
+        return 1;
+    }
+    s_heapwatch_ms = ms;
+    xTaskNotifyGive(s_task);
+    printf(ms ? "heapwatch: checking every %" PRIu32 " ms\n" : "heapwatch: off\n", ms);
+    return 0;
+}
+#endif
+
 static int cmd_reboot(int argc, char **argv)
 {
     (void)argc;
@@ -428,6 +475,10 @@ esp_err_t console_start(void)
 #if CONFIG_FREERTOS_USE_TRACE_FACILITY && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
         { .command = "cpu", .help = "Per-task CPU load (% of one core) over a sampling window",
           .hint = "[seconds]", .func = cmd_cpu },
+#endif
+#if CONFIG_HEAP_POISONING_COMPREHENSIVE || CONFIG_HEAP_POISONING_LIGHT
+        { .command = "heapwatch", .help = "Debug: check heap integrity in the background, abort on corruption "
+                                          "(0 = off)", .hint = "[ms]", .func = cmd_heapwatch },
 #endif
         { .command = "reboot", .help = "Restart the device", .func = cmd_reboot },
     };

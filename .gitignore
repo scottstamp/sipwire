@@ -10,3 +10,4 @@ build_host/
 sim/web/build/
 .claude/worktrees/
 build_qemu/
+build_heap/

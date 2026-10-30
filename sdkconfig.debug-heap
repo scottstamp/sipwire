@@ -1,0 +1,4 @@
+# Debug overlay: heap corruption hunting (console `heapwatch [ms]`). Build with
+#   idf.py -B build_heap -D SDKCONFIG=build_heap/sdkconfig \
+#          -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.debug-heap" build
+CONFIG_HEAP_POISONING_COMPREHENSIVE=y
