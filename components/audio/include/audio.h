@@ -35,6 +35,17 @@ esp_err_t audio_stop(void);
 
 /** Tone mixed on top of the source (or alone when stopped → auto-start). */
 void audio_play_tone(audio_tone_t tone);
+
+typedef enum {
+    AUDIO_ALERT_WEAK_SIGNAL,        /* two short, quiet 1.4 kHz beeps: Wi-Fi near range edge */
+} audio_alert_t;
+
+/** One-shot alert mixed on top of a call stream (one with source/sink callbacks) and of
+ *  any tone: the earpiece / speaker only, never sent to the far end (the mic path is
+ *  separate; the echo canceller sees it as speaker output). A slot of its own, so it does
+ *  not cut a looping tone (call waiting). Ignored without a call stream (never starts
+ *  audio). Non-blocking, callable from any task. */
+void audio_play_alert(audio_alert_t alert);
 /** Built-in synthesized ringtones, indices 0..count-1 (setting `ring_tone`). */
 int audio_ringtone_count(void);
 const char *audio_ringtone_name(int idx);   /* NULL when out of range */

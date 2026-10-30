@@ -22,6 +22,7 @@ typedef enum {
     NET_EVENT_GOT_IP,          /* net_event_ip_t */
     NET_EVENT_DISCONNECTED,    /* net_event_disc_t */
     NET_EVENT_RSSI,            /* int8_t, periodic while connected */
+    NET_EVENT_LINK_WARN,       /* net_event_link_warn_t: during calls, weak signal (repeats) / ok */
 } net_event_id_t;
 
 typedef struct {
@@ -32,6 +33,11 @@ typedef struct {
 typedef struct {
     uint8_t reason;            /* wifi_err_reason_t */
 } net_event_disc_t;
+
+typedef struct {
+    int8_t rssi;               /* dBm, -128 = no connection */
+    bool weak;                 /* true: warn (beep), false: signal back to normal */
+} net_event_link_warn_t;
 
 /* SIPWIRE_SIP_EVENT — registration, message waiting (emitted by phone) */
 typedef enum {

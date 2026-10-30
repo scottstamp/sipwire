@@ -125,3 +125,12 @@ CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 # CONFIG_ESP_COREDUMP_LOGS is not set
 # CONFIG_ESP_COREDUMP_CHECK_BOOT is not set
+
+# Wi-Fi roaming (components/net, board Kconfig "Wi-Fi roaming and range warning"):
+# SIPWIRE_WIFI_BTM selects ESP_WIFI_11KV_SUPPORT for 802.11v BSS transition; the 802.11k half
+# stays off: an AP's beacon report requests would make the handset scan during calls.
+# CONFIG_ESP_WIFI_RRM_SUPPORT is not set
+# DHCP: no ARP probe of the offered address before using it. Every reconnect (roam, link lost
+# during a call) does a full DHCP exchange, and the probe added a fixed 500 ms of silence to
+# each; DHCP servers check for conflicts before offering anyway.
+CONFIG_LWIP_DHCP_DOES_NOT_CHECK_OFFERED_IP=y

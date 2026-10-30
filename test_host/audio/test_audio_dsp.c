@@ -241,6 +241,38 @@ static void test_tone_keyclick_oneshot(void)
     TEST_ASSERT_FALSE(dsp_tone_active(&t));
 }
 
+/* Counted one-shot (weak-signal warning): exactly two bursts, then inactive. */
+static void test_tone_weak_signal_two_bursts(void)
+{
+    static int16_t buf[FS16 / 2];
+    dsp_tone_t t;
+    dsp_tone_init(&t, FS16);
+    dsp_tone_start(&t, DSP_TONE_WEAK_SIGNAL);
+    tone_render(&t, buf, FS16 / 2);                          /* 500 ms */
+
+    int bursts = 0;
+    size_t last = 0, quiet = 0;
+    bool on = false;
+    for (size_t i = 0; i < FS16 / 2; i++) {
+        bool loud = abs(buf[i]) > 100;
+        if (loud) {
+            last = i;
+            quiet = 0;
+            if (!on) {
+                bursts++;
+                on = true;
+            }
+        } else if (on && ++quiet > 16) {                    /* > 1 ms of silence */
+            on = false;
+        }
+    }
+    TEST_ASSERT_EQUAL(2, bursts);
+    /* second burst: 150 ms period + 70 ms on + 5 ms release */
+    TEST_ASSERT_TRUE(last > 200 * FS16 / 1000);
+    TEST_ASSERT_TRUE(last < 230 * FS16 / 1000);
+    TEST_ASSERT_FALSE(dsp_tone_active(&t));
+}
+
 static void test_tone_stop_releases(void)
 {
     static int16_t buf[FS16 / 10];
@@ -481,6 +513,7 @@ int main(void)
     RUN_TEST(test_tone_cadence_ring);
     RUN_TEST(test_tone_ring_warbles);
     RUN_TEST(test_tone_keyclick_oneshot);
+    RUN_TEST(test_tone_weak_signal_two_bursts);
     RUN_TEST(test_tone_stop_releases);
     RUN_TEST(test_dtmf_pairs);
     RUN_TEST(test_dtmf_duration);
