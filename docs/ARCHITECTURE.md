@@ -316,6 +316,15 @@ full speed, no light sleep). Both drop when the phone is idle again.
   is stopped by `idle_stop_cb` (esp_timer, under `api_mtx`, so it cannot race
   `audio_start`; a tone requested meanwhile stays queued and restarts the stream). Phone
   tones (ring, ringback, busy) loop, so no call path is affected.
+  Amp pin (`SIPWIRE_SPK_EN`, GPIO 18): `amp_set(true)` exists only in `tx_task` after the
+  priming frame; its exit, `stream_stop_locked` and the start failure path set it off, and
+  stop waits for `tx_task` to exit. So the amp is on exactly while a stream runs: never idle,
+  not after the tone-only idle stop, not after a call (`phone_media_audio(false, NONE)` ->
+  `audio_stop`). Init sets the output latch off before the pin becomes an output (it used to
+  go through `gpio_reset_pin`, which enables the pull-up for a moment), with the internal
+  pull towards off, and takes the pin out of the light-sleep GPIO switch
+  (`PM_SLP_DISABLE_GPIO` would float it in sleep). From reset until `audio_init` the pin is
+  not driven: a breakout pull-up on SD_MODE needs the external pull-down (`HARDWARE.md`).
 - **Idle wake-ups** (each one costs a light-sleep exit, so they come first). Screen off and
   idle, measured before this work (`cpu 30`): core 0 6 % busy, sip 2.6 %, wifi 1.2 %, keypad
   0.7 %, esp_timer 0.7 %, taskLVGL 0.4 %. Now:

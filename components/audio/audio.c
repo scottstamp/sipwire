@@ -90,15 +90,37 @@ static void amp_set(bool on)
     gpio_set_level(en, on == s.cfg->spk.en_active_high ? 1 : 0);
 }
 
+/* The amp is on only while tx_task runs (after the first silent frame, until the last one);
+ * every other path leaves it in shutdown. Driven, never floating:
+ * - init: the output latch is set to "off" before the pin becomes an output, and no
+ *   gpio_reset_pin() (it enables the pull-up: a glitch towards "on" for active-high SD_MODE).
+ *   The internal pull is towards "off" too, for the moment the pin is reconfigured.
+ * - light sleep: CONFIG_PM_SLP_DISABLE_GPIO isolates every GPIO in sleep (input and output
+ *   off, floating), which would leave SD_MODE to the breakout's pull-up. The pin is taken out
+ *   of the sleep switch, so it keeps driving "off" (I2S holds a PM lock while a stream runs,
+ *   so the chip never sleeps with the amp on).
+ * - reset, boot until audio_init(), a panic: the pin is not driven (reset state). Only an
+ *   external pull-down keeps the amp off then (docs/HARDWARE.md). The internal pull-down
+ *   could not do it either: ~45 kOhm against e.g. a 1 MOhm pull-up to 5 V leaves ~0.2 V on
+ *   SD_MODE, above the MAX98357A's 0.16 V shutdown threshold. */
 static esp_err_t amp_init(void)
 {
     gpio_num_t en = s.cfg->spk.en;
     if (en == GPIO_NUM_NC) {
         return ESP_OK;
     }
-    ESP_RETURN_ON_ERROR(gpio_reset_pin(en), TAG, "amp en reset");
-    amp_set(false);
-    return gpio_set_direction(en, GPIO_MODE_OUTPUT);
+    amp_set(false);                     /* output latch first: no glitch when it starts driving */
+    const bool high_on = s.cfg->spk.en_active_high;
+    const gpio_config_t io = {
+        .pin_bit_mask = 1ULL << en,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = high_on ? GPIO_PULLUP_DISABLE : GPIO_PULLUP_ENABLE,
+        .pull_down_en = high_on ? GPIO_PULLDOWN_ENABLE : GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&io), TAG, "amp en");
+    ESP_RETURN_ON_ERROR(gpio_sleep_sel_dis(en), TAG, "amp en sleep");
+    return ESP_OK;
 }
 
 /* ------------------------------------------------------------------ */

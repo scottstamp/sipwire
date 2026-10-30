@@ -114,6 +114,12 @@ menu "Sipwire board"
         config SIPWIRE_SPK_EN
             int "Amp enable / shutdown pin (MAX98357A SD_MODE)"
             default 18
+            help
+                Driven "on" only while an audio stream plays (call, tone, ringtone,
+                until the 2 s idle stop of a tone-only stream), "off" otherwise, also
+                in light sleep. Between reset and audio_init() the pin is not driven:
+                if the amp breakout pulls SD_MODE up, fit an external pull-down
+                (docs/HARDWARE.md).
         config SIPWIRE_SPK_EN_ACTIVE_HIGH
             bool "Amp enable active high"
             default y
