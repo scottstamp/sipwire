@@ -10,9 +10,11 @@
 #include "esp_event.h"
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -143,6 +145,35 @@ static const char *describe_err(esp_err_t err)
     }
 }
 
+/* Each 4 KB sector erase ahead of a write parks CPU 0 (~45 ms) and Wi-Fi traffic arrives about
+ * as fast, so during the download IDLE0 may not run for the 5 s task watchdog period. That is
+ * expected (and harmless): stop watching IDLE0 for the download, watch it again afterwards. */
+static void idle0_watch(bool on)
+{
+#if CONFIG_ESP_TASK_WDT_INIT
+    uint32_t mask = 0;
+#if CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0
+    mask |= on ? BIT(0) : 0;
+#endif
+#if CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1
+    mask |= BIT(1);
+#endif
+    const esp_task_wdt_config_t cfg = {
+        .timeout_ms = CONFIG_ESP_TASK_WDT_TIMEOUT_S * 1000,
+        .idle_core_mask = mask,
+#if CONFIG_ESP_TASK_WDT_PANIC
+        .trigger_panic = true,
+#endif
+    };
+    esp_err_t err = esp_task_wdt_reconfigure(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "task watchdog reconfigure: %s", esp_err_to_name(err));
+    }
+#else
+    (void)on;
+#endif
+}
+
 static void ota_task(void *arg)
 {
     char *url = arg;
@@ -161,11 +192,7 @@ static void ota_task(void *arg)
     if (strncmp(url, "https://", 8) == 0) {
         http.crt_bundle_attach = esp_crt_bundle_attach;
     }
-    /* Erase the image-sized region once, before the download, instead of one 4 KB sector
-     * ahead of each write: every erase parks the other core (~45 ms), and at Wi-Fi speed
-     * that kept CPU 0 parked nearly all the time (task_wdt: IDLE0 starved). The bulk erase
-     * yields between blocks (CONFIG_SPI_FLASH_YIELD_DURING_ERASE). */
-    esp_https_ota_config_t cfg = { .http_config = &http, .bulk_flash_erase = true };
+    esp_https_ota_config_t cfg = { .http_config = &http };
 
     err = esp_https_ota_begin(&cfg, &h);
     if (err != ESP_OK) {
@@ -187,9 +214,10 @@ static void ota_task(void *arg)
     }
     ESP_LOGI(TAG, "version %s -> %s", esp_app_get_description()->version, nd.version);
 
-    set_status(OTA_STATE_RUNNING, 0, 0, "Erasing...");   /* first perform() erases */
+    set_status(OTA_STATE_RUNNING, 0, 0, "Downloading 0%");
     int last_pct = -1, last_log = -1;
     int size = esp_https_ota_get_image_size(h);
+    idle0_watch(false);
     while ((err = esp_https_ota_perform(h)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
         int read = esp_https_ota_get_image_len_read(h);
         int pct = size > 0 ? (int)((int64_t)read * 100 / size) : 0;
@@ -201,10 +229,13 @@ static void ota_task(void *arg)
             post(OTA_EVENT_PROGRESS, &ev, sizeof(ev));
             if (pct / 10 != last_log) {
                 last_log = pct / 10;
-                ESP_LOGI(TAG, "progress %d%% (%d of %d bytes)", pct, read, size);
+                ESP_LOGI(TAG, "progress %d%% (%d of %d bytes), internal free %u, min %u", pct, read, size,
+                         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                         (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
             }
         }
     }
+    idle0_watch(true);
     if (err != ESP_OK) {
         fail(err, describe_err(err));
         goto abort;
