@@ -337,12 +337,15 @@ static void apply_volume(void)
 
 /* Power policy: from the first ring (or dial) of a call until no call is left, Wi-Fi power
  * save is off (DTIM bursts stutter RTP) and the CPU stays at full speed (G.722, AEC). That
- * covers ringing, active, held, a second (waiting or held) call and the ended screen. */
+ * covers ringing, active, held, a second (waiting or held) call and the ended screen.
+ * Directory flash writes (history of a rejected / ended background call, contact edits) wait
+ * for the same span: a flash erase stalls the audio tasks past the I2S ring. */
 static void update_power(void)
 {
     bool busy = s.state != SIP_UA_CALL_IDLE || s.bg.h != 0;
     net_set_low_latency(busy);
     power_hold(POWER_HOLD_CALL, busy);
+    dir_defer_writes(busy);
 }
 
 /* Publish s.state (+ number/name/end_code already in s.st) to everyone:

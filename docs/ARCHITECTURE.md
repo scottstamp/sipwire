@@ -26,6 +26,9 @@ components/
                      Mutators change RAM only; the "dir_save" task writes snapshots (taken
                      under the lock) ~200 ms later, so the LVGL / sip tasks never wait for
                      flash; dir_flush() waits for the write (console commands use it).
+                     While a call exists (`phone.c` `update_power()` ->
+                     `dir_defer_writes()`) the writes wait until the call is over: see
+                     "Flash writes during calls" (Memory and tasks). dir_flush() writes anyway.
                      phone.c logs every ended call (dir_history_add; phone_log_* in
                      phone_logic.c: answered / missed / declined / DND, outgoing no-answer =
                      missed); the UI reads the lists through ui_actions_t (bridge); the model
@@ -154,6 +157,19 @@ internal heap back, a full-screen redraw now takes 20 flushes instead of 10);
 `max_transfer_sz` = 240 x 40 x 2 = 19.2 KB still covers one buffer in a single transaction. I2S: 4 descriptors x 160 frames (10 ms)
 per direction (TX 4 x 320 B, RX 4 x 640 B for 32-bit mic slots); the 40 ms TX ring is the AEC
 delay `D` (see Echo canceller) and the main playout latency besides the jitter buffer.
+
+**Flash writes during calls**: a wear-levelled FAT sector write erases a 4 KB flash sector
+(~30-45 ms with the cache off). Core 1 then parks in IRAM and the audio tasks (flash-resident
+code, PSRAM data) cannot run for longer than the 40 ms I2S TX ring lasts: a click or a gap.
+So `directory` holds its writes back while a call exists (`dir_defer_writes()`, driven by
+`phone.c` `update_power()` together with the `call` power hold): history entries of a
+rejected or ended background call, missed-call "seen" marks and contact / speed-dial edits
+change RAM at once (the UI sees them), and the `dir_save` task writes them when the last call
+is gone (200 ms coalescing as usual). `dir_flush()` (console `contact` / `history` commands)
+writes regardless. A reboot during a call loses those changes, as a reset within the 200 ms
+coalescing window always did. NVS writes are not deferred: a volume change during a call is
+saved 3 s after the last key press (`vol_save_at` -> `settings_set`); an NVS write is mostly
+an entry append (no erase), but a full NVS page costs an erase too.
 
 **Heap debugging** (`sdkconfig.debug-heap` overlay, `HEAP_POISONING_COMPREHENSIVE`, console
 `heapwatch [ms [psram_s]]`): a background task runs `heap_caps_check_integrity` on the internal
