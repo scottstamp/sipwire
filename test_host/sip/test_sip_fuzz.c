@@ -15,6 +15,7 @@
 #include "sip_msg.h"
 #include "sip_sdp.h"
 #include "sip_test_util.h"
+#include "sip_ua_internal.h"
 #include "unity.h"
 
 #ifndef FUZZ_ITERATIONS
@@ -311,7 +312,7 @@ static void test_fuzz_ua(void)
 
 /* NOTIFY for the subscription whose SUBSCRIBE is f->sent[idx] */
 static void notify_seed(fx_t *f, int idx, const char *event, const char *ctype, const char *body, char *out,
-                        size_t cap)
+                        size_t cap, const char *contact)
 {
     const sip_msg_t *m = fx_parse(f, idx);
     snprintf(out, cap,
@@ -320,14 +321,14 @@ static void notify_seed(fx_t *f, int idx, const char *event, const char *ctype, 
              "Max-Forwards: 70\r\n"
              "From: <sip:1002@10.0.0.1>;tag=srv\r\n"
              "To: <sip:1001@10.0.0.1>;tag=%.*s\r\n"
-             "Contact: <sip:1002@10.0.0.1:5060>\r\n"
+             "Contact: <%s>\r\n"
              "Call-ID: %.*s\r\n"
              "CSeq: 7 NOTIFY\r\n"
              "Event: %s\r\n"
              "Subscription-State: active;expires=600\r\n"
              "Content-Type: %s\r\n"
              "Content-Length: %u\r\n\r\n%s",
-             (int)m->from.tag.len, m->from.tag.p, (int)m->call_id.len, m->call_id.p, event, ctype,
+             (int)m->from.tag.len, m->from.tag.p, contact, (int)m->call_id.len, m->call_id.p, event, ctype,
              (unsigned)strlen(body), body);
 }
 
@@ -337,7 +338,10 @@ static void test_fuzz_notify(void)
 {
     static fx_t f;
     static char work[SIP_MAX_MSG_IN + 256];
-    static char seed[4][2048];
+    static char seed[5][2048];
+    /* a target refresh whose Contact URI exceeds SIP_URI_MAX (must keep the old target) */
+    static char long_contact[256];
+    snprintf(long_contact, sizeof(long_contact), "sip:1002@10.0.0.1:5060;x=%0200d", 0);
     int n_blf = 0, n_mwi = 0;
     fx_init(&f, quiet_cfg);
     sip_ua_register(f.ua);
@@ -367,10 +371,13 @@ static void test_fuzz_notify(void)
                 }
             }
             TEST_ASSERT_TRUE(b >= 0 && w >= 0);
-            notify_seed(&f, b, "dialog", "application/dialog-info+xml", body_seeds[0], seed[0], sizeof(seed[0]));
-            notify_seed(&f, b, "dialog", "application/dialog-info+xml", body_seeds[1], seed[1], sizeof(seed[1]));
+            const char *ct = "sip:1002@10.0.0.1:5060";
+            notify_seed(&f, b, "dialog", "application/dialog-info+xml", body_seeds[0], seed[0], sizeof(seed[0]), ct);
+            notify_seed(&f, b, "dialog", "application/dialog-info+xml", body_seeds[1], seed[1], sizeof(seed[1]), ct);
             notify_seed(&f, w, "message-summary", "application/simple-message-summary", body_seeds[2], seed[2],
-                        sizeof(seed[2]));
+                        sizeof(seed[2]), ct);
+            notify_seed(&f, b, "dialog", "application/dialog-info+xml", body_seeds[0], seed[4], sizeof(seed[4]),
+                        long_contact);
             snprintf(seed[3], sizeof(seed[3]),
                      "NOTIFY sip:1001@10.0.0.2:5060 SIP/2.0\r\n"
                      "Via: SIP/2.0/UDP 10.0.0.1:5060;rport;branch=z9hG4bKnf2\r\n"
@@ -382,7 +389,7 @@ static void test_fuzz_notify(void)
             fx_reply(&f, b, 200, "srv", "Expires: 600\r\n", NULL);
             fx_reply(&f, w, 200, "srv", "Expires: 600\r\n", NULL);
         }
-        const char *sd = seed[fx_rand(&rng) % 4];
+        const char *sd = seed[fx_rand(&rng) % 5];
         size_t len = it % 10 == 0 ? strlen(sd) : mutate(work, sizeof(work), sd, strlen(sd));
         char *exact = malloc(len ? len : 1);
         TEST_ASSERT_NOT_NULL(exact);
@@ -406,11 +413,159 @@ static void test_fuzz_notify(void)
     fx_free(&f);
 }
 
+static char *find_mem(char *p, size_t len, const char *needle)
+{
+    size_t n = strlen(needle);
+    for (size_t i = 0; i + n <= len; i++) {
+        if (memcmp(p + i, needle, n) == 0) {
+            return p + i;
+        }
+    }
+    return NULL;
+}
+
+/* snprintf into a char array that must not truncate */
+#define SEEDF(buf, ...) TEST_ASSERT_TRUE(snprintf(buf, sizeof(buf), __VA_ARGS__) < (int)sizeof(buf))
+
+/* Header blocks sized to the UA's limits: n Via lines of about len bytes. */
+static int big_vias(char *out, size_t cap, int n, int len, const char *branch)
+{
+    size_t o = 0;
+    for (int i = 0; i < n && o + (size_t)len + 64 < cap; i++) {
+        int k = snprintf(out + o, cap - o, "Via: SIP/2.0/UDP 10.0.0.%d:5060;rport;branch=%s%d;x=", i + 1, branch, i);
+        o += (size_t)k;
+        for (; k < len - 2; k++) {
+            out[o++] = 'v';
+        }
+        out[o++] = '\r';
+        out[o++] = '\n';
+    }
+    out[o] = '\0';
+    return (int)o;
+}
+
+/* Seeds that reach the size limits of the response template (Via block over
+ * 800 B; To / Record-Route long enough that the 180 or the 200 + SDP do not
+ * fit 1500 B) and of the dialog (Contact URI over SIP_URI_MAX in a target
+ * refresh), mutated around those edges. Afterwards nothing may be left
+ * holding the transaction pool. */
+static void test_fuzz_oversized(void)
+{
+    static fx_t f;
+    static char work[SIP_MAX_MSG_IN + 256];
+    static char seed[5][SIP_MAX_MSG_IN];
+    static char vias[1400];
+    fx_init(&f, quiet_cfg);
+    sip_ua_register(f.ua);
+    fx_reply(&f, 0, 200, "s1", "Expires: 300\r\n", NULL);
+    f.auto_reg = true;
+
+    /* a call to refresh the target of: answered, ACKed */
+    f.auto_answer = true;
+    const char *sdp = seeds[0] + (strstr(seeds[0], "\r\n\r\n") - seeds[0]) + 4;
+    SEEDF(work,
+             "INVITE sip:1001@10.0.0.2:5060 SIP/2.0\r\n"
+             "Via: SIP/2.0/UDP 10.0.0.1:5060;rport;branch=z9hG4bKov0\r\n"
+             "From: \"Bob\" <sip:1002@10.0.0.1>;tag=remote1\r\nTo: <sip:1001@10.0.0.2>\r\n"
+             "Contact: <sip:asterisk@10.0.0.1:5060>\r\nCall-ID: ov@x\r\nCSeq: 1 INVITE\r\n"
+             "Content-Type: application/sdp\r\nContent-Length: %u\r\n\r\n%s",
+             (unsigned)strlen(sdp), sdp);
+    fx_inject(&f, work);
+    f.auto_answer = false;
+    int ok = fx_find(&f, "SIP/2.0 200", 0);
+    TEST_ASSERT_TRUE(ok >= 0);
+    const sip_msg_t *om = fx_parse(&f, ok);
+    char tag[40];
+    snprintf(tag, sizeof(tag), "%.*s", (int)om->to.tag.len, om->to.tag.p);
+    SEEDF(work,
+             "ACK sip:1001@10.0.0.2:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKov0a\r\n"
+             "From: \"Bob\" <sip:1002@10.0.0.1>;tag=remote1\r\nTo: <sip:1001@10.0.0.2>;tag=%s\r\n"
+             "Call-ID: ov@x\r\nCSeq: 1 ACK\r\nContent-Length: 0\r\n\r\n", tag);
+    fx_inject(&f, work);
+
+    /* 0: new INVITE, 8 Vias over the template */
+    big_vias(vias, sizeof(vias), SIP_MAX_VIA, 120, "z9hG4bKov1-");
+    SEEDF(seed[0],
+             "INVITE sip:1001@10.0.0.2:5060 SIP/2.0\r\n%s"
+             "From: <sip:1003@10.0.0.1>;tag=r3\r\nTo: <sip:1001@10.0.0.2>\r\n"
+             "Contact: <sip:x@10.0.0.1>\r\nCall-ID: ov1@x\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n", vias);
+    /* 1: new INVITE whose 200 + SDP does not fit (long To, Record-Route) */
+    big_vias(vias, sizeof(vias), 5, 120, "z9hG4bKov2-");
+    SEEDF(seed[1],
+             "INVITE sip:1001@10.0.0.2:5060 SIP/2.0\r\n%s"
+             "From: <sip:1004@10.0.0.1>;tag=r4\r\nTo: <sip:1001@10.0.0.2;x=%0140d>\r\n"
+             "Record-Route: <sip:p1.example.com;lr;x=%090d>, <sip:p2.example.com;lr;x=%090d>\r\n"
+             "Record-Route: <sip:p3.example.com;lr;x=%090d>\r\n"
+             "Contact: <sip:y@10.0.0.1>\r\nCall-ID: ov2@x\r\nCSeq: 1 INVITE\r\n"
+             "Content-Type: application/sdp\r\nContent-Length: %u\r\n\r\n%s",
+             vias, 0, 0, 0, 0, (unsigned)strlen(sdp), sdp);
+    /* 2: in-dialog re-INVITE with a Contact URI over SIP_URI_MAX */
+    SEEDF(seed[2],
+             "INVITE sip:1001@10.0.0.2:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 10.0.0.1:5060;rport;branch=z9hG4bKov3\r\n"
+             "From: \"Bob\" <sip:1002@10.0.0.1>;tag=remote1\r\nTo: <sip:1001@10.0.0.2>;tag=%s\r\n"
+             "Contact: <sip:moved@10.0.0.1:5060;x=%0200d>\r\nCall-ID: ov@x\r\nCSeq: 5 INVITE\r\n"
+             "Content-Type: application/sdp\r\nContent-Length: %u\r\n\r\n%s",
+             tag, 0, (unsigned)strlen(sdp), sdp);
+    /* 3: in-dialog OPTIONS / 4: CANCEL, both behind 8 long Vias */
+    big_vias(vias, sizeof(vias), SIP_MAX_VIA, 110, "z9hG4bKov4-");
+    SEEDF(seed[3],
+             "OPTIONS sip:1001@10.0.0.2:5060 SIP/2.0\r\n%s"
+             "From: \"Bob\" <sip:1002@10.0.0.1>;tag=remote1\r\nTo: <sip:1001@10.0.0.2>;tag=%s\r\n"
+             "Call-ID: ov@x\r\nCSeq: 6 OPTIONS\r\nContent-Length: 0\r\n\r\n", vias, tag);
+    SEEDF(seed[4],
+             "CANCEL sip:1001@10.0.0.2:5060 SIP/2.0\r\n%s"
+             "From: <sip:1004@10.0.0.1>;tag=r4\r\nTo: <sip:1001@10.0.0.2>\r\n"
+             "Call-ID: ov2@x\r\nCSeq: 1 CANCEL\r\nContent-Length: 0\r\n\r\n", vias);
+    for (int i = 0; i < 5; i++) {
+        TEST_ASSERT_TRUE(strlen(seed[i]) < SIP_MAX_MSG_IN);
+    }
+
+    int cseq = 10;
+    for (int it = 0; it < FUZZ_ITERATIONS / 10; it++) {
+        int k = (int)(fx_rand(&rng) % 5);
+        size_t len = it % 4 == 0 ? strlen(seed[k]) : mutate(work, sizeof(work), seed[k], strlen(seed[k]));
+        char *exact = malloc(len ? len : 1);
+        TEST_ASSERT_NOT_NULL(exact);
+        memcpy(exact, it % 4 == 0 ? seed[k] : work, len);
+        /* fresh branch / CSeq so unmutated seeds are new requests, not retransmissions */
+        char *br = find_mem(exact, len, "z9hG4bKov");
+        if (br && br + 12 <= exact + len) {
+            br[9] = (char)('a' + it % 26);
+            br[10] = (char)('a' + (it / 26) % 26);
+            br[11] = (char)('a' + (it / 676) % 26);
+        }
+        char *cs = find_mem(exact, len, "CSeq: 5 INVITE");
+        if (cs) {
+            cs[6] = (char)('0' + cseq++ % 10); /* mostly out of order: 500 */
+        }
+        sip_ua_on_packet(f.ua, exact, len, &f.server);
+        free(exact);
+        if (it % 17 == 0 && f.n_ev) {
+            sip_call_answer(f.ua, f.ev[f.n_ev - 1].call);
+        }
+        if (it % 7 == 0) {
+            fx_advance(&f, 50 + fx_rand(&rng) % 3000);
+        }
+        fx_clear_sent(&f);
+        f.n_ev = 0;
+    }
+    /* everything times out (incl. 180 s server INVITE / timer C bounds) */
+    fx_advance(&f, 200000);
+    printf("fuzz: %d transactions left after the oversized run\n", sip_ua_debug_txn_count(f.ua));
+    TEST_ASSERT_TRUE(sip_ua_debug_txn_count(f.ua) <= 2); /* REGISTER refresh at most */
+    fx_clear_sent(&f);
+    sip_call_handle_t h;
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_dial(f.ua, "600", &h));
+    TEST_ASSERT_EQUAL(1, fx_count(&f, "INVITE"));
+    fx_free(&f);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_fuzz_parser);
     RUN_TEST(test_fuzz_ua);
     RUN_TEST(test_fuzz_notify);
+    RUN_TEST(test_fuzz_oversized);
     return UNITY_END();
 }

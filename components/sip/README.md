@@ -299,7 +299,10 @@ Host (`tools/ci.sh host-test`, needs `IDF_PATH` for Unity), under ASan/UBSan:
   oversized / too deep; message-summary; Subscription-State; Event.
 * `test_sip_fuzz` — 50k deterministic mutations through all parsers (incl.
   dialog-info, message-summary, Subscription-State, Event) plus 10k through
-  the full UA and 10k NOTIFYs into live BLF / MWI subscriptions.
+  the full UA and 10k NOTIFYs into live BLF / MWI subscriptions (incl. an
+  over-long Contact), plus 5k requests at the size limits (Via block over the
+  response template, 200 + SDP over 1500 B, re-INVITE Contact over
+  `SIP_URI_MAX`) after which no transaction may be left.
 
 Integration against a real Asterisk 20 (private instance on 127.0.0.1:5080,
 config in `test_host/sip/asterisk/`; not in ctest):
