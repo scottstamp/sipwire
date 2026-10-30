@@ -251,8 +251,12 @@ menu "Sipwire board"
             bool "Automatic light sleep while idle (screen off, no call)"
             depends on SIPWIRE_POWER_DFS && FREERTOS_USE_TICKLESS_IDLE
             select PM_LIGHT_SLEEP_CALLBACKS
-            default y
+            default n
             help
+                Off by default: on the handset (octal PSRAM), once the chip had light-slept,
+                answering or ending a call sometimes crashed it (PSRAM "MMU entry fault",
+                or a hang in the panic handler with the flash cache off, then a watchdog
+                reset), also after `power sleep off`. Never with this option off.
                 Let the chip light-sleep whenever both cores idle and nothing holds it
                 awake: never during a call (ringing included), while the backlight is
                 on or dimmed, or within SIPWIRE_POWER_CONSOLE_AWAKE_S of console input.

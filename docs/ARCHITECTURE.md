@@ -348,7 +348,10 @@ full speed, no light sleep). Both drop when the phone is idle again.
     dimmed. *rtp_rx* waits for its socket without a 500 ms timeout.
   - Left: `ui_bridge` 1 s refresh (clock, phone status snapshot), net RSSI every 10 s,
     LVGL's 2 s max sleep, SNTP, Wi-Fi DTIM beacons.
-- **Automatic light sleep** (`power`, board Kconfig `SIPWIRE_POWER_LIGHT_SLEEP`, default y;
+- **Automatic light sleep** (`power`, board Kconfig `SIPWIRE_POWER_LIGHT_SLEEP`, **default n**:
+  on the handset, after the chip had light-slept once, answering or ending a call sometimes
+  crashed it (PSRAM "MMU entry fault" / panic handler hung with the cache off, watchdog reset),
+  even after `power sleep off`; never with the option off. Cause not found. When on:
   needs `FREERTOS_USE_TICKLESS_IDLE`, set in `sdkconfig.defaults`; the QEMU overlay has
   `PM_ENABLE` off, which drops it). `esp_pm_configure(light_sleep_enable)`: the chip
   light-sleeps whenever both cores idle for 8 ticks and no `ESP_PM_NO_LIGHT_SLEEP` lock is

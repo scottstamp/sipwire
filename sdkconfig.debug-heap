@@ -2,3 +2,5 @@
 #   idf.py -B build_heap -D SDKCONFIG=build_heap/sdkconfig \
 #          -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.debug-heap" build
 CONFIG_HEAP_POISONING_COMPREHENSIVE=y
+# USB-JTAG drops while the chip light-sleeps: keep it awake under the debugger
+# CONFIG_SIPWIRE_POWER_LIGHT_SLEEP is not set

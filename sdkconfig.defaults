@@ -72,7 +72,7 @@ CONFIG_ESP_IPC_TASK_STACK_SIZE=2048
 CONFIG_PM_ENABLE=y
 # Lock and mode counters: `power locks` shows the time spent at each CPU frequency.
 CONFIG_PM_PROFILING=y
-# Automatic light sleep (CONFIG_SIPWIRE_POWER_LIGHT_SLEEP, default y) needs tickless idle (it
+# Automatic light sleep (CONFIG_SIPWIRE_POWER_LIGHT_SLEEP, default n: see its help) needs tickless idle (it
 # selects PM_LIGHT_SLEEP_CALLBACKS: console wake-up, `power` sleep stats). The QEMU overlay
 # turns PM_ENABLE off, which drops them.
 CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
