@@ -126,6 +126,10 @@ static void push_model(void)
         }
     }
     s_model.now = s_hour >= 0 ? (int64_t)wall_at(0, s_hour, s_minute) : 0;
+    /* quiet hours as the bridge computes them (phone_quiet_window) */
+    int now_min = s_hour * 60 + s_minute, qs = s_model.quiet_start, qe = s_model.quiet_end;
+    s_model.quiet_active = s_model.quiet_hours && s_hour >= 0 && qs != qe &&
+                           (qs < qe ? (now_min >= qs && now_min < qe) : (now_min >= qs || now_min < qe));
     format_clock();
     ui_update(&s_model);
     js_model_changed();
@@ -545,6 +549,18 @@ static void act_save_call_features(void *ctx, bool cw, bool aa, bool dnd)
     s_model.call_waiting = cw;
     s_model.auto_answer = aa;
     s_model.dnd = dnd;
+    push_model();
+}
+
+static void act_save_quiet(void *ctx, bool on, uint16_t start, uint16_t end, bool allow)
+{
+    (void)ctx;
+    sim_log("action save_quiet(on=%d %02u:%02u-%02u:%02u contacts=%d)", on, start / 60, start % 60, end / 60,
+            end % 60, allow);
+    s_model.quiet_hours = on;
+    s_model.quiet_start = start;
+    s_model.quiet_end = end;
+    s_model.quiet_allow_contacts = allow;
     push_model();
 }
 
@@ -1043,6 +1059,20 @@ EMSCRIPTEN_KEEPALIVE void sim_set_dnd(int on)
     push_model();
 }
 
+/* Quiet hours setting (start / end "HH:MM"). */
+EMSCRIPTEN_KEEPALIVE void sim_set_quiet(int on, const char *start, const char *end)
+{
+    int h, m;
+    s_model.quiet_hours = on != 0;
+    if (start && sscanf(start, "%d:%d", &h, &m) == 2 && h >= 0 && h < 24 && m >= 0 && m < 60) {
+        s_model.quiet_start = (uint16_t)(h * 60 + m);
+    }
+    if (end && sscanf(end, "%d:%d", &h, &m) == 2 && h >= 0 && h < 24 && m >= 0 && m < 60) {
+        s_model.quiet_end = (uint16_t)(h * 60 + m);
+    }
+    push_model();
+}
+
 EMSCRIPTEN_KEEPALIVE void sim_set_page(int on)
 {
     s_model.auto_answered = on != 0;
@@ -1345,6 +1375,9 @@ int main(void)
     s_model.speaker_volume = 90;
     s_model.call_waiting = true;
     s_model.auto_answer = true;
+    s_model.quiet_start = 22 * 60;
+    s_model.quiet_end = 7 * 60;
+    s_model.quiet_allow_contacts = true;
     seed_directory();
 
     s_actions = (ui_actions_t){
@@ -1384,6 +1417,7 @@ int main(void)
         .ringtone_preview = act_ringtone_preview,
         .save_sounds = act_save_sounds,
         .save_call_features = act_save_call_features,
+        .save_quiet = act_save_quiet,
     };
 
     ui_init(disp, &s_actions);

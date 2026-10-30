@@ -83,6 +83,9 @@ static struct {
     uint8_t snd_tone, snd_ring, snd_call, snd_spk;
     bool feat_pending;              /* Settings > Call features */
     bool feat_cw, feat_aa, feat_dnd;
+    bool quiet_pending;             /* Settings > Call features: quiet hours */
+    bool quiet_on, quiet_allow;
+    uint16_t quiet_start, quiet_end;
 } b;
 
 /* Scratch the bridge needs now and then (~6 KB): in PSRAM when there is some, as internal RAM is
@@ -117,6 +120,7 @@ static void update_settings_locked(void)
     ui_bridge_fill_dnd(&b.loc, st->dnd);
     ui_bridge_fill_sounds(&b.loc, audio_ringtone_count(), st->ring_tone, st->ring_volume, st->call_volume,
                           st->speaker_volume, st->call_waiting, st->auto_answer, st->dnd);
+    ui_bridge_fill_quiet(&b.loc, st->quiet_hours, st->quiet_start, st->quiet_end, st->quiet_allow_contacts);
     memset(st->wifi_pass, 0, sizeof(st->wifi_pass));
     memset(st->sip_password, 0, sizeof(st->sip_password));
 }
@@ -555,6 +559,19 @@ static void act_save_call_features(void *ctx, bool cw, bool aa, bool dnd)
     kick();
 }
 
+static void act_save_quiet(void *ctx, bool on, uint16_t start, uint16_t end, bool allow)
+{
+    (void)ctx;
+    xSemaphoreTake(b.mtx, portMAX_DELAY);
+    b.quiet_on = on;
+    b.quiet_start = start;
+    b.quiet_end = end;
+    b.quiet_allow = allow;
+    b.quiet_pending = true;
+    xSemaphoreGive(b.mtx);
+    kick();
+}
+
 static const ui_actions_t s_actions = {
     .dial = act_dial,
     .answer = act_answer,
@@ -591,6 +608,7 @@ static const ui_actions_t s_actions = {
     .ringtone_preview = act_ringtone_preview,
     .save_sounds = act_save_sounds,
     .save_call_features = act_save_call_features,
+    .save_quiet = act_save_quiet,
 };
 
 /* ------------------------------------------------------------------ */
@@ -729,6 +747,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     } else if (base == SIPWIRE_CALL_EVENT && id == CALL_EVENT_MISSED && data) {
         b.loc.missed_seq++;
         b.loc.missed_dnd = ((const call_event_missed_t *)data)->dnd;
+        b.loc.missed_quiet = ((const call_event_missed_t *)data)->quiet;
         strlcpy(b.loc.missed_from, missed_from, sizeof(b.loc.missed_from));
     }
     /* SIP / CALL / BLF events: the phone status already holds the news */
@@ -754,7 +773,7 @@ static void do_saves(void)
 {
     settings_t *st = &s_cold->save;
     static char ota_url[sizeof(b.ota_url)];
-    bool wifi, acc, cal, tm, ota, blf, vm, snd, feat;
+    bool wifi, acc, cal, tm, ota, blf, vm, snd, feat, quiet;
 
     xSemaphoreTake(b.mtx, portMAX_DELAY);
     bool dnd_set = b.dnd_pending;
@@ -775,7 +794,8 @@ static void do_saves(void)
     vm = b.vm_pending;
     snd = b.snd_pending;
     feat = b.feat_pending;
-    if (!wifi && !acc && !cal && !tm && !ota && !blf && !vm && !snd && !feat) {
+    quiet = b.quiet_pending;
+    if (!wifi && !acc && !cal && !tm && !ota && !blf && !vm && !snd && !feat && !quiet) {
         xSemaphoreGive(b.mtx);
         return;
     }
@@ -824,6 +844,12 @@ static void do_saves(void)
         st->auto_answer = b.feat_aa;
         st->dnd = b.feat_dnd;
     }
+    if (quiet) {
+        st->quiet_hours = b.quiet_on;
+        st->quiet_start = b.quiet_start;
+        st->quiet_end = b.quiet_end;
+        st->quiet_allow_contacts = b.quiet_allow;
+    }
     if (ota) {
         strlcpy(ota_url, b.ota_url, sizeof(ota_url));
         strlcpy(st->ota_url, ota_url, sizeof(st->ota_url));   /* remember what was installed from */
@@ -837,6 +863,7 @@ static void do_saves(void)
     b.vm_pending = false;
     b.snd_pending = false;
     b.feat_pending = false;
+    b.quiet_pending = false;
     memset(b.wpass, 0, sizeof(b.wpass));
     memset(b.apass, 0, sizeof(b.apass));
     xSemaphoreGive(b.mtx);
@@ -846,10 +873,10 @@ static void do_saves(void)
     memset(st->sip_password, 0, sizeof(st->sip_password));
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "saving settings: %s", esp_err_to_name(err));
-    } else if (wifi || acc || cal || tm || blf || vm || snd || feat) {
-        ESP_LOGI(TAG, "settings saved from the UI:%s%s%s%s%s%s%s%s", wifi ? " wifi" : "", acc ? " account" : "",
+    } else if (wifi || acc || cal || tm || blf || vm || snd || feat || quiet) {
+        ESP_LOGI(TAG, "settings saved from the UI:%s%s%s%s%s%s%s%s%s", wifi ? " wifi" : "", acc ? " account" : "",
                  cal ? " touch-calibration" : "", tm ? " time" : "", blf ? " blf" : "", vm ? " vm_number" : "",
-                 snd ? " sounds" : "", feat ? " call-features" : "");
+                 snd ? " sounds" : "", feat ? " call-features" : "", quiet ? " quiet-hours" : "");
     }
     if (ota) {
         /* Progress and refusals (e.g. a call is active) come back through ota_get_status(). */

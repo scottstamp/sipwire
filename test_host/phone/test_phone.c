@@ -487,6 +487,30 @@ static void test_model_call_features(void)
     ph.find = false;
     ph.call = CALL_IDLE;
 
+    /* quiet hours: settings passed through, active only inside the window with the clock set */
+    ui_bridge_fill_quiet(&loc, true, 22 * 60, 7 * 60, true);
+    loc.time_valid = true;
+    loc.hour = 23;
+    loc.minute = 15;
+    ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
+    TEST_ASSERT_TRUE(m.quiet_hours);
+    TEST_ASSERT_EQUAL_UINT16(22 * 60, m.quiet_start);
+    TEST_ASSERT_EQUAL_UINT16(7 * 60, m.quiet_end);
+    TEST_ASSERT_TRUE(m.quiet_allow_contacts);
+    TEST_ASSERT_TRUE(m.quiet_active);
+    loc.hour = 12;
+    ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
+    TEST_ASSERT_FALSE(m.quiet_active);
+    loc.hour = 6;
+    loc.time_valid = false;     /* no SNTP yet */
+    ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
+    TEST_ASSERT_FALSE(m.quiet_active);
+    ui_bridge_fill_quiet(&loc, false, 22 * 60, 7 * 60, true);
+    loc.time_valid = true;
+    ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
+    TEST_ASSERT_FALSE(m.quiet_active);
+    loc.time_valid = false;
+
     /* transfer states, attended flag, code and target */
     ph.xfer.state = XFER_FAILED;
     ph.xfer.attended = false;

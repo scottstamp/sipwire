@@ -638,6 +638,22 @@ const SCENARIOS = {
     sim.set_mwi(1, 12, 0);
     sim.set_dnd(1);
   },
+  quiet_badge: (sim) => {   // inside quiet hours: blue "Quiet" badge where the bell was
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_time('23:15');
+    sim.set_battery(80, false);
+    sim.set_quiet(1, '22:00', '07:00');
+  },
+  quiet_mwi_battery_worst: (sim) => {   // widest bar with the Quiet badge (12 h clock, 2-digit voicemail)
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    sim.set_battery(100, true);
+    sim.set_mwi(1, 12, 0);
+    sim.set_quiet(1, '12:00', '13:30');
+  },
+  quiet_outside: (sim) => {   // quiet hours on but not now: the plain bell
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    sim.set_battery(80, false);
+    sim.set_quiet(1, '22:00', '07:00');
+  },
   page_call: {   // auto-answered page on the loudspeaker
     sim: (sim) => {
       sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
@@ -910,6 +926,40 @@ const SCENARIOS = {
       await page.waitForTimeout(250);
       await click(200, 160);   // Auto-answer off
       await page.waitForTimeout(150);
+    },
+  },
+  settings_quiet: {   // Call features scrolled to the quiet hours rows, switched on (12 h clock)
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('23:15');
+    },
+    steps: async (page, click, drag) => {
+      await click(207, 282);
+      await page.waitForTimeout(250);
+      await drag(120, 280, 120, 100);
+      await click(120, SETTINGS_ROW.features);
+      await page.waitForTimeout(250);
+      await drag(120, 300, 120, 120);   // to the quiet hours rows
+      await page.waitForTimeout(250);
+      await click(200, 104);            // Quiet hours on
+      await page.waitForTimeout(150);
+    },
+  },
+  settings_quiet_from: {   // the "From" time list open (24 h clock)
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('23:15'); sim.set_clock24(1);
+      sim.set_quiet(1, '22:30', '06:00');
+    },
+    steps: async (page, click, drag) => {
+      await click(207, 282);
+      await page.waitForTimeout(250);
+      await drag(120, 280, 120, 100);
+      await click(120, SETTINGS_ROW.features);
+      await page.waitForTimeout(250);
+      await drag(120, 300, 120, 120);
+      await page.waitForTimeout(250);
+      await page.waitForTimeout(400);
+      await click(160, 185);            // From dropdown
+      await page.waitForTimeout(250);
     },
   },
 };

@@ -176,7 +176,8 @@ typedef struct {
     /* incoming call refused without ringing (do not disturb, or busy without call waiting):
      * missed_seq counts up once per call, the UI shows a short notice */
     uint16_t missed_seq;
-    bool missed_dnd;           /* that call was refused because of do not disturb */
+    bool missed_dnd;           /* that call was refused because of do not disturb (or quiet hours) */
+    bool missed_quiet;         /* ... because of quiet hours */
     char missed_from[64];      /* its caller: name, else number */
     int64_t now;               /* wall clock, seconds since the epoch rounded down to the minute;
                                 * 0 until the clock is set */
@@ -190,4 +191,11 @@ typedef struct {
     bool call_waiting;
     bool auto_answer;          /* answer pages / intercom calls automatically */
     /* dnd: see the call features block above */
+    /* quiet hours (Settings > Call features): incoming calls refused like DND inside the
+     * window, except contacts when allowed; quiet_active = inside it now (status bar) */
+    bool quiet_hours;
+    uint16_t quiet_start;      /* minutes after midnight, local time */
+    uint16_t quiet_end;        /* end <= start wraps past midnight */
+    bool quiet_allow_contacts;
+    bool quiet_active;
 } ui_model_t;

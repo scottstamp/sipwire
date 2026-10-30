@@ -202,6 +202,8 @@
     set_xfer: function (st, att, code, target) { Module.ccall('sim_set_xfer', null, ['number', 'number', 'number', 'string'], [st, att ? 1 : 0, code || 0, target || '']); },
     set_dnd: function (on) { Module.ccall('sim_set_dnd', null, ['number'], [on ? 1 : 0]); },
     set_page: function (on) { Module.ccall('sim_set_page', null, ['number'], [on ? 1 : 0]); },
+    // quiet hours: set_quiet(on, 'HH:MM' start, 'HH:MM' end); active per set_time
+    set_quiet: function (on, a, b) { Module.ccall('sim_set_quiet', null, ['number', 'string', 'string'], [on ? 1 : 0, a || '', b || '']); },
     waiting: function (n, nm) { Module.ccall('sim_waiting', null, ['string', 'string'], [n, nm || '']); },
     // directory stubs: mark the n newest missed incoming calls unseen; clear_directory(0 history | 1 contacts)
     set_unseen: function (n) { Module.ccall('sim_set_unseen', null, ['number'], [n]); },

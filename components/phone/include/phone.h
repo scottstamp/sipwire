@@ -44,6 +44,12 @@
  * exists; during a call it is a normal waiting call; under DND it is refused
  * like any other call (DND wins).
  *
+ * Quiet hours (settings `quiet_hours`, `quiet_start` / `quiet_end` local time, wrapping
+ * past midnight, `quiet_allow_contacts`): while the clock is set (SNTP) and inside the
+ * window, incoming calls are refused with 486 like DND (logged as DND, CALL_EVENT_MISSED
+ * with dnd + quiet), except callers found in the contacts (when allowed) and find the
+ * handset calls.
+ *
  * Find the handset (setting `find_alert`, default "find"): an INVITE whose Alert-Info
  * carries the marker rings at full volume with its own pattern (and wakes the
  * screen), even with DND on; never auto-answered. During a call it waits like any

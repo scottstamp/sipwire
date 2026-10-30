@@ -192,6 +192,15 @@ void ui_bridge_fill_sounds(ui_bridge_local_t *loc, int ringtone_count, uint8_t r
     loc->dnd = dnd;
 }
 
+void ui_bridge_fill_quiet(ui_bridge_local_t *loc, bool on, uint16_t start_min, uint16_t end_min,
+                          bool allow_contacts)
+{
+    loc->quiet_hours = on;
+    loc->quiet_start = start_min < 1440 ? start_min : 0;
+    loc->quiet_end = end_min < 1440 ? end_min : 0;
+    loc->quiet_allow_contacts = allow_contacts;
+}
+
 void ui_bridge_fill_fw(ui_bridge_local_t *loc, const char *version, const char *partition)
 {
     copy_or_empty(loc->fw_version, sizeof(loc->fw_version), version);
@@ -298,6 +307,13 @@ void ui_bridge_build_model(const ui_bridge_local_t *loc, const phone_status_t *p
     out->auto_answer = loc->auto_answer;
     out->missed_seq = loc->missed_seq;
     out->missed_dnd = loc->missed_dnd;
+    out->missed_quiet = loc->missed_quiet;
+    out->quiet_hours = loc->quiet_hours;
+    out->quiet_start = loc->quiet_start;
+    out->quiet_end = loc->quiet_end;
+    out->quiet_allow_contacts = loc->quiet_allow_contacts;
+    out->quiet_active = loc->quiet_hours && loc->time_valid &&
+                        phone_quiet_window(loc->quiet_start, loc->quiet_end, loc->hour * 60 + loc->minute);
     copy(out->missed_from, sizeof(out->missed_from), loc->missed_from);
     /* missed_unseen, missed_last, history_rev and now come from the directory / clock in the
      * bridge task */

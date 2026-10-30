@@ -176,6 +176,20 @@ static uint64_t now_ms(void)
     return (uint64_t)(esp_timer_get_time() / 1000);
 }
 
+#define TIME_VALID_AFTER        1700000000  /* 2023-11: anything earlier = clock not set (no SNTP) */
+
+/* Local minutes after midnight (TZ applied by the UI bridge), -1 while the clock is not set:
+ * quiet hours only apply with a valid clock. */
+static int local_minutes(void)
+{
+    time_t now = time(NULL);
+    struct tm tm;
+    if (now < TIME_VALID_AFTER || localtime_r(&now, &tm) == NULL) {
+        return -1;
+    }
+    return tm.tm_hour * 60 + tm.tm_min;
+}
+
 /* The sip task blocks in select() until its next deadline; anything another task hands it
  * (a command, a notify bit, a new deadline) must end that wait. Any task, not an ISR. */
 static void wake_sip_task(void)
@@ -1051,16 +1065,40 @@ static void on_xfer(void *ctx, sip_call_handle_t call, sip_xfer_state_t st, int 
 static void ua_screen(void *ctx, const sip_screen_info_t *in, sip_screen_t *out)
 {
     (void)ctx;
-    const phone_screen_in_t p = {
+    phone_screen_in_t p = {
         .find = in->alert_match,
         .dnd = s.f_dnd,
         .busy = in->busy,
     };
+    bool quiet_on, allow;
+    SETTINGS_GET(quiet_hours, &quiet_on);
+    if (quiet_on) {
+        uint16_t start, end;
+        SETTINGS_GET(quiet_start, &start);
+        SETTINGS_GET(quiet_end, &end);
+        SETTINGS_GET(quiet_allow_contacts, &allow);
+        p.quiet = phone_quiet_window(start, end, local_minutes());
+        if (p.quiet && allow && in->number[0]) {
+            char name[DIR_NAME_MAX];
+            p.caller_allowed = dir_contact_lookup(in->number, name, sizeof(name));
+        }
+    }
     phone_screen_t d = phone_screen_decide(&p);
     s.scr_last = d;
-    if (d == PHONE_SCREEN_FIND) {
+    switch (d) {
+    case PHONE_SCREEN_FIND:
         out->action = SIP_SCREEN_RING;
         ESP_LOGI(TAG, "find the handset call from %s", in->number);
+        break;
+    case PHONE_SCREEN_QUIET:
+        out->action = SIP_SCREEN_REJECT;
+        out->code = 486;                /* like DND */
+        break;
+    default:
+        if (p.quiet && p.caller_allowed) {
+            ESP_LOGI(TAG, "quiet hours: %s is a contact, ringing", in->number);
+        }
+        break;
     }
 }
 
@@ -1081,10 +1119,11 @@ static void on_rejected(void *ctx, const char *number, const char *name, int cod
     strlcpy(ev.number, number ? number : "", sizeof(ev.number));
     strlcpy(ev.name, name ? name : "", sizeof(ev.name));
     ev.code = code;
-    ev.dnd = s.f_dnd;
+    ev.quiet = s.scr_last == PHONE_SCREEN_QUIET;
+    ev.dnd = s.f_dnd || ev.quiet;       /* quiet hours: logged and shown like DND */
     log_call(false, ev.number, ev.name, 0, false, ev.dnd, false);
-    ESP_LOGI(TAG, "missed call from %s \"%s\" (%s, %d)", ev.number, ev.name, ev.dnd ? "do not disturb" : "busy",
-             code);
+    ESP_LOGI(TAG, "missed call from %s \"%s\" (%s, %d)", ev.number, ev.name,
+             ev.quiet ? "quiet hours" : ev.dnd ? "do not disturb" : "busy", code);
     esp_err_t err = esp_event_post(SIPWIRE_CALL_EVENT, CALL_EVENT_MISSED, &ev, sizeof(ev), EVENT_POST_TIMEOUT);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "post missed call event: %s", esp_err_to_name(err));

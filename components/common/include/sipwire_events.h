@@ -110,7 +110,8 @@ typedef struct {
     char number[64];
     char name[64];
     int code;                  /* what the caller got (486) */
-    bool dnd;                  /* refused because of do-not-disturb (else: busy) */
+    bool dnd;                  /* refused because of do-not-disturb or quiet hours (else: busy) */
+    bool quiet;                /* ... quiet hours, to be precise */
 } call_event_missed_t;
 
 /* SIPWIRE_KEY_EVENT — physical keypad */

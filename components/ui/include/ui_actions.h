@@ -97,4 +97,6 @@ typedef struct {
                         uint8_t speaker_volume);
     /* Persist the call feature switches (applied live). */
     void (*save_call_features)(void *ctx, bool call_waiting, bool auto_answer, bool dnd);
+    /* Persist the quiet hours (start / end: minutes after midnight 0-1439). */
+    void (*save_quiet)(void *ctx, bool on, uint16_t start_min, uint16_t end_min, bool allow_contacts);
 } ui_actions_t;

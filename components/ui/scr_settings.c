@@ -100,6 +100,8 @@ typedef struct {
 
     /* Call features page */
     lv_obj_t *sw_cw, *sw_aa, *sw_dnd;
+    lv_obj_t *sw_quiet, *sw_qallow, *dd_qstart, *dd_qend;
+    uint16_t q_start, q_end;        /* minutes; a dropdown only replaces its own on change */
 } settings_t;
 
 static settings_t *s_s;
@@ -778,15 +780,83 @@ static void set_switch(lv_obj_t *sw, bool on)
     }
 }
 
+#define QUIET_STEP_MIN 30           /* dropdown granularity (console `cfg` takes any minute) */
+#define QUIET_STEPS (1440 / QUIET_STEP_MIN)
+
+static void quiet_save(settings_t *s)
+{
+    ui_act_save_quiet(lv_obj_has_state(s->sw_quiet, LV_STATE_CHECKED), s->q_start, s->q_end,
+                      lv_obj_has_state(s->sw_qallow, LV_STATE_CHECKED));
+}
+
+static void on_quiet(lv_event_t *e)
+{
+    settings_t *s = s_s;
+    if (!s) {
+        return;
+    }
+    lv_obj_t *t = lv_event_get_target_obj(e);
+    if (t == s->dd_qstart) {
+        s->q_start = (uint16_t)(lv_dropdown_get_selected(t) * QUIET_STEP_MIN);
+    } else if (t == s->dd_qend) {
+        s->q_end = (uint16_t)(lv_dropdown_get_selected(t) * QUIET_STEP_MIN);
+    }
+    quiet_save(s);
+}
+
+/* "22:00\n22:30..." or "10:00 PM..." per the clock setting (LVGL heap, copied by the dropdown). */
+static void quiet_options(lv_obj_t *dd, bool h24)
+{
+    char *buf = lv_malloc(QUIET_STEPS * 10);
+    if (!buf) {
+        return;
+    }
+    size_t n = 0;
+    for (int i = 0; i < QUIET_STEPS; i++) {
+        int h = i * QUIET_STEP_MIN / 60, m = i * QUIET_STEP_MIN % 60;
+        if (h24) {
+            n += (size_t)lv_snprintf(buf + n, QUIET_STEPS * 10 - n, "%s%02d:%02d", i ? "\n" : "", h, m);
+        } else {
+            n += (size_t)lv_snprintf(buf + n, QUIET_STEPS * 10 - n, "%s%d:%02d %s", i ? "\n" : "",
+                                     h % 12 ? h % 12 : 12, m, h < 12 ? "AM" : "PM");
+        }
+    }
+    lv_dropdown_set_options(dd, buf);
+    lv_free(buf);
+}
+
 static void features_prefill(settings_t *s)
 {
     const ui_model_t *m = ui_model();
     set_switch(s->sw_cw, m->call_waiting);
     set_switch(s->sw_aa, m->auto_answer);
     set_switch(s->sw_dnd, m->dnd);
+    set_switch(s->sw_quiet, m->quiet_hours);
+    set_switch(s->sw_qallow, m->quiet_allow_contacts);
+    s->q_start = m->quiet_start < 1440 ? m->quiet_start : 0;
+    s->q_end = m->quiet_end < 1440 ? m->quiet_end : 0;
+    quiet_options(s->dd_qstart, m->clock_24h);
+    quiet_options(s->dd_qend, m->clock_24h);
+    lv_dropdown_set_selected(s->dd_qstart, s->q_start / QUIET_STEP_MIN);
+    lv_dropdown_set_selected(s->dd_qend, s->q_end / QUIET_STEP_MIN);
+    lv_obj_scroll_to_y(s->page[PG_FEATURES], 0, LV_ANIM_OFF);
 }
 
-static lv_obj_t *feature_row(lv_obj_t *page, const char *title, const char *desc)
+/* "From" / "Until" + a time dropdown, one row. */
+static lv_obj_t *quiet_time_row(lv_obj_t *page, const char *caption)
+{
+    lv_obj_t *row = ui_box_create(page, 0, 0, 228, FIELD_H + 4);
+    lv_obj_t *t = ui_label_create(row, &lv_font_montserrat_24, UI_COL_TEXT, caption);
+    lv_obj_align(t, LV_ALIGN_LEFT_MID, 4, 0);
+    lv_obj_t *dd = lv_dropdown_create(row);
+    lv_obj_set_size(dd, 150, FIELD_H);
+    lv_obj_align(dd, LV_ALIGN_RIGHT_MID, -2, 0);
+    ui_style_dropdown(dd);
+    lv_obj_add_event_cb(dd, on_quiet, LV_EVENT_VALUE_CHANGED, NULL);
+    return dd;
+}
+
+static lv_obj_t *feature_row(lv_obj_t *page, const char *title, const char *desc, lv_event_cb_t cb)
 {
     lv_obj_t *row = ui_box_create(page, 0, 0, 228, 64);
     lv_obj_t *t = ui_label_create(row, &lv_font_montserrat_24, UI_COL_TEXT, title);
@@ -799,7 +869,7 @@ static lv_obj_t *feature_row(lv_obj_t *page, const char *title, const char *desc
     lv_obj_set_style_bg_color(sw, UI_COL_SURFACE2, 0);
     lv_obj_set_style_bg_color(sw, UI_COL_GREEN, LV_PART_INDICATOR | LV_STATE_CHECKED);
     lv_obj_set_style_bg_color(sw, UI_COL_TEXT, LV_PART_KNOB);
-    lv_obj_add_event_cb(sw, on_feature, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(sw, cb, LV_EVENT_VALUE_CHANGED, NULL);
     return sw;
 }
 
@@ -928,9 +998,13 @@ static lv_obj_t *settings_create(const char *arg)
 
     lv_obj_t *ff = form_create(s, scr);
     s->page[PG_FEATURES] = ff;
-    s->sw_cw = feature_row(ff, "Call waiting", "Beep for a second call");
-    s->sw_aa = feature_row(ff, "Auto-answer", "Pages on the loudspeaker");
-    s->sw_dnd = feature_row(ff, "Don't disturb", "Refuse calls silently");
+    s->sw_cw = feature_row(ff, "Call waiting", "Beep for a second call", on_feature);
+    s->sw_aa = feature_row(ff, "Auto-answer", "Pages on the loudspeaker", on_feature);
+    s->sw_dnd = feature_row(ff, "Don't disturb", "Refuse calls silently", on_feature);
+    s->sw_quiet = feature_row(ff, "Quiet hours", "Like DND, every day", on_quiet);
+    s->dd_qstart = quiet_time_row(ff, "From");
+    s->dd_qend = quiet_time_row(ff, "Until");
+    s->sw_qallow = feature_row(ff, "Contacts ring", "Even in quiet hours", on_quiet);
 
     lv_obj_t *about = ui_box_create(scr, 0, BODY_Y, UI_W, BODY_H);
     s->page[PG_ABOUT] = about;
