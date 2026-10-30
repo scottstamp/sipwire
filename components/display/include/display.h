@@ -28,8 +28,16 @@ esp_err_t display_init(lv_display_t **out_disp);
 void display_set_backlight(uint8_t pct);
 
 /** Report user activity (key press, touch, incoming call...): restores the backlight from
- *  dim/off and restarts the backlight timeout. Cheap; safe from any task (not from ISR). */
+ *  dim/off and restarts the backlight timeout. Safe from any task (not from ISR). Cheap
+ *  while the backlight is on; from off it takes the LVGL lock to wake the panel
+ *  (SIPWIRE_DISPLAY_PANEL_SLEEP: SLPOUT + 5 ms), so never call it holding a lock the LVGL
+ *  task may wait for. The backlight itself lights 120 ms after SLPOUT; LVGL may draw the
+ *  new screen meanwhile. */
 void display_wake(void);
+
+/** False while the backlight is off (and the panel asleep); dimmed counts as lit. A change
+ *  is announced by DISPLAY_EVENT_BACKLIGHT. Any task. */
+bool display_is_lit(void);
 
 /**
  * Touch calibration (reserved). Calibration is read from settings.touch_cal; when valid,

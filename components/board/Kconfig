@@ -57,6 +57,15 @@ menu "Sipwire board"
         config SIPWIRE_LCD_SWAP_XY
             bool "Swap XY (landscape)"
             default n
+        config SIPWIRE_DISPLAY_PANEL_SLEEP
+            bool "Put the panel to sleep while the backlight is off"
+            default y
+            help
+                ILI9341 SLPIN when the backlight goes off (DC/DC, oscillator and panel
+                scanning stop; frame memory and the SPI interface keep working, so LVGL
+                may still flush into it), SLPOUT before it comes back on. The backlight
+                is switched on only 120 ms after SLPOUT, so the panel's start-up is never
+                visible. No effect in the QEMU build (no panel).
     endmenu
 
     menu "Touch (XPT2046, shares LCD SPI bus)"

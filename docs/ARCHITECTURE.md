@@ -390,6 +390,31 @@ full speed, no light sleep). Both drop when the phone is idle again.
   - To verify on the device: INVITE to ring latency asleep (DTIM 1-3), no missed INVITEs over
     hours, key and touch wake with the first key press delivered, console wake, Wi-Fi beacon
     loss / reconnects, current draw idle (screen off) before / after.
+- **Panel sleep** (`display.c`, board Kconfig `SIPWIRE_DISPLAY_PANEL_SLEEP`, default y): when
+  the backlight goes off (`bl_tick_cb`) the PWM goes to 0 first, then the ILI9341 gets SLPIN
+  (DC/DC, oscillator and scanning stop). Any way back (`display_wake`: key, touch, incoming or
+  missed call; `display_set_backlight`; a settings change that disables the timeout) sends
+  SLPOUT first and lights the backlight only 120 ms later (`bl_ready` one-shot): the panel's
+  start-up is never visible. Commands go straight through `esp_lcd_panel_io_tx_param`: the
+  driver's `esp_lcd_panel_disp_sleep()` blocks 120 ms after both commands. Datasheet gaps:
+  5 ms after SLPIN / SLPOUT before the next command (waited with the LVGL lock held), SLPIN
+  no sooner than 120 ms after SLPOUT.
+  - Flush safety: panel commands are sent only with the LVGL lock held, so the LVGL task is
+    outside `lv_timer_handler` and no flush can start; LVGL waits for its last flush before it
+    leaves a refresh, and `tx_param` drains queued colour transfers before a command anyway.
+    LVGL is *not* paused while the panel sleeps: in Sleep In the SPI interface and frame
+    memory keep working, so a flush to a sleeping panel completes normally (its
+    `on_color_trans_done` still calls `lv_display_flush_ready`) and lands in GRAM. That is the
+    safe choice: pausing the refresh timer would need every invalidation path to resume it,
+    and a missed resume is a frozen screen; with flushes allowed, whatever LVGL drew while dark
+    (the incoming-call screen, built during the 120 ms before the backlight lights) is what
+    SLPOUT shows.
+  - Lock order: LVGL lock, then `bl_lock` (the touch path calls `display_wake` from the LVGL
+    task with the recursive LVGL lock held). `bl_take()` takes the LVGL lock first whenever
+    the backlight is off; `bl_tick_cb` (esp_timer task) waits at most 20 ms for it and
+    otherwise goes dark at a later tick. `display_wake` from off therefore blocks until the
+    LVGL task finishes its current pass (plus 5 ms): never call it holding a lock the LVGL
+    task may wait for.
 - **Status LED** (`components/status_led`): the RMT channel is enabled only around each
   ~30 us WS2812 frame (an enabled RMT TX channel holds a CPU_FREQ_MAX lock, which pinned DFS
   at 240 MHz). While the backlight is off (`SIPWIRE_DISPLAY_EVENT` / `DISPLAY_EVENT_BACKLIGHT`)
