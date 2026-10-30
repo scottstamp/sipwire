@@ -112,6 +112,15 @@ ticks); `hangup` -> ENDED -> 1.5 s -> IDLE; `answer` from RINGING_IN -> ACTIVE.
 `save_blf` replaces the tiles (kept extensions keep their state, new ones are idle),
 `save_vm_number` the voicemail number (`*97` at start).
 
+Locks: `set_touch_lock(s)` (in-call touch lock time, 5 at start, 0 = off),
+`set_keypad_autolock(on)`, `display_off()` (as when the backlight goes dark); `model()` has
+`keylock`. The side panel has the same under "Locks". Scenarios: `call_locked`,
+`call_locked_tap`, `call_locked_pad`, `call_unlock_swipe`, `call_unlock_half`, `call_unlock_jump`,
+`call_unlock_mid`, `call_unlock_key`, `call_locked_waiting`, `call_speaker_nolock`,
+`home_keylock_btn`, `home_keylock_blf8`, `home_keylock_star`, `home_keylock_star_unlock`,
+`home_keylock_swipe_unlock`, `home_keylock_autolock`, `home_keylock_incoming`,
+`home_keylock_after_call`, `dialer_star`.
+
 BLF / voicemail screenshot scenarios: `idle_blf1`, `idle_blf2`, `idle_blf3`,
 `idle_blf5_mwi`, `idle_blf8`, `idle_mwi`, `idle_blf8_mwi_ringing`, `idle_blf8_offline`,
 `blf_tap_dials`, `settings_blf`, `settings_blf_add_keypad`, `settings_blf_saved`.

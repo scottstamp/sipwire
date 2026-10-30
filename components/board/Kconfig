@@ -111,6 +111,17 @@ menu "Sipwire board"
                 it started on. Taps are reported this much later. 0 = off. 80 still let the
                 odd drag through on the reference board; if 120 does too, try lowering
                 XPT2046_Z_THRESHOLD (pressure cut-off, 400) so light contact still counts.
+        config SIPWIRE_CALL_TOUCH_LOCK_S
+            int "In-call touch lock after (s)"
+            depends on SIPWIRE_TOUCH_ENABLE
+            range 0 60
+            default 5
+            help
+                During an answered call on the handset (not the loudspeaker) the call screen
+                ignores touches this many seconds after the call connected or after the last
+                button tap / key press, so a cheek cannot hit Mute or Hang up. Unlock: slide the
+                knob at the bottom to the right, or press any key. A waiting second call or
+                switching to the loudspeaker unlocks. 0 = off.
     endmenu
 
     menu "Speaker (I2S DAC + amp)"

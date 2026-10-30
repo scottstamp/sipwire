@@ -36,10 +36,16 @@ static const char *TAG = "ui_bridge";
 #define QUEUE_LEN           16
 #define TICK_MS             1000
 #define TIME_VALID_AFTER    1700000000  /* 2023-11: anything earlier = clock not set */
+#if defined(CONFIG_SIPWIRE_TOUCH_ENABLE)
+#define CALL_TOUCH_LOCK_S   CONFIG_SIPWIRE_CALL_TOUCH_LOCK_S
+#else
+#define CALL_TOUCH_LOCK_S   0           /* no touch, nothing to lock */
+#endif
 
 typedef enum {
     MSG_REFRESH,
     MSG_KEY,
+    MSG_DISPLAY_OFF,    /* backlight went off: keypad auto-lock (ui_display_off) */
 } msg_kind_t;
 
 typedef struct {
@@ -660,6 +666,11 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
          * ticks resume with it */
         if (id == DISPLAY_EVENT_BACKLIGHT && data && *(const bool *)data) {
             kick();
+        } else if (id == DISPLAY_EVENT_BACKLIGHT && data) {
+            /* dark: queued ahead of the key / touch that will wake it, so that one already
+             * meets the locked home screen */
+            const bridge_msg_t m = { .kind = MSG_DISPLAY_OFF };
+            xQueueSend(b.q, &m, 0);
         }
         return;
     }
@@ -883,6 +894,8 @@ static void refresh(void)
 
     phone_get_status(&ph);
     ui_bridge_build_model(&loc, &ph, esp_timer_get_time(), model);
+    model->keypad_autolock = loc.keypad_autolock;
+    model->call_touch_lock_s = CALL_TOUCH_LOCK_S;
     /* history: the rev tells an open History screen to refetch; the newest unseen missed call
      * names the home screen's notice (looked up only when the history changed) */
     static uint32_t hist_rev;
@@ -943,6 +956,11 @@ static void bridge_task(void *arg)
                 if (m.kind == MSG_KEY) {
                     lvgl_port_lock(0);
                     ui_key(m.key, m.action);
+                    lvgl_port_unlock();
+                } else if (m.kind == MSG_DISPLAY_OFF) {
+                    /* the model's keypad_autolock is the last one pushed, i.e. current */
+                    lvgl_port_lock(0);
+                    ui_display_off();
                     lvgl_port_unlock();
                 }
             } while (xQueueReceive(b.q, &m, 0) == pdTRUE);

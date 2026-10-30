@@ -189,4 +189,12 @@ typedef struct {
     bool call_waiting;
     bool auto_answer;          /* answer pages / intercom calls automatically */
     /* dnd: see the call features block above */
+
+    /* locks (ui_lock_logic.h). In-call touch lock: on the handset, an answered call's screen
+     * ignores touches this many seconds after it connected / the last tap or key (Kconfig
+     * SIPWIRE_CALL_TOUCH_LOCK_S; 0 = off). Keypad lock: locked by holding * on the home screen
+     * or its lock button, and with keypad_autolock also when the display goes dark
+     * (ui_display_off). */
+    uint16_t call_touch_lock_s;
+    bool keypad_autolock;
 } ui_model_t;

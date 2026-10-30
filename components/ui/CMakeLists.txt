@@ -13,6 +13,8 @@ idf_component_register(
          "scr_calibrate.c"
          "scr_transfer.c"
          "ui_touch_cal.c"
+         "ui_lock.c"
+         "ui_lock_logic.c"
          "ui_fmt.c"
          "ui_vlist.c"
          "scr_history.c"

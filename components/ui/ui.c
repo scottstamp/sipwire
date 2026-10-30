@@ -34,6 +34,12 @@ static ui_model_t s_model;
 static ui_screen_t s_kind;
 static lv_obj_t *s_scr; /* current screen */
 static bool s_inited;
+/* Keypad lock: enforced on the home screen only (locking goes there first); call screens
+ * suspend it, the router returns home after a call and the lock is back. */
+static bool s_keylock;
+/* The dialer that a PRESS of `*` on the home screen just opened: a LONG `*` that follows
+ * (same key still held) locks instead of the dialer's "nothing to delete: leave". */
+static lv_obj_t *s_star_dialer;
 
 const ui_model_t *ui_model(void)
 {
@@ -176,14 +182,62 @@ void ui_update(const ui_model_t *model)
     }
 }
 
+bool ui_keylock_get(void)
+{
+    return s_keylock;
+}
+
+void ui_keylock_set(bool on)
+{
+    if (!s_inited || on == s_keylock) {
+        return;
+    }
+    if (on && is_call_screen(s_kind)) {
+        return;                         /* never lock a call away */
+    }
+    s_keylock = on;
+    s_star_dialer = NULL;
+    if (on && s_kind != UI_SCR_HOME) {
+        show(UI_SCR_HOME, NULL);        /* home's create reads the lock */
+    } else if (s_kind == UI_SCR_HOME) {
+        OPS[s_kind]->update(&s_model);
+    }
+    if (!on) {
+        ui_toast("Unlocked");
+    }
+}
+
+void ui_display_off(void)
+{
+    if (s_inited && s_model.keypad_autolock && !is_call_screen(s_kind)) {
+        ui_keylock_set(true);
+    }
+}
+
 void ui_key(char key, ui_key_action_t action)
 {
     if (!s_inited) {
         return;
     }
+    if (s_keylock && !is_call_screen(s_kind)) {
+        /* locked: hold * to unlock; any press shows how */
+        if (action == UI_KEY_LONG && key == '*') {
+            ui_keylock_set(false);
+        } else if (action == UI_KEY_PRESS) {
+            ui_toast("Hold * or slide to unlock");
+        }
+        return;
+    }
+    if (action == UI_KEY_LONG && key == '*' && s_star_dialer && s_star_dialer == s_scr &&
+        s_kind == UI_SCR_DIALER) {
+        ui_keylock_set(true);           /* held * on the home screen */
+        return;
+    }
+    bool star_home = action == UI_KEY_PRESS && key == '*' && s_kind == UI_SCR_HOME;
     if (OPS[s_kind]->key) {
         OPS[s_kind]->key(key, action);
     }
+    s_star_dialer = star_home && s_kind == UI_SCR_DIALER ? s_scr : NULL;
 }
 
 void ui_touch_raw(int32_t ax, int32_t ay, bool pressed)

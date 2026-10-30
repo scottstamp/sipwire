@@ -28,3 +28,12 @@ void ui_key(char key, ui_key_action_t action);
  *  `pressed` false = finger lifted (coordinates ignored). Ignored when the
  *  calibration screen is not showing. */
 void ui_touch_raw(int32_t ax, int32_t ay, bool pressed);
+
+/** The backlight went off. With the model's keypad_autolock the keypad locks (the UI goes
+ *  to the home screen first) unless a call is up; the touch or key that wakes the display
+ *  then meets the locked home screen. */
+void ui_display_off(void);
+
+/** Keypad lock state (home screen: keys and touches do nothing but unlock; suspended while
+ *  a call rings or is up). For the console / tests. */
+bool ui_keylock_get(void);
