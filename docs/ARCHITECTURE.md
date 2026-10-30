@@ -268,6 +268,12 @@ Memory: allocated on first enable and kept; everything through `aec_set_allocato
 (audio: internal RAM while more than 64 KB internal would stay free, PSRAM beyond).
 At the default tail ~124 KB (93 KB fixed: MDF scratch + FFT tables + preprocessor;
 +7.7 KB per 320 samples of tail) + 8 KB ring; `aec` shows the internal/PSRAM split.
+The canceller state is allocated first (63 blocks, in SpeexDSP's init order), the ring last:
+the greedy split gives internal RAM to the state touched all over every frame, the ring
+(one sequential 640 B write and read per frame) gets internal only if everything fits. With
+the ring first, any create with 72-193 KB internal free put 8 KB of ring internal and the
+same 8 KB of canceller state in PSRAM. On the handset (internal free ~40-53 KB, below the
+64 KB reserve) all ~132 KB is PSRAM either way.
 SpeexDSP does not check its allocations, so `create` first checks that
 `aec_mem_estimate()` fits. Toggling on keeps what the filter learned; the stats
 restart.
