@@ -39,3 +39,6 @@ expect ^second call:\s+held
 do axfer complete
 expect transfer \(attended\) to 600: done \(2\d\d\) 10
 expect call: idle 10
+# stack high-water marks after the scenario, for the log (docs/ARCHITECTURE.md "Memory and tasks")
+do free
+do tasks

@@ -7,6 +7,7 @@
 #include "esp_app_desc.h"
 #include "esp_check.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
 #include "esp_netif_sntp.h"
@@ -362,7 +363,10 @@ static size_t act_contacts_search(void *ctx, const char *query, ui_contact_t *ou
     if (max > DIR_CONTACTS_MAX) {
         max = DIR_CONTACTS_MAX;
     }
-    dir_contact_t *tmp = malloc(max * sizeof(*tmp));    /* up to 12.8 KB, only while the screen refetches */
+    /* up to 12.8 KB, only while the screen refetches: PSRAM (under the 16 KB
+     * SPIRAM_MALLOC_ALWAYSINTERNAL threshold plain malloc would take internal RAM) */
+    dir_contact_t *tmp = heap_caps_malloc_prefer(max * sizeof(*tmp), 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                                 MALLOC_CAP_8BIT);
     if (!tmp) {
         return 0;
     }
