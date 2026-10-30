@@ -1,6 +1,8 @@
 idf_component_register(
-    SRCS "display.c"
+    SRCS "display.c" "lv_mem_psram.c"
     INCLUDE_DIRS "include"
+    # lv_mem_psram.c provides the LVGL allocator: keep it whatever the link order
+    WHOLE_ARCHIVE
     PRIV_REQUIRES
         board
         common
@@ -11,6 +13,7 @@ idf_component_register(
         esp_event
         esp_lcd
         esp_timer
+        heap
         freertos
         log
 )
