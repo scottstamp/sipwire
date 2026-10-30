@@ -54,8 +54,8 @@ typedef struct {
     bool missed_dnd;
     bool missed_quiet;
     char missed_from[64];           /* name, else number */
-    /* keypad lock when the display goes dark (ui_model_t keypad_autolock); default off.
-     * Set it under b.mtx, e.g. in update_settings_locked() from a settings switch. */
+    /* keypad lock when the display goes dark (ui_model_t keypad_autolock): setting
+     * `keypad_lock`, filled under b.mtx in update_settings_locked(); default off. */
     bool keypad_autolock;
 } ui_bridge_local_t;
 

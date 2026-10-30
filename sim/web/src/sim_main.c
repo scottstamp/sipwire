@@ -555,13 +555,14 @@ static void act_save_sounds(void *ctx, uint8_t tone, uint8_t rv, uint8_t cv, uin
     push_model();
 }
 
-static void act_save_call_features(void *ctx, bool cw, bool aa, bool dnd)
+static void act_save_call_features(void *ctx, bool cw, bool aa, bool dnd, bool kl)
 {
     (void)ctx;
-    sim_log("action save_call_features(cw=%d aa=%d dnd=%d)", cw, aa, dnd);
+    sim_log("action save_call_features(cw=%d aa=%d dnd=%d keypad_lock=%d)", cw, aa, dnd, kl);
     s_model.call_waiting = cw;
     s_model.auto_answer = aa;
     s_model.dnd = dnd;
+    s_model.keypad_autolock = kl;
     push_model();
 }
 

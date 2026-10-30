@@ -179,7 +179,8 @@ sim/web/             Emscripten build of components/ui + mock model → browser
     "Hold * or slide to unlock"), held `*` unlocks. Enforced on the home screen only, which is
     where locking goes; ringing / call screens suspend it (answer / reject as usual), back
     home it is on again. Auto-lock: model `keypad_autolock` (bridge `ui_bridge_local_t
-    .keypad_autolock`, default off; meant for a settings switch): on
+    .keypad_autolock`, from setting `keypad_lock`, Settings > Call features "Keypad lock",
+    default off): on
     `DISPLAY_EVENT_BACKLIGHT` (dark) the bridge queues `ui_display_off()`, which goes home and
     locks unless a call is up, ahead of the key / touch that later wakes the display.
 - Touch calibration: `ui_actions_t.touch_cal_begin/end` + `ui_touch_raw()`. The
@@ -635,6 +636,7 @@ default false until verified on hardware, applied live), `aec_suppress` /
 `aec_suppress_act` (dB, default 40 / 15), `ota_url` (default
 CONFIG_SIPWIRE_OTA_URL), `blf` (BLF keys, default none), `vm_number` (default `*97`),
 `call_waiting` (default true), `dnd` (default false), `auto_answer` (default true),
+`keypad_lock` (lock when the display goes dark, default false),
 `find_alert` (default `find`), `quiet_hours` (default false), `quiet_start` / `quiet_end`
 (default 22:00 / 07:00; console `cfg set quiet_start 22:30` or minutes), `quiet_allow_contacts`
 (default true), `fwd_always` / `fwd_busy` / `fwd_noanswer` (default empty = off),

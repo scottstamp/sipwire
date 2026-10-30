@@ -100,7 +100,7 @@ typedef struct {
     lv_obj_t *vol_cap[SLIDER_ROWS];
 
     /* Call features page */
-    lv_obj_t *sw_cw, *sw_aa, *sw_dnd;
+    lv_obj_t *sw_cw, *sw_aa, *sw_dnd, *sw_kl;
     lv_obj_t *sw_quiet, *sw_qallow, *dd_qstart, *dd_qend;
     uint16_t q_start, q_end;        /* minutes; a dropdown only replaces its own on change */
 } settings_t;
@@ -796,7 +796,8 @@ static void features_save(settings_t *s)
 {
     ui_act_save_call_features(lv_obj_has_state(s->sw_cw, LV_STATE_CHECKED),
                               lv_obj_has_state(s->sw_aa, LV_STATE_CHECKED),
-                              lv_obj_has_state(s->sw_dnd, LV_STATE_CHECKED));
+                              lv_obj_has_state(s->sw_dnd, LV_STATE_CHECKED),
+                              lv_obj_has_state(s->sw_kl, LV_STATE_CHECKED));
 }
 
 static void on_feature(lv_event_t *e)
@@ -867,6 +868,7 @@ static void features_prefill(settings_t *s)
     set_switch(s->sw_cw, m->call_waiting);
     set_switch(s->sw_aa, m->auto_answer);
     set_switch(s->sw_dnd, m->dnd);
+    set_switch(s->sw_kl, m->keypad_autolock);
     set_switch(s->sw_quiet, m->quiet_hours);
     set_switch(s->sw_qallow, m->quiet_allow_contacts);
     s->q_start = m->quiet_start < 1440 ? m->quiet_start : 0;
@@ -1050,6 +1052,7 @@ static lv_obj_t *settings_create(const char *arg)
     s->sw_cw = feature_row(ff, "Call waiting", "Beep for a second call", on_feature);
     s->sw_aa = feature_row(ff, "Auto-answer", "Pages on the loudspeaker", on_feature);
     s->sw_dnd = feature_row(ff, "Don't disturb", "Refuse calls silently", on_feature);
+    s->sw_kl = feature_row(ff, "Keypad lock", "Locks with screen off", on_feature);
     s->sw_quiet = feature_row(ff, "Quiet hours", "Like DND, every day", on_quiet);
     s->dd_qstart = quiet_time_row(ff, "From");
     s->dd_qend = quiet_time_row(ff, "Until");

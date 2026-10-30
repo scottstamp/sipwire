@@ -1170,6 +1170,22 @@ const SCENARIOS = {
       await page.waitForTimeout(250);
     },
   },
+  settings_keypad_lock: {   // Call features: Keypad lock switched on (auto-lock when dark)
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    },
+    steps: async (page, click, drag) => {
+      await click(207, 282);
+      await page.waitForTimeout(250);
+      await drag(120, 280, 120, 100);
+      await click(120, SETTINGS_ROW.features);
+      await page.waitForTimeout(250);
+      await drag(120, 300, 120, 120);   // to the Keypad lock row
+      await page.waitForTimeout(250);
+      await click(200, 104);            // Keypad lock on
+      await page.waitForTimeout(150);
+    },
+  },
   settings_quiet: {   // Call features scrolled to the quiet hours rows, switched on (12 h clock)
     sim: (sim) => {
       sim.set_net(2, -55); sim.set_reg(2); sim.set_time('23:15');
@@ -1180,7 +1196,7 @@ const SCENARIOS = {
       await drag(120, 280, 120, 100);
       await click(120, SETTINGS_ROW.features);
       await page.waitForTimeout(250);
-      await drag(120, 300, 120, 120);   // to the quiet hours rows
+      await drag(120, 300, 120, 43);    // to the quiet hours rows
       await page.waitForTimeout(250);
       await click(200, 104);            // Quiet hours on
       await page.waitForTimeout(150);
@@ -1197,7 +1213,7 @@ const SCENARIOS = {
       await drag(120, 280, 120, 100);
       await click(120, SETTINGS_ROW.features);
       await page.waitForTimeout(250);
-      await drag(120, 300, 120, 120);
+      await drag(120, 300, 120, 43);
       await page.waitForTimeout(250);
       await page.waitForTimeout(400);
       await click(160, 185);            // From dropdown

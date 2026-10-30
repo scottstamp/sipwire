@@ -431,10 +431,10 @@ void ui_act_save_sounds(uint8_t tone, uint8_t ring_vol, uint8_t call_vol, uint8_
     }
 }
 
-void ui_act_save_call_features(bool call_waiting, bool auto_answer, bool dnd)
+void ui_act_save_call_features(bool call_waiting, bool auto_answer, bool dnd, bool keypad_lock)
 {
     if (s_actions && s_actions->save_call_features) {
-        s_actions->save_call_features(s_actions->ctx, call_waiting, auto_answer, dnd);
+        s_actions->save_call_features(s_actions->ctx, call_waiting, auto_answer, dnd, keypad_lock);
     }
 }
 

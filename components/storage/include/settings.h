@@ -42,6 +42,7 @@ typedef struct {
     bool call_waiting;         /* offer a second incoming call during a call, default true */
     bool dnd;                  /* do not disturb: refuse incoming calls with 486, default false */
     bool auto_answer;          /* answer pages / intercom calls (Call-Info answer-after...), default true */
+    bool keypad_lock;          /* lock keypad + home screen when the display goes dark, default false */
     char find_alert[32];       /* Alert-Info marker of a find-the-handset call (rings at full volume
                                 * through DND and quiet hours), default "find"; "" = off; SIP token */
     bool quiet_hours;          /* quiet hours on (only with the clock set), default false */

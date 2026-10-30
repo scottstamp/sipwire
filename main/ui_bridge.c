@@ -88,7 +88,7 @@ static struct {
     bool snd_pending;               /* Settings > Sounds */
     uint8_t snd_tone, snd_ring, snd_call, snd_spk;
     bool feat_pending;              /* Settings > Call features */
-    bool feat_cw, feat_aa, feat_dnd;
+    bool feat_cw, feat_aa, feat_dnd, feat_kl;
     bool quiet_pending;             /* Settings > Call features: quiet hours */
     bool quiet_on, quiet_allow;
     uint16_t quiet_start, quiet_end;
@@ -134,6 +134,7 @@ static void update_settings_locked(void)
                           st->speaker_volume, st->call_waiting, st->auto_answer, st->dnd);
     ui_bridge_fill_quiet(&b.loc, st->quiet_hours, st->quiet_start, st->quiet_end, st->quiet_allow_contacts);
     ui_bridge_fill_forward(&b.loc, st->fwd_always, st->fwd_busy, st->fwd_noanswer, st->fwd_noanswer_s);
+    b.loc.keypad_autolock = st->keypad_lock;
     memset(st->wifi_pass, 0, sizeof(st->wifi_pass));
     memset(st->sip_password, 0, sizeof(st->sip_password));
 }
@@ -566,13 +567,14 @@ static void act_save_sounds(void *ctx, uint8_t tone, uint8_t ring, uint8_t call,
     kick();
 }
 
-static void act_save_call_features(void *ctx, bool cw, bool aa, bool dnd)
+static void act_save_call_features(void *ctx, bool cw, bool aa, bool dnd, bool kl)
 {
     (void)ctx;
     xSemaphoreTake(b.mtx, portMAX_DELAY);
     b.feat_cw = cw;
     b.feat_aa = aa;
     b.feat_dnd = dnd;
+    b.feat_kl = kl;
     b.feat_pending = true;
     xSemaphoreGive(b.mtx);
     kick();
@@ -894,6 +896,7 @@ static void do_saves(void)
         st->call_waiting = b.feat_cw;
         st->auto_answer = b.feat_aa;
         st->dnd = b.feat_dnd;
+        st->keypad_lock = b.feat_kl;
     }
     if (quiet) {
         st->quiet_hours = b.quiet_on;

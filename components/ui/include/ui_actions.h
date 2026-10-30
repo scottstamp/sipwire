@@ -99,7 +99,7 @@ typedef struct {
     void (*save_sounds)(void *ctx, uint8_t ring_tone, uint8_t ring_volume, uint8_t call_volume,
                         uint8_t speaker_volume);
     /* Persist the call feature switches (applied live). */
-    void (*save_call_features)(void *ctx, bool call_waiting, bool auto_answer, bool dnd);
+    void (*save_call_features)(void *ctx, bool call_waiting, bool auto_answer, bool dnd, bool keypad_lock);
     /* Persist the quiet hours (start / end: minutes after midnight 0-1439). */
     void (*save_quiet)(void *ctx, bool on, uint16_t start_min, uint16_t end_min, bool allow_contacts);
     /* Persist call forwarding: targets ("" = off; dialable characters or a sip: URI, < 32 chars)

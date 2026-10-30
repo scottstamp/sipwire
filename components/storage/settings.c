@@ -50,6 +50,7 @@ static const char *TAG = "storage";
 #define K_CALL_WAIT   "call_waiting"
 #define K_DND         "dnd"
 #define K_AUTO_ANSWER "auto_answer"
+#define K_KEYPAD_LOCK "keypad_lock"
 #define K_FIND_ALERT  "find_alert"
 #define K_QUIET       "quiet_hours"
 #define K_QUIET_START "quiet_start"
@@ -90,6 +91,7 @@ static const settings_t s_defaults = {
     .call_waiting = true,
     .dnd = false,
     .auto_answer = true,
+    .keypad_lock = false,
     .find_alert = "find",
     .quiet_hours = false,
     .quiet_start = 22 * 60,
@@ -239,6 +241,9 @@ static void load_all(nvs_handle_t h, settings_t *s)
     }
     if (nvs_get_u8(h, K_AUTO_ANSWER, &u8) == ESP_OK) {
         s->auto_answer = u8 != 0;
+    }
+    if (nvs_get_u8(h, K_KEYPAD_LOCK, &u8) == ESP_OK) {
+        s->keypad_lock = u8 != 0;
     }
     load_str_or_keep(h, K_FIND_ALERT, s->find_alert, sizeof(s->find_alert));
     if (!token_ok(s->find_alert)) {
@@ -401,6 +406,9 @@ static esp_err_t store_changed(nvs_handle_t h, const settings_t *in)
     }
     if (in->auto_answer != s_cur->auto_answer) {
         ESP_RETURN_ON_ERROR(nvs_set_u8(h, K_AUTO_ANSWER, in->auto_answer ? 1 : 0), TAG, K_AUTO_ANSWER);
+    }
+    if (in->keypad_lock != s_cur->keypad_lock) {
+        ESP_RETURN_ON_ERROR(nvs_set_u8(h, K_KEYPAD_LOCK, in->keypad_lock ? 1 : 0), TAG, K_KEYPAD_LOCK);
     }
     STORE_STR(K_FIND_ALERT, find_alert);
     if (in->quiet_hours != s_cur->quiet_hours) {

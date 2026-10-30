@@ -70,6 +70,7 @@ static const field_t s_fields[] = {
     FIELD(call_waiting, F_BOOL, 0, 1),
     FIELD(dnd, F_BOOL, 0, 1),
     FIELD(auto_answer, F_BOOL, 0, 1),
+    FIELD(keypad_lock, F_BOOL, 0, 1),
     STR_FIELD(find_alert, F_STR),
     FIELD(quiet_hours, F_BOOL, 0, 1),
     FIELD(quiet_start, F_HHMM, 0, SETTINGS_MINUTES_PER_DAY - 1),
