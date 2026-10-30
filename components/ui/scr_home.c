@@ -50,6 +50,8 @@ typedef struct {
     lv_obj_t *id;
     lv_obj_t *state;
     lv_obj_t *sub;
+    char sub_txt[UI_NAME_LEN + 32];     /* what `sub` (DOTS mode) was last set to */
+    bool sub_valid;
     lv_obj_t *mwi_btn;          /* "N new voicemails" (no BLF keys) */
     lv_obj_t *mwi_lbl;          /* envelope + "N new", 24 pt */
     lv_obj_t *mwi_lbl2;         /* "voicemails", 14 pt */
@@ -144,10 +146,10 @@ static lv_color_t lamp_color(ui_blf_state_t st, bool blink_on)
 static void tile_paint(home_t *h, tile_t *t)
 {
     lv_color_t c = lamp_color(t->state, h->blink_on);
-    lv_obj_set_style_bg_color(t->lamp, c, 0);
+    ui_style_set_color(t->lamp, LV_STYLE_BG_COLOR, c, 0);
     /* a ringing tile is outlined as well, so it catches the eye */
-    lv_obj_set_style_border_width(t->btn, t->state == UI_BLF_RINGING ? 2 : 0, 0);
-    lv_obj_set_style_border_color(t->btn, c, 0);
+    ui_style_set_num(t->btn, LV_STYLE_BORDER_WIDTH, t->state == UI_BLF_RINGING ? 2 : 0, 0);
+    ui_style_set_color(t->btn, LV_STYLE_BORDER_COLOR, c, 0);
 }
 
 /* Runs only while a tile rings (tile_update resumes it): no idle LVGL wake-ups otherwise. */
@@ -442,7 +444,7 @@ static void tile_update(home_t *h, tile_t *t, const ui_blf_t *b)
         lv_obj_set_y(t->name, 1);
         lv_obj_set_height(t->name, 26);
         ui_fit_set(t->name, b->label, &lv_font_montserrat_24, false);
-        lv_label_set_text(t->ext, b->ext);
+        ui_label_set_text_if_changed(t->ext, b->ext);
         lv_obj_set_hidden(t->ext, false);
     } else {
         lv_obj_set_y(t->name, (TILE_H - 30) / 2);
@@ -474,13 +476,13 @@ static void home_update(const ui_model_t *m)
         char hm[UI_TIME_STR_LEN];
         snprintf(hm, sizeof(hm), "%.*s", sp ? (int)(sp - m->time_hhmm) : (int)sizeof(hm) - 1,
                  m->time_hhmm);
-        lv_label_set_text(h->clock, hm);
-        lv_obj_set_style_text_color(h->clock, UI_COL_TEXT, 0);
-        lv_label_set_text(h->ampm, sp ? sp + 1 : "");
+        ui_label_set_text_if_changed(h->clock, hm);
+        ui_set_text_color(h->clock, UI_COL_TEXT);
+        ui_label_set_text_if_changed(h->ampm, sp ? sp + 1 : "");
         lv_obj_set_hidden(h->ampm, sp == NULL);
     } else {
-        lv_label_set_text(h->clock, "sipwire");
-        lv_obj_set_style_text_color(h->clock, UI_COL_DIM, 0);
+        ui_label_set_text_if_changed(h->clock, "sipwire");
+        ui_set_text_color(h->clock, UI_COL_DIM);
         lv_obj_set_hidden(h->ampm, true);
     }
 
@@ -530,18 +532,26 @@ static void home_update(const ui_model_t *m)
             sub = "Connecting to Wi-Fi...";
         }
     }
-    lv_label_set_text_fmt(h->state, "%s %s", icon, h->compact ? shrt : txt);
-    lv_obj_set_style_text_color(h->state, col, 0);
+    char buf[sizeof(h->sub_txt)];
+    snprintf(buf, sizeof(buf), "%s %s", icon, h->compact ? shrt : txt);
+    ui_label_set_text_if_changed(h->state, buf);
+    ui_set_text_color(h->state, col);
     bool missed_note = !sub[0] && m->missed_unseen > 0 && m->missed_last[0];
     if (missed_note) {
         if (m->missed_unseen == 1) {
-            lv_label_set_text_fmt(h->sub, LV_SYMBOL_CALL " Missed: %s", m->missed_last);
+            snprintf(buf, sizeof(buf), LV_SYMBOL_CALL " Missed: %s", m->missed_last);
         } else {
-            lv_label_set_text_fmt(h->sub, LV_SYMBOL_CALL " Missed (%u): %s", (unsigned)m->missed_unseen,
-                                  m->missed_last);
+            snprintf(buf, sizeof(buf), LV_SYMBOL_CALL " Missed (%u): %s", (unsigned)m->missed_unseen,
+                     m->missed_last);
         }
     } else {
-        lv_label_set_text(h->sub, sub);
+        snprintf(buf, sizeof(buf), "%s", sub);
+    }
+    /* DOTS mode: compare with our copy, LVGL's buffer may end in "..." */
+    if (!h->sub_valid || strcmp(buf, h->sub_txt) != 0) {
+        lv_label_set_text(h->sub, buf);
+        memcpy(h->sub_txt, buf, sizeof(buf));
+        h->sub_valid = true;
     }
     lv_obj_set_clickable(h->sub, missed_note);
 
@@ -551,29 +561,34 @@ static void home_update(const ui_model_t *m)
 
     /* missed-call badge on History */
     if (m->missed_unseen > 0) {
-        lv_label_set_text(h->badge_lbl, m->missed_unseen > 9 ? "9+" : "");
-        if (m->missed_unseen <= 9) {
-            lv_label_set_text_fmt(h->badge_lbl, "%u", (unsigned)m->missed_unseen);
+        if (m->missed_unseen > 9) {
+            snprintf(buf, sizeof(buf), "9+");
+        } else {
+            snprintf(buf, sizeof(buf), "%u", (unsigned)m->missed_unseen);
         }
+        ui_label_set_text_if_changed(h->badge_lbl, buf);
         lv_obj_set_width(h->badge, m->missed_unseen > 9 ? 26 : 20);
-        lv_obj_align(h->badge, LV_ALIGN_TOP_RIGHT, 0, 0);
+        ui_style_set_num(h->badge, LV_STYLE_ALIGN, LV_ALIGN_TOP_RIGHT, 0);     /* = lv_obj_align(.., 0, 0) */
+        lv_obj_set_pos(h->badge, 0, 0);
         lv_obj_set_hidden(h->badge, false);
-        lv_obj_set_style_text_color(lv_obj_get_child(h->hist, 0), UI_COL_BAD, 0);
+        ui_set_text_color(lv_obj_get_child(h->hist, 0), UI_COL_BAD);
     } else {
         lv_obj_set_hidden(h->badge, true);
-        lv_obj_set_style_text_color(lv_obj_get_child(h->hist, 0), UI_COL_TEXT, 0);
+        ui_set_text_color(lv_obj_get_child(h->hist, 0), UI_COL_TEXT);
     }
 
     if (m->mwi_waiting) {
         if (m->mwi_new > 0) {
             unsigned nn = m->mwi_new > 999 ? 999u : (unsigned)m->mwi_new;
-            lv_label_set_text_fmt(h->mwi_lbl, LV_SYMBOL_ENVELOPE " %u new", nn);
-            lv_label_set_text(h->mwi_lbl2, nn == 1 ? "voicemail" : "voicemails");
-            lv_label_set_text_fmt(h->vm_cap, "%u new", nn);
+            snprintf(buf, sizeof(buf), LV_SYMBOL_ENVELOPE " %u new", nn);
+            ui_label_set_text_if_changed(h->mwi_lbl, buf);
+            ui_label_set_text_if_changed(h->mwi_lbl2, nn == 1 ? "voicemail" : "voicemails");
+            snprintf(buf, sizeof(buf), "%u new", nn);
+            ui_label_set_text_if_changed(h->vm_cap, buf);
         } else {
-            lv_label_set_text(h->mwi_lbl, LV_SYMBOL_ENVELOPE " Voicemail");
-            lv_label_set_text(h->mwi_lbl2, "");
-            lv_label_set_text(h->vm_cap, "Voicemail");
+            ui_label_set_text_if_changed(h->mwi_lbl, LV_SYMBOL_ENVELOPE " Voicemail");
+            ui_label_set_text_if_changed(h->mwi_lbl2, "");
+            ui_label_set_text_if_changed(h->vm_cap, "Voicemail");
         }
     }
 }

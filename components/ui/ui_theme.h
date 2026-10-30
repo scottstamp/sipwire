@@ -42,6 +42,22 @@ lv_obj_t *ui_box_create(lv_obj_t *parent, int32_t x, int32_t y, int32_t w, int32
 lv_obj_t *ui_label_create(lv_obj_t *parent, const lv_font_t *font, lv_color_t color,
                           const char *text);
 
+/* Compare-before-set for update paths that run every second (call timer, clock) or on every
+ * model change. Each lv_label_set_text frees and reallocates the text (LVGL heap, PSRAM) and
+ * invalidates the label; each style setter re-applies the property and invalidates, even
+ * with the value it already has. */
+
+/** lv_label_set_text only if the text differs; true if it was set. A label in DOTS long mode
+ *  is always set: LVGL writes the "..." into its buffer, so lv_label_get_text is not the text
+ *  that was set (fitted labels, ui_fit_*, keep their own copy instead). */
+bool ui_label_set_text_if_changed(lv_obj_t *label, const char *txt);
+/** Local style colour / number property, set only if it differs from the local value. */
+void ui_style_set_color(lv_obj_t *obj, lv_style_prop_t prop, lv_color_t color,
+                        lv_style_selector_t selector);
+void ui_style_set_num(lv_obj_t *obj, lv_style_prop_t prop, int32_t num, lv_style_selector_t selector);
+/** ui_style_set_color(obj, LV_STYLE_TEXT_COLOR, color, 0). */
+void ui_set_text_color(lv_obj_t *obj, lv_color_t color);
+
 /** Button with one centred label (24 pt) or none when text is NULL. */
 lv_obj_t *ui_btn_create(lv_obj_t *parent, ui_btn_kind_t kind, const char *text,
                         int32_t x, int32_t y, int32_t w, int32_t h);
@@ -66,7 +82,8 @@ lv_obj_t *ui_header_create(lv_obj_t *parent, const char *title, int32_t y, lv_ob
 
 /** Single-line label that shrinks its font until `txt` fits the width.
  *  Fonts tried: 40, 32, 24, 14 starting at `start`. With `tail` an
- *  over-long text keeps its end, prefixed with "...". */
+ *  over-long text keeps its end, prefixed with "...". ui_fit_set / ui_fit_set_fixed remember
+ *  their last arguments (and the width) and do nothing when called with the same again. */
 lv_obj_t *ui_fit_create(lv_obj_t *parent, int32_t x, int32_t y, int32_t w, int32_t h,
                         lv_color_t color);
 void ui_fit_set(lv_obj_t *fit, const char *txt, const lv_font_t *start, bool tail);

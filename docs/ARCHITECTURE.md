@@ -409,7 +409,19 @@ full speed, no light sleep). Both drop when the phone is idle again.
     refresh rebuilds the whole model, so nothing that changed while dark is lost. Incoming
     call while dark: `on_event` calls `display_wake` (SLPOUT) before it kicks the bridge, so
     the incoming-call screen is rendered into the panel during its 120 ms start-up, before
-    the backlight lights (see Panel sleep).
+    the backlight lights (see Panel sleep). (`CALL_EVENT_SECOND` is the background call's
+    state change, not a per-second tick: the call timers come from the 1 s refresh above.)
+  - *UI updates* (`components/ui`): lit, every 1 s refresh with a changed model (the clock or
+    a call timer) runs the screen's update. The hot paths only touch what changed:
+    `ui_label_set_text_if_changed` (each `lv_label_set_text` frees and reallocates the text
+    in the PSRAM LVGL heap and invalidates the label), `ui_style_set_color` / `_num` /
+    `ui_set_text_color` (a style setter re-applies and invalidates even with the same value),
+    and the fitted labels (`ui_fit_set`, DOTS mode, whose LVGL buffer may end in "...")
+    remember their last text, start font and width (`fit_cache_t`, 84 B per fit plus its
+    delete callback, LVGL heap). In a call one tick rewrites the timer label only (was ~10 labels and colours); the home screen per
+    minute the clock only. A model whose only change is the RSSI (every 10 s) updates the
+    status bar alone (it redraws only on a new bar count); only Settings (About shows dBm)
+    still gets the screen update.
   - Left: net RSSI every 10 s (Wi-Fi driver call; the UI ignores it while dark), LVGL's 2 s
     max sleep, SNTP, Wi-Fi beacons.
 - **Automatic light sleep** (`power`, board Kconfig `SIPWIRE_POWER_LIGHT_SLEEP`, **default n**:

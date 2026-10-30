@@ -151,6 +151,46 @@ lv_obj_t *ui_label_create(lv_obj_t *parent, const lv_font_t *font, lv_color_t co
     return l;
 }
 
+bool ui_label_set_text_if_changed(lv_obj_t *label, const char *txt)
+{
+    if (txt == NULL) {
+        txt = "";
+    }
+    if (lv_label_get_long_mode(label) != LV_LABEL_LONG_MODE_DOTS) {
+        const char *cur = lv_label_get_text(label);
+        if (cur != NULL && strcmp(cur, txt) == 0) {
+            return false;
+        }
+    }
+    lv_label_set_text(label, txt);
+    return true;
+}
+
+void ui_style_set_color(lv_obj_t *obj, lv_style_prop_t prop, lv_color_t color,
+                        lv_style_selector_t selector)
+{
+    lv_style_value_t v;
+    if (lv_obj_get_local_style_prop(obj, prop, &v, selector) == LV_STYLE_RES_FOUND &&
+        lv_color_eq(v.color, color)) {
+        return;
+    }
+    lv_obj_set_local_style_prop(obj, prop, (lv_style_value_t){ .color = color }, selector);
+}
+
+void ui_style_set_num(lv_obj_t *obj, lv_style_prop_t prop, int32_t num, lv_style_selector_t selector)
+{
+    lv_style_value_t v;
+    if (lv_obj_get_local_style_prop(obj, prop, &v, selector) == LV_STYLE_RES_FOUND && v.num == num) {
+        return;
+    }
+    lv_obj_set_local_style_prop(obj, prop, (lv_style_value_t){ .num = num }, selector);
+}
+
+void ui_set_text_color(lv_obj_t *obj, lv_color_t color)
+{
+    ui_style_set_color(obj, LV_STYLE_TEXT_COLOR, color, 0);
+}
+
 static lv_obj_t *btn_base(lv_obj_t *parent, ui_btn_kind_t kind, int32_t x, int32_t y, int32_t w,
                           int32_t h)
 {
@@ -258,6 +298,45 @@ static int32_t text_width(const lv_font_t *f, const char *t)
     return w;
 }
 
+/* Last arguments of ui_fit_set / ui_fit_set_fixed (the box's user data). The label is in DOTS
+ * mode, which writes "..." into LVGL's copy of the text, so it cannot be compared with
+ * lv_label_get_text. */
+#define FIT_CACHE_TXT 72
+typedef struct {
+    const lv_font_t *font;      /* `start` or the fixed font; NULL = nothing cached */
+    int32_t w;
+    uint8_t mode;               /* FIT_MODE_* */
+    char txt[FIT_CACHE_TXT];
+} fit_cache_t;
+enum { FIT_MODE_FIT, FIT_MODE_FIT_TAIL, FIT_MODE_FIXED };
+
+static void fit_deleted(lv_event_t *e)
+{
+    lv_free(lv_event_get_user_data(e));
+}
+
+/* True when `fit` already shows exactly this; otherwise remembers it (if it fits the cache). */
+static bool fit_unchanged(lv_obj_t *fit, const char *txt, const lv_font_t *font, uint8_t mode, int32_t w)
+{
+    fit_cache_t *fc = lv_obj_get_user_data(fit);
+    if (fc == NULL) {
+        return false;
+    }
+    if (fc->font == font && fc->mode == mode && fc->w == w && strcmp(fc->txt, txt) == 0) {
+        return true;
+    }
+    size_t n = strlen(txt);
+    if (n >= sizeof(fc->txt)) {
+        fc->font = NULL;        /* too long to remember: always set */
+        return false;
+    }
+    memcpy(fc->txt, txt, n + 1);
+    fc->font = font;
+    fc->mode = mode;
+    fc->w = w;
+    return false;
+}
+
 lv_obj_t *ui_fit_create(lv_obj_t *parent, int32_t x, int32_t y, int32_t w, int32_t h,
                         lv_color_t color)
 {
@@ -268,12 +347,17 @@ lv_obj_t *ui_fit_create(lv_obj_t *parent, int32_t x, int32_t y, int32_t w, int32
     lv_obj_set_width(l, w);
     lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(l, LV_LABEL_LONG_MODE_DOTS);
+    fit_cache_t *fc = lv_zalloc(sizeof(*fc));
+    if (fc != NULL) {   /* without it every set applies, as before */
+        lv_obj_set_user_data(box, fc);
+        lv_obj_add_event_cb(box, fit_deleted, LV_EVENT_DELETE, fc);
+    }
     return box;
 }
 
 void ui_fit_set_color(lv_obj_t *fit, lv_color_t color)
 {
-    lv_obj_set_style_text_color(lv_obj_get_child(fit, 0), color, 0);
+    ui_set_text_color(lv_obj_get_child(fit, 0), color);
 }
 
 void ui_fit_set(lv_obj_t *fit, const char *txt, const lv_font_t *start, bool tail)
@@ -281,6 +365,9 @@ void ui_fit_set(lv_obj_t *fit, const char *txt, const lv_font_t *start, bool tai
     lv_obj_t *l = lv_obj_get_child(fit, 0);
     /* the style width, not the coords: those are only valid after a layout pass */
     int32_t w = lv_obj_get_style_width(fit, LV_PART_MAIN);
+    if (fit_unchanged(fit, txt, start, tail ? FIT_MODE_FIT_TAIL : FIT_MODE_FIT, w)) {
+        return;
+    }
     size_t first = 0;
     for (size_t i = 0; i < FIT_FONT_COUNT; i++) {
         if (FIT_FONTS[i] == start) {
@@ -320,6 +407,9 @@ void ui_fit_set(lv_obj_t *fit, const char *txt, const lv_font_t *start, bool tai
 
 void ui_fit_set_fixed(lv_obj_t *fit, const char *txt, const lv_font_t *font)
 {
+    if (fit_unchanged(fit, txt, font, FIT_MODE_FIXED, lv_obj_get_style_width(fit, LV_PART_MAIN))) {
+        return;
+    }
     lv_obj_t *l = lv_obj_get_child(fit, 0);
     lv_obj_set_style_text_font(l, font, 0);
     lv_obj_set_height(l, lv_font_get_line_height(font));    /* DOTS mode: one line */
