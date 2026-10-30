@@ -359,7 +359,10 @@ full speed, no light sleep). Both drop when the phone is idle again.
     LVGL task sleeps up to 2 s when no lv_timer is due and is woken by
     `lv_timer_handler_set_resume_cb` (any timer created / resumed, incl. the refresh timer on
     invalidation) and by the touch interrupt. LVGL 9 pauses the refresh timer when nothing is
-    invalid; the home screen's BLF blink timer pauses itself unless a tile rings.
+    invalid; the home screen's BLF blink timer pauses itself unless a tile rings. Screen
+    changes are instant (`ui.c` `show()`, no 120 ms slide: every slide frame re-rendered and
+    flushed the whole screen); the old screen is deleted 100 ms later, which is safe because
+    a load without animation never sets LVGL's `prev_scr`.
   - *touch*: the PENIRQ falling-edge interrupt of esp_lcd_touch is swapped for a level-low
     one (`display.c` `touch_isr`, masked until a read finds the panel released; while a
     finger is down but not reported, swallowed wake-up touch or calibration, it re-arms after

@@ -15,8 +15,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#define ANIM_MS 120
-
 static const ui_screen_ops_t *const OPS[UI_SCR_COUNT] = {
     [UI_SCR_HOME] = &ui_ops_home,
     [UI_SCR_DIALER] = &ui_ops_dialer,
@@ -34,7 +32,7 @@ static const ui_screen_ops_t *const OPS[UI_SCR_COUNT] = {
 static const ui_actions_t *s_actions;
 static ui_model_t s_model;
 static ui_screen_t s_kind;
-static lv_obj_t *s_scr; /* newest screen (may still be animating in) */
+static lv_obj_t *s_scr; /* current screen */
 static bool s_inited;
 
 const ui_model_t *ui_model(void)
@@ -44,7 +42,15 @@ const ui_model_t *ui_model(void)
 
 /* ---- screen switching ---------------------------------------------------- */
 
-static void show(ui_screen_t kind, const char *arg, lv_screen_load_anim_t anim)
+/* Every screen change is instant (no slide: each animation frame re-rendered the whole
+ * screen, ~120 ms of full-screen SPI flushes per menu step). lv_screen_load() without an
+ * animation never sets display->prev_scr: lv_screen_load_anim() clears it and only the
+ * animated path's start callback fills it, and with no animation ever started
+ * scr_to_load is never pending either. So after the load nothing in LVGL refers to `old`,
+ * and deleting it ourselves is safe (the animated path needed LVGL's auto_del instead: a
+ * timed delete of ours could run before the slide ended, which then laid out the freed
+ * prev_scr). Delayed, because show() often runs inside an event callback of `old`. */
+static void show(ui_screen_t kind, const char *arg)
 {
     lv_obj_t *old = s_scr;
     lv_obj_t *scr = OPS[kind]->create(arg);
@@ -59,18 +65,10 @@ static void show(ui_screen_t kind, const char *arg, lv_screen_load_anim_t anim)
     ui_statusbar_update(&s_model);
     OPS[kind]->update(&s_model);
 
-    if (anim == LV_SCREEN_LOAD_ANIM_NONE) {
-        lv_screen_load_anim(scr, anim, 0, 0, false);
-        if (old && old != scr) {
-            /* Never from inside a callback of the old screen itself. */
-            lv_obj_delete_delayed(old, 100);
-        }
-        return;
+    lv_screen_load(scr);
+    if (old && old != scr) {
+        lv_obj_delete_delayed(old, 100);
     }
-    /* LVGL deletes the old screen when the slide completes. A timed delete of our own could
-     * run first when a frame takes long (busy Wi-Fi, OTA flash writes): the end of the slide
-     * then lays out and sends events to the freed screen (display->prev_scr). */
-    lv_screen_load_anim(scr, anim, ANIM_MS, 0, true);
 }
 
 void ui_goto(ui_screen_t screen, const char *arg)
@@ -78,9 +76,7 @@ void ui_goto(ui_screen_t screen, const char *arg)
     if (!s_inited || screen >= UI_SCR_COUNT || screen == s_kind) {
         return;
     }
-    bool back = screen == UI_SCR_HOME || (s_kind == UI_SCR_CALIBRATE && screen == UI_SCR_SETTINGS) ||
-                (s_kind == UI_SCR_TRANSFER && screen == UI_SCR_CALL);
-    show(screen, arg, back ? LV_SCREEN_LOAD_ANIM_MOVE_RIGHT : LV_SCREEN_LOAD_ANIM_MOVE_LEFT);
+    show(screen, arg);
 }
 
 static bool is_call_screen(ui_screen_t s)
@@ -102,7 +98,7 @@ void ui_init(lv_display_t *disp, const ui_actions_t *actions)
     lv_obj_t *boot = lv_display_get_screen_active(disp);
     s_inited = true;
     s_scr = NULL;
-    show(UI_SCR_HOME, NULL, LV_SCREEN_LOAD_ANIM_NONE);
+    show(UI_SCR_HOME, NULL);
     if (boot && boot != s_scr) {
         lv_obj_delete_delayed(boot, 100);
     }
@@ -154,7 +150,7 @@ void ui_update(const ui_model_t *model)
     }
 
     if (want != s_kind) {
-        show(want, NULL, LV_SCREEN_LOAD_ANIM_NONE);
+        show(want, NULL);
     } else {
         ui_statusbar_update(&s_model);
         OPS[s_kind]->update(&s_model);

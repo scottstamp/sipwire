@@ -46,7 +46,7 @@ extern const ui_screen_ops_t ui_ops_transfer;
 extern const ui_screen_ops_t ui_ops_history;
 extern const ui_screen_ops_t ui_ops_contacts;
 
-/** User initiated navigation (animated). Safe to call from event callbacks. */
+/** User initiated navigation (instant screen change). Safe to call from event callbacks. */
 void ui_goto(ui_screen_t screen, const char *arg);
 
 /** Latest model snapshot. */
