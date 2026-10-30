@@ -49,7 +49,8 @@ typedef enum {
     DIR_RES_ANSWERED = 0,   /* connected (outgoing: the far end answered) */
     DIR_RES_MISSED = 1,     /* incoming: not answered; outgoing: no answer / failed */
     DIR_RES_REJECTED = 2,   /* incoming: declined by the user */
-    DIR_RES_DND = 3,        /* incoming: auto-rejected by do-not-disturb */
+    DIR_RES_DND = 3,        /* incoming: auto-rejected by do-not-disturb (or quiet hours) */
+    DIR_RES_FORWARDED = 4,  /* incoming: sent on with a 302 (call forwarding) */
 } dir_result_t;
 
 typedef struct {

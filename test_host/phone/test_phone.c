@@ -50,6 +50,10 @@ static void test_end_codes(void)
     TEST_ASSERT_EQUAL(408, phone_end_code(SIP_END_TIMEOUT, 0));
     TEST_ASSERT_EQUAL(408, phone_end_code(SIP_END_TIMEOUT, 408));
     TEST_ASSERT_EQUAL(488, phone_end_code(SIP_END_ERROR, 488));
+    /* we declined (603 is a normal local end) or forwarded the call (302 shown as such) */
+    TEST_ASSERT_EQUAL(0, phone_end_code(SIP_END_LOCAL, 603));
+    TEST_ASSERT_EQUAL(302, phone_end_code(SIP_END_LOCAL, 302));
+    TEST_ASSERT_FALSE(phone_end_is_busy(false, 302));
 }
 
 static void test_ended_hold_time(void)
@@ -510,6 +514,15 @@ static void test_model_call_features(void)
     ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
     TEST_ASSERT_FALSE(m.quiet_active);
     loc.time_valid = false;
+
+    /* call forwarding settings pass through (NULL = "") */
+    ui_bridge_fill_forward(&loc, "1003", NULL, "sip:vm@pbx", 25);
+    ui_bridge_build_model(&loc, &ph, 72 * 1000000LL, &m);
+    TEST_ASSERT_EQUAL_STRING("1003", m.fwd_always);
+    TEST_ASSERT_EQUAL_STRING("", m.fwd_busy);
+    TEST_ASSERT_EQUAL_STRING("sip:vm@pbx", m.fwd_noanswer);
+    TEST_ASSERT_EQUAL_UINT16(25, m.fwd_noanswer_s);
+    ui_bridge_fill_forward(&loc, "", "", "", 20);
 
     /* transfer states, attended flag, code and target */
     ph.xfer.state = XFER_FAILED;

@@ -83,8 +83,9 @@ xfer_state_t phone_xfer_map(sip_xfer_state_t st)
 int phone_end_code(sip_ua_end_reason_t reason, int status_code)
 {
     switch (reason) {
-    case SIP_END_NONE:
     case SIP_END_LOCAL:
+        return status_code == 302 ? 302 : 0;    /* we forwarded it (302); else a normal hangup */
+    case SIP_END_NONE:
     case SIP_END_REMOTE:
         return 0;
     case SIP_END_CANCELLED:

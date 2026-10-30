@@ -577,6 +577,17 @@ static void act_save_quiet(void *ctx, bool on, uint16_t start, uint16_t end, boo
     push_model();
 }
 
+static void act_save_forward(void *ctx, const char *always, const char *busy, const char *noanswer, uint16_t secs)
+{
+    (void)ctx;
+    sim_log("action save_forward(always='%s' busy='%s' noanswer='%s' after %u s)", always, busy, noanswer, secs);
+    snprintf(s_model.fwd_always, sizeof(s_model.fwd_always), "%s", always);
+    snprintf(s_model.fwd_busy, sizeof(s_model.fwd_busy), "%s", busy);
+    snprintf(s_model.fwd_noanswer, sizeof(s_model.fwd_noanswer), "%s", noanswer);
+    s_model.fwd_noanswer_s = secs;
+    push_model();
+}
+
 /* Seed data (every start): 14 contacts, speed dial 2/3/5, a week of calls, all seen. */
 static void seed_directory(void)
 {
@@ -1086,6 +1097,16 @@ EMSCRIPTEN_KEEPALIVE void sim_set_quiet(int on, const char *start, const char *e
     push_model();
 }
 
+/* Call forwarding setting (the always target drives the FWD badge). */
+EMSCRIPTEN_KEEPALIVE void sim_set_forward(const char *always, const char *busy, const char *noanswer, int secs)
+{
+    snprintf(s_model.fwd_always, sizeof(s_model.fwd_always), "%s", always ? always : "");
+    snprintf(s_model.fwd_busy, sizeof(s_model.fwd_busy), "%s", busy ? busy : "");
+    snprintf(s_model.fwd_noanswer, sizeof(s_model.fwd_noanswer), "%s", noanswer ? noanswer : "");
+    s_model.fwd_noanswer_s = (uint16_t)(secs >= 5 && secs <= 300 ? secs : 20);
+    push_model();
+}
+
 EMSCRIPTEN_KEEPALIVE void sim_set_page(int on)
 {
     s_model.auto_answered = on != 0;
@@ -1200,7 +1221,7 @@ EMSCRIPTEN_KEEPALIVE void sim_set_unseen(int n)
 /* Log a call now (direction 0 in / 1 out, result ui_call_result_t), like the phone at call end. */
 EMSCRIPTEN_KEEPALIVE void sim_history_add(int dir, int res, const char *number, const char *name, int seconds)
 {
-    hist_add(dir ? UI_CALLDIR_OUT : UI_CALLDIR_IN, res < UI_CALLRES_ANSWERED || res > UI_CALLRES_DND ? 0 : res,
+    hist_add(dir ? UI_CALLDIR_OUT : UI_CALLDIR_IN, res < UI_CALLRES_ANSWERED || res > UI_CALLRES_FORWARDED ? 0 : res,
              number, name, seconds > 0 ? (uint32_t)seconds : 0);
     push_model();
 }
@@ -1391,6 +1412,7 @@ int main(void)
     s_model.quiet_start = 22 * 60;
     s_model.quiet_end = 7 * 60;
     s_model.quiet_allow_contacts = true;
+    s_model.fwd_noanswer_s = 20;
     seed_directory();
 
     s_actions = (ui_actions_t){
@@ -1432,6 +1454,7 @@ int main(void)
         .save_sounds = act_save_sounds,
         .save_call_features = act_save_call_features,
         .save_quiet = act_save_quiet,
+        .save_forward = act_save_forward,
     };
 
     ui_init(disp, &s_actions);

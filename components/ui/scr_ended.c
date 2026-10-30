@@ -26,6 +26,7 @@ static const char *reason_text(int code, char *buf, size_t cap)
 {
     switch (code) {
     case 0:   return "Normal";
+    case 302: return "Forwarded";
     case 486: return "Busy";
     case 487: return "Cancelled";
     case 404: return "Not found";

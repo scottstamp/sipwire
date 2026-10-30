@@ -50,6 +50,15 @@
  * with dnd + quiet), except callers found in the contacts (when allowed) and find the
  * handset calls.
  *
+ * Call forwarding (settings `fwd_always`, `fwd_busy`, `fwd_noanswer` + `fwd_noanswer_s`,
+ * a number or sip: URI each, "" = off), done locally with 302 Moved Temporarily (Contact =
+ * the target on our domain; the PBX follows it): always = every new INVITE, before DND /
+ * quiet hours, without ringing; busy = instead of 486 when there is no free line (call
+ * waiting off or two calls) and when the user declines a ringing call; no answer = the
+ * foreground ringing call after fwd_noanswer_s (302 after the 180). Find the handset calls
+ * are never forwarded except when busy. Forwarded calls are logged as DIR_RES_FORWARDED
+ * (no missed-call notice).
+ *
  * Find the handset (setting `find_alert`, default "find"): an INVITE whose Alert-Info
  * carries the marker rings at full volume with its own pattern (and wakes the
  * screen), even with DND on; never auto-answered. During a call it waits like any

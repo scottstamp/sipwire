@@ -644,7 +644,7 @@ int dir_hist_deserialize(dir_hist_t *h, const uint8_t *buf, size_t len)
     }
     const uint8_t *rec = buf + DIR_HIST_HDR_SIZE;
     for (size_t k = 0; k < count; k++, rec += DIR_HIST_REC_SIZE) {
-        if (rec[0] > DIR_CALL_OUT || rec[1] > DIR_RES_DND) {
+        if (rec[0] > DIR_CALL_OUT || rec[1] > DIR_RES_FORWARDED) {
             h->head = 0;
             h->count = 0;
             return -1;

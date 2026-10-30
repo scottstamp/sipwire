@@ -391,6 +391,13 @@ void ui_act_save_quiet(bool on, uint16_t start_min, uint16_t end_min, bool allow
     }
 }
 
+void ui_act_save_forward(const char *always, const char *busy, const char *noanswer, uint16_t noanswer_s)
+{
+    if (s_actions && s_actions->save_forward) {
+        s_actions->save_forward(s_actions->ctx, always, busy, noanswer, noanswer_s);
+    }
+}
+
 void ui_act_touch_cal_begin(void)
 {
     if (s_actions && s_actions->touch_cal_begin) {

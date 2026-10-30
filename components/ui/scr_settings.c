@@ -1,4 +1,4 @@
-/* Settings: scrolling list -> Wi-Fi / SIP account / BLF keys / Time / Update
+/* Settings: scrolling list -> Wi-Fi / SIP account / BLF keys / Time / Forwarding / Update
  * forms (on-screen keyboard) / About / touch calibration screen. The forms are prefilled from the model when opened
  * (passwords are never in the model: an empty field keeps the stored one).
  * All pages live in one screen and are switched by hiding; the keyboard is
@@ -18,7 +18,7 @@
 #define OTA_URL_MAX_CHARS 191       /* ota.h OTA_URL_MAX - 1 */
 
 typedef enum {
-    PG_LIST, PG_WIFI, PG_ACCOUNT, PG_BLF, PG_TIME, PG_UPDATE, PG_ABOUT,
+    PG_LIST, PG_WIFI, PG_ACCOUNT, PG_BLF, PG_TIME, PG_FORWARD, PG_UPDATE, PG_ABOUT,
     PG_SOUNDS, PG_FEATURES,     /* no keyboard, apply immediately */
     PG_COUNT
 } page_t;
@@ -81,6 +81,7 @@ typedef struct {
     lv_obj_t *ntp, *tz_dd, *tz_custom, *h24;
     uint32_t tz_prev;               /* dropdown index before the last change */
     lv_obj_t *fw, *ota_url, *ota_btn, *ota_bar, *ota_msg;
+    lv_obj_t *fwd_always, *fwd_busy, *fwd_noans, *fwd_secs;   /* Forwarding page */
 
     /* BLF keys page: the entries being edited (saved as a whole) */
     lv_obj_t *blf_cap, *blf_rows, *blf_ext, *blf_label, *blf_add, *vm;
@@ -106,8 +107,8 @@ typedef struct {
 
 static settings_t *s_s;
 
-static const char *const TITLES[PG_COUNT] = {"Settings", "Wi-Fi", "Account", "BLF", "Time", "Update",
-                                             "About", "Sounds", "Call features"};
+static const char *const TITLES[PG_COUNT] = {"Settings", "Wi-Fi", "Account", "BLF", "Time", "Forward",
+                                             "Update", "About", "Sounds", "Call features"};
 
 static void on_delete(lv_event_t *e)
 {
@@ -122,7 +123,7 @@ static void on_delete(lv_event_t *e)
 
 static bool is_form(page_t p)
 {
-    return p == PG_WIFI || p == PG_ACCOUNT || p == PG_BLF || p == PG_TIME || p == PG_UPDATE;
+    return p == PG_WIFI || p == PG_ACCOUNT || p == PG_BLF || p == PG_TIME || p == PG_FORWARD || p == PG_UPDATE;
 }
 
 static void kb_hide(settings_t *s)
@@ -143,8 +144,9 @@ static void field_clicked(lv_event_t *e)
 {
     settings_t *s = lv_event_get_user_data(e);
     lv_obj_t *ta = lv_event_get_target_obj(e);
-    lv_keyboard_set_mode(s->kb, ta == s->port                        ? LV_KEYBOARD_MODE_NUMBER
-                                : (ta == s->blf_ext || ta == s->vm) ? LV_KEYBOARD_MODE_USER_1
+    bool dial = ta == s->blf_ext || ta == s->vm || ta == s->fwd_always || ta == s->fwd_busy || ta == s->fwd_noans;
+    lv_keyboard_set_mode(s->kb, (ta == s->port || ta == s->fwd_secs) ? LV_KEYBOARD_MODE_NUMBER
+                                : dial                              ? LV_KEYBOARD_MODE_USER_1
                                                                     : LV_KEYBOARD_MODE_TEXT_LOWER);
     lv_keyboard_set_textarea(s->kb, ta);
     lv_obj_set_hidden(s->kb, false);
@@ -231,6 +233,13 @@ static void prefill(settings_t *s, page_t p)
         blf_rebuild(s);
     } else if (p == PG_TIME) {
         prefill_time(s, m);
+    } else if (p == PG_FORWARD) {
+        char secs[8];
+        snprintf(secs, sizeof(secs), "%u", (unsigned)m->fwd_noanswer_s);
+        lv_textarea_set_text(s->fwd_always, m->fwd_always);
+        lv_textarea_set_text(s->fwd_busy, m->fwd_busy);
+        lv_textarea_set_text(s->fwd_noans, m->fwd_noanswer);
+        lv_textarea_set_text(s->fwd_secs, secs);
     } else if (p == PG_UPDATE) {
         lv_textarea_set_text(s->ota_url, m->ota_url);
         lv_obj_update_layout(s->ota_url);
@@ -569,6 +578,16 @@ static void blf_add_clicked(lv_event_t *e)
     blf_rebuild(s);
 }
 
+/* A forwarding target as the form accepts it: a dialable number, or a sip: URI kept from the
+ * console (settings_fwd_target_ok has the full rule). */
+static bool fwd_ok(const char *t)
+{
+    if (strncmp(t, "sip:", 4) == 0) {
+        return t[4] != '\0' && strlen(t) < UI_NUMBER_LEN && !strpbrk(t, " <>\"");
+    }
+    return strlen(t) < UI_NUMBER_LEN && blf_ext_ok(t);
+}
+
 static void settings_toast_back(settings_t *s, const char *msg)
 {
     ui_toast(msg);
@@ -618,6 +637,23 @@ static void on_save(lv_event_t *e)
         ui_act_save_blf(list);
         ui_act_save_vm_number(vm);
         settings_toast_back(s, "BLF keys saved");
+    } else if (s->cur == PG_FORWARD) {
+        const char *a = lv_textarea_get_text(s->fwd_always);
+        const char *b = lv_textarea_get_text(s->fwd_busy);
+        const char *n = lv_textarea_get_text(s->fwd_noans);
+        const char *st = lv_textarea_get_text(s->fwd_secs);
+        /* the form types numbers; a sip: URI set from the console is kept as it is */
+        if ((a[0] && !fwd_ok(a)) || (b[0] && !fwd_ok(b)) || (n[0] && !fwd_ok(n))) {
+            ui_toast("Number: 0-9 a-z * # + . _ -");
+            return;
+        }
+        long secs = st[0] ? strtol(st, NULL, 10) : 20;
+        if (secs < 5 || secs > 300) {
+            ui_toast("Ring time: 5-300 seconds");
+            return;
+        }
+        ui_act_save_forward(a, b, n, (uint16_t)secs);
+        settings_toast_back(s, a[0] ? "Forwarding all calls" : "Forwarding saved");
     } else if (s->cur == PG_TIME) {
         const char *ntp = lv_textarea_get_text(s->ntp);
         uint32_t idx = lv_dropdown_get_selected(s->tz_dd);
@@ -900,6 +936,7 @@ static lv_obj_t *settings_create(const char *arg)
     list_row(list, PG_COUNT, LV_SYMBOL_EDIT, "Calibrate");
     list_row(list, PG_SOUNDS, LV_SYMBOL_VOLUME_MAX, "Sounds");
     list_row(list, PG_FEATURES, LV_SYMBOL_SHUFFLE, "Call features");
+    list_row(list, PG_FORWARD, LV_SYMBOL_NEXT, "Forwarding");
     list_row(list, PG_TIME, LV_SYMBOL_BELL, "Time");
     list_row(list, PG_UPDATE, LV_SYMBOL_DOWNLOAD, "Update");
     list_row(list, PG_ABOUT, LV_SYMBOL_LIST, "About");
@@ -917,6 +954,7 @@ static lv_obj_t *settings_create(const char *arg)
     s->dname = field_create(s, s->page[PG_ACCOUNT], "Display name", "Optional", 63, false);
 
     static const char DIAL_CHARS[] = "0123456789*#+._-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    static const char FWD_CHARS[] = "0123456789*#+._-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ:@;=";
     lv_obj_t *bf = form_create(s, scr);
     s->page[PG_BLF] = bf;
     s->blf_cap = ui_label_create(bf, &lv_font_montserrat_14, UI_COL_DIM, "");
@@ -958,6 +996,17 @@ static lv_obj_t *settings_create(const char *arg)
     lv_obj_set_style_bg_color(s->h24, UI_COL_GREEN, LV_PART_INDICATOR | LV_STATE_CHECKED);
     lv_obj_set_style_bg_color(s->h24, UI_COL_TEXT, LV_PART_KNOB);
     lv_obj_add_event_cb(s->h24, tz_pressed, LV_EVENT_PRESSED, s);
+
+    lv_obj_t *fwf = form_create(s, scr);
+    s->page[PG_FORWARD] = fwf;
+    s->fwd_always = field_create(s, fwf, "Always forward to (empty = off)", "Off", UI_NUMBER_LEN - 1, false);
+    s->fwd_busy = field_create(s, fwf, "When busy or declined", "Off", UI_NUMBER_LEN - 1, false);
+    s->fwd_noans = field_create(s, fwf, "When not answered", "Off", UI_NUMBER_LEN - 1, false);
+    s->fwd_secs = field_create(s, fwf, "... after ringing (seconds)", "20", 3, false);
+    lv_textarea_set_accepted_chars(s->fwd_secs, "0123456789");
+    lv_textarea_set_accepted_chars(s->fwd_always, FWD_CHARS);
+    lv_textarea_set_accepted_chars(s->fwd_busy, FWD_CHARS);
+    lv_textarea_set_accepted_chars(s->fwd_noans, FWD_CHARS);
 
     lv_obj_t *uf = form_create(s, scr);
     s->page[PG_UPDATE] = uf;

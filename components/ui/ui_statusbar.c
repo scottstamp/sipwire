@@ -2,7 +2,8 @@
  * dot, clock, battery. While voicemail is waiting an amber envelope (with the
  * number of new messages) takes the place of the "SIP" caption. Do not disturb: a dim bell left of
  * the battery (tap = on) or a red "DND" badge (tap = off); inside quiet hours (DND off) a blue "Zz"
- * badge in its place (tap = DND on). Each screen owns its own bar; only the newest one is
+ * badge in its place (tap = DND on); with always-forward set an amber "FWD" badge takes the
+ * place of both (calls are forwarded then, not refused; tap still toggles DND). Each screen owns its own bar; only the newest one is
  * kept up to date. */
 
 #include "ui_priv.h"
@@ -35,6 +36,7 @@ typedef struct {
     uint16_t mwi_new;
     bool dnd_on;
     bool quiet_on;
+    bool fwd_on;
 } statusbar_t;
 
 static statusbar_t *s_sb;
@@ -183,9 +185,10 @@ void ui_statusbar_update(const ui_model_t *m)
         sb->reg = m->reg;
     }
 
-    bool quiet = m->quiet_active && !m->dnd;
-    bool dnd_changed = !sb->valid || m->dnd != sb->dnd_on || quiet != sb->quiet_on;
-    bool badge = m->dnd || quiet;           /* DND or Quiet badge: needs the room on the left too */
+    bool fwd = m->fwd_always[0] != '\0';
+    bool quiet = m->quiet_active && !m->dnd && !fwd;
+    bool dnd_changed = !sb->valid || m->dnd != sb->dnd_on || quiet != sb->quiet_on || fwd != sb->fwd_on;
+    bool badge = fwd || m->dnd || quiet;    /* FWD, DND or Zz badge: needs the room on the left too */
     bool mwi_changed = !sb->valid || m->mwi_waiting != sb->mwi_waiting || m->mwi_new != sb->mwi_new;
     if (mwi_changed || dnd_changed) {
         if (m->mwi_waiting) {
@@ -225,14 +228,16 @@ void ui_statusbar_update(const ui_model_t *m)
     }
 
     if (dnd_changed) {
-        lv_label_set_text(sb->dnd_lbl, m->dnd ? "DND" : quiet ? "Zz" : LV_SYMBOL_BELL);
-        lv_obj_set_style_text_color(sb->dnd_lbl, badge ? UI_COL_TEXT : lv_color_hex(0x7D8996), 0);
-        lv_obj_set_style_bg_color(sb->dnd, m->dnd ? UI_COL_RED : UI_COL_BLUE, 0);
+        lv_label_set_text(sb->dnd_lbl, fwd ? "FWD" : m->dnd ? "DND" : quiet ? "Zz" : LV_SYMBOL_BELL);
+        lv_obj_set_style_text_color(sb->dnd_lbl, fwd ? UI_COL_BG : badge ? UI_COL_TEXT : lv_color_hex(0x7D8996), 0);
+        lv_obj_set_style_bg_color(sb->dnd, fwd ? UI_COL_WARN : m->dnd ? UI_COL_RED : UI_COL_BLUE, 0);
         lv_obj_set_style_bg_opa(sb->dnd, badge ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-        lv_obj_set_width(sb->dnd, badge ? 30 : 18);
+        lv_obj_set_style_text_letter_space(sb->dnd_lbl, fwd ? -1 : 0, 0);   /* "FWD" in 32 px */
+        lv_obj_set_width(sb->dnd, fwd ? 32 : badge ? 30 : 18);
         lv_obj_center(sb->dnd_lbl);
         sb->dnd_on = m->dnd;
         sb->quiet_on = quiet;
+        sb->fwd_on = fwd;
     }
 
     /* Right to left: battery at the edge, the DND bell / badge left of it, the clock centred

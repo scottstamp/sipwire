@@ -86,6 +86,8 @@ static struct {
     bool quiet_pending;             /* Settings > Call features: quiet hours */
     bool quiet_on, quiet_allow;
     uint16_t quiet_start, quiet_end;
+    bool fwd_pending;               /* Settings > Forwarding (targets in s_cold) */
+    uint16_t fwd_noanswer_s;
 } b;
 
 /* Scratch the bridge needs now and then (~6 KB): in PSRAM when there is some, as internal RAM is
@@ -95,6 +97,10 @@ static struct {
     settings_t fill;                /* update_settings_locked(): callers hold b.mtx */
     settings_t save;                /* do_saves(): bridge task only */
     ui_model_t last, model;         /* refresh(): bridge task only */
+    /* Settings > Forwarding, pending (under b.mtx with b.fwd_pending) */
+    char fwd_always[sizeof(((settings_t *)0)->fwd_always)];
+    char fwd_busy[sizeof(((settings_t *)0)->fwd_busy)];
+    char fwd_noanswer[sizeof(((settings_t *)0)->fwd_noanswer)];
 } *s_cold;
 
 /* What SNTP and the C library are using right now. The NTP buffer must stay valid
@@ -121,6 +127,7 @@ static void update_settings_locked(void)
     ui_bridge_fill_sounds(&b.loc, audio_ringtone_count(), st->ring_tone, st->ring_volume, st->call_volume,
                           st->speaker_volume, st->call_waiting, st->auto_answer, st->dnd);
     ui_bridge_fill_quiet(&b.loc, st->quiet_hours, st->quiet_start, st->quiet_end, st->quiet_allow_contacts);
+    ui_bridge_fill_forward(&b.loc, st->fwd_always, st->fwd_busy, st->fwd_noanswer, st->fwd_noanswer_s);
     memset(st->wifi_pass, 0, sizeof(st->wifi_pass));
     memset(st->sip_password, 0, sizeof(st->sip_password));
 }
@@ -480,7 +487,7 @@ static size_t act_history_list(void *ctx, ui_call_t *out, size_t max)
         for (size_t i = 0; i < got; i++) {
             ui_call_t *o = &out[n + i];
             o->direction = chunk[i].direction == DIR_CALL_OUT ? UI_CALLDIR_OUT : UI_CALLDIR_IN;
-            o->result = chunk[i].result <= DIR_RES_DND ? chunk[i].result : UI_CALLRES_MISSED;
+            o->result = chunk[i].result <= DIR_RES_FORWARDED ? chunk[i].result : UI_CALLRES_MISSED;
             o->seen = chunk[i].seen;
             o->start = (int64_t)chunk[i].start;
             o->duration_s = chunk[i].duration_s;
@@ -578,6 +585,30 @@ static void act_save_quiet(void *ctx, bool on, uint16_t start, uint16_t end, boo
     kick();
 }
 
+/* Settings > Forwarding: validated here (as settings_set would), stored by the bridge task. */
+static void act_save_forward(void *ctx, const char *always, const char *busy, const char *noanswer, uint16_t secs)
+{
+    (void)ctx;
+    always = always ? always : "";
+    busy = busy ? busy : "";
+    noanswer = noanswer ? noanswer : "";
+    if (!fits(always, sizeof(s_cold->fwd_always)) || !fits(busy, sizeof(s_cold->fwd_busy)) ||
+        !fits(noanswer, sizeof(s_cold->fwd_noanswer)) || !settings_fwd_target_ok(always) ||
+        !settings_fwd_target_ok(busy) || !settings_fwd_target_ok(noanswer) ||
+        secs < SETTINGS_FWD_NOANSWER_MIN || secs > SETTINGS_FWD_NOANSWER_MAX) {
+        ESP_LOGW(TAG, "forwarding settings invalid");
+        return;
+    }
+    xSemaphoreTake(b.mtx, portMAX_DELAY);
+    strlcpy(s_cold->fwd_always, always, sizeof(s_cold->fwd_always));
+    strlcpy(s_cold->fwd_busy, busy, sizeof(s_cold->fwd_busy));
+    strlcpy(s_cold->fwd_noanswer, noanswer, sizeof(s_cold->fwd_noanswer));
+    b.fwd_noanswer_s = secs;
+    b.fwd_pending = true;
+    xSemaphoreGive(b.mtx);
+    kick();
+}
+
 static const ui_actions_t s_actions = {
     .dial = act_dial,
     .answer = act_answer,
@@ -616,6 +647,7 @@ static const ui_actions_t s_actions = {
     .save_sounds = act_save_sounds,
     .save_call_features = act_save_call_features,
     .save_quiet = act_save_quiet,
+    .save_forward = act_save_forward,
 };
 
 /* ------------------------------------------------------------------ */
@@ -780,7 +812,7 @@ static void do_saves(void)
 {
     settings_t *st = &s_cold->save;
     static char ota_url[sizeof(b.ota_url)];
-    bool wifi, acc, cal, tm, ota, blf, vm, snd, feat, quiet;
+    bool wifi, acc, cal, tm, ota, blf, vm, snd, feat, quiet, fwd;
 
     xSemaphoreTake(b.mtx, portMAX_DELAY);
     bool dnd_set = b.dnd_pending;
@@ -802,7 +834,8 @@ static void do_saves(void)
     snd = b.snd_pending;
     feat = b.feat_pending;
     quiet = b.quiet_pending;
-    if (!wifi && !acc && !cal && !tm && !ota && !blf && !vm && !snd && !feat && !quiet) {
+    fwd = b.fwd_pending;
+    if (!wifi && !acc && !cal && !tm && !ota && !blf && !vm && !snd && !feat && !quiet && !fwd) {
         xSemaphoreGive(b.mtx);
         return;
     }
@@ -857,6 +890,12 @@ static void do_saves(void)
         st->quiet_end = b.quiet_end;
         st->quiet_allow_contacts = b.quiet_allow;
     }
+    if (fwd) {
+        strlcpy(st->fwd_always, s_cold->fwd_always, sizeof(st->fwd_always));
+        strlcpy(st->fwd_busy, s_cold->fwd_busy, sizeof(st->fwd_busy));
+        strlcpy(st->fwd_noanswer, s_cold->fwd_noanswer, sizeof(st->fwd_noanswer));
+        st->fwd_noanswer_s = b.fwd_noanswer_s;
+    }
     if (ota) {
         strlcpy(ota_url, b.ota_url, sizeof(ota_url));
         strlcpy(st->ota_url, ota_url, sizeof(st->ota_url));   /* remember what was installed from */
@@ -871,6 +910,7 @@ static void do_saves(void)
     b.snd_pending = false;
     b.feat_pending = false;
     b.quiet_pending = false;
+    b.fwd_pending = false;
     memset(b.wpass, 0, sizeof(b.wpass));
     memset(b.apass, 0, sizeof(b.apass));
     xSemaphoreGive(b.mtx);
@@ -880,10 +920,11 @@ static void do_saves(void)
     memset(st->sip_password, 0, sizeof(st->sip_password));
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "saving settings: %s", esp_err_to_name(err));
-    } else if (wifi || acc || cal || tm || blf || vm || snd || feat || quiet) {
-        ESP_LOGI(TAG, "settings saved from the UI:%s%s%s%s%s%s%s%s%s", wifi ? " wifi" : "", acc ? " account" : "",
+    } else if (wifi || acc || cal || tm || blf || vm || snd || feat || quiet || fwd) {
+        ESP_LOGI(TAG, "settings saved from the UI:%s%s%s%s%s%s%s%s%s%s", wifi ? " wifi" : "", acc ? " account" : "",
                  cal ? " touch-calibration" : "", tm ? " time" : "", blf ? " blf" : "", vm ? " vm_number" : "",
-                 snd ? " sounds" : "", feat ? " call-features" : "", quiet ? " quiet-hours" : "");
+                 snd ? " sounds" : "", feat ? " call-features" : "", quiet ? " quiet-hours" : "",
+                 fwd ? " forwarding" : "");
     }
     if (ota) {
         /* Progress and refusals (e.g. a call is active) come back through ota_get_status(). */

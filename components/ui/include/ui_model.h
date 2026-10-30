@@ -88,7 +88,8 @@ typedef enum {
     UI_CALLRES_ANSWERED,
     UI_CALLRES_MISSED,         /* incoming: not answered; outgoing: no answer / failed */
     UI_CALLRES_REJECTED,       /* declined by the user */
-    UI_CALLRES_DND,            /* refused by do-not-disturb */
+    UI_CALLRES_DND,            /* refused by do-not-disturb (or quiet hours) */
+    UI_CALLRES_FORWARDED,      /* sent on by call forwarding */
 } ui_call_result_t;
 
 typedef struct {
@@ -198,4 +199,10 @@ typedef struct {
     uint16_t quiet_end;        /* end <= start wraps past midnight */
     bool quiet_allow_contacts;
     bool quiet_active;
+    /* call forwarding (Settings > Forwarding): number or sip: URI, "" = off; the status bar
+     * shows FWD while fwd_always is set */
+    char fwd_always[UI_NUMBER_LEN];
+    char fwd_busy[UI_NUMBER_LEN];
+    char fwd_noanswer[UI_NUMBER_LEN];
+    uint16_t fwd_noanswer_s;   /* seconds of ringing before the no-answer forward (5-300) */
 } ui_model_t;

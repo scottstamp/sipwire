@@ -25,7 +25,7 @@ const buildDir = path.join(here, 'build');
 // Pixel positions used by the directory / sounds scenarios (tuned from screenshots).
 const KB_A = [52, 218];                         // 'a' on the text keyboard (bottom 160 px)
 const KB_L = [190, 218];                        // 'l'
-const SETTINGS_ROW = { sounds: 150, features: 204 };   // list rows after scrolling to the end
+const SETTINGS_ROW = { sounds: 150, features: 204, forwarding: 258 };   // list rows after the 180 px drag
 
 const SCENARIOS = {
   idle: () => {},
@@ -654,6 +654,29 @@ const SCENARIOS = {
     sim.set_battery(80, false);
     sim.set_quiet(1, '22:00', '07:00');
   },
+  fwd_badge: (sim) => {   // always-forward on: amber FWD badge (wins over DND and quiet hours)
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_time('23:15');
+    sim.set_battery(80, false);
+    sim.set_quiet(1, '22:00', '07:00');
+    sim.set_forward('1003', '', '', 20);
+  },
+  fwd_mwi_battery_worst: (sim) => {   // widest bar with the FWD badge
+    sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    sim.set_battery(100, true);
+    sim.set_mwi(1, 12, 0);
+    sim.set_forward('1003', '', '', 20);
+  },
+  history_forwarded: {   // forwarded calls in the history
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.history_add(0, 4, '1002', 'Bob Example', 0);
+      sim.history_add(0, 4, '5557890', '', 0);
+    },
+    steps: async (page, click) => {
+      await click(180, 240);    // History
+      await page.waitForTimeout(300);
+    },
+  },
   page_call: {   // auto-answered page on the loudspeaker
     sim: (sim) => {
       sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
@@ -934,6 +957,33 @@ const SCENARIOS = {
       await page.waitForTimeout(250);
       await click(200, 160);   // Auto-answer off
       await page.waitForTimeout(150);
+    },
+  },
+  settings_forward: {   // Settings > Forwarding, prefilled
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+      sim.set_forward('', '*97', '1003', 25);
+    },
+    steps: async (page, click, drag) => {
+      await click(207, 282);
+      await page.waitForTimeout(250);
+      await drag(120, 280, 120, 100);
+      await click(120, SETTINGS_ROW.forwarding);
+      await page.waitForTimeout(250);
+    },
+  },
+  settings_forward_kb: {   // typing the always target: dial pad keyboard
+    sim: (sim) => {
+      sim.set_net(2, -55); sim.set_reg(2); sim.set_time('12:34');
+    },
+    steps: async (page, click, drag) => {
+      await click(207, 282);
+      await page.waitForTimeout(250);
+      await drag(120, 280, 120, 100);
+      await click(120, SETTINGS_ROW.forwarding);
+      await page.waitForTimeout(250);
+      await click(120, 115);    // Always forward to
+      await page.waitForTimeout(250);
     },
   },
   settings_quiet: {   // Call features scrolled to the quiet hours rows, switched on (12 h clock)

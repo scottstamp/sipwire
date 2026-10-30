@@ -201,6 +201,15 @@ void ui_bridge_fill_quiet(ui_bridge_local_t *loc, bool on, uint16_t start_min, u
     loc->quiet_allow_contacts = allow_contacts;
 }
 
+void ui_bridge_fill_forward(ui_bridge_local_t *loc, const char *always, const char *busy, const char *noanswer,
+                            uint16_t noanswer_s)
+{
+    copy_or_empty(loc->fwd_always, sizeof(loc->fwd_always), always);
+    copy_or_empty(loc->fwd_busy, sizeof(loc->fwd_busy), busy);
+    copy_or_empty(loc->fwd_noanswer, sizeof(loc->fwd_noanswer), noanswer);
+    loc->fwd_noanswer_s = noanswer_s;
+}
+
 void ui_bridge_fill_fw(ui_bridge_local_t *loc, const char *version, const char *partition)
 {
     copy_or_empty(loc->fw_version, sizeof(loc->fw_version), version);
@@ -312,6 +321,10 @@ void ui_bridge_build_model(const ui_bridge_local_t *loc, const phone_status_t *p
     out->quiet_start = loc->quiet_start;
     out->quiet_end = loc->quiet_end;
     out->quiet_allow_contacts = loc->quiet_allow_contacts;
+    copy(out->fwd_always, sizeof(out->fwd_always), loc->fwd_always);
+    copy(out->fwd_busy, sizeof(out->fwd_busy), loc->fwd_busy);
+    copy(out->fwd_noanswer, sizeof(out->fwd_noanswer), loc->fwd_noanswer);
+    out->fwd_noanswer_s = loc->fwd_noanswer_s;
     out->quiet_active = loc->quiet_hours && loc->time_valid &&
                         phone_quiet_window(loc->quiet_start, loc->quiet_end, loc->hour * 60 + loc->minute);
     copy(out->missed_from, sizeof(out->missed_from), loc->missed_from);

@@ -75,7 +75,8 @@ xfer_state_t phone_xfer_map(sip_xfer_state_t st);
 
 /** SIP status reported as end_code: 0 for a normal hangup (either side),
  *  otherwise the final status (486, 603, 404...), 487 for a cancelled
- *  incoming call, 408 for a timeout without status. */
+ *  incoming call, 408 for a timeout without status, 302 for an incoming
+ *  call we forwarded. */
 int phone_end_code(sip_ua_end_reason_t reason, int status_code);
 
 /** Outgoing call refused with 486 Busy Here, 600 Busy Everywhere or 603 Decline. */
