@@ -7,3 +7,6 @@ CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 # PSRAM as on the device, but QEMU emulates quad (not octal) mode
 CONFIG_SPIRAM_MODE_QUAD=y
+# QEMU does not model DFS clock switching: no power management (power.c also skips it
+# under CONFIG_SIPWIRE_QEMU).
+# CONFIG_PM_ENABLE is not set

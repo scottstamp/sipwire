@@ -15,6 +15,7 @@ idf_component_register(
         net
         ota
         phone
+        power
         status_led
         storage
         ui

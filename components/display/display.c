@@ -23,6 +23,7 @@
 #include "sdkconfig.h"
 
 #include "board.h"
+#include "power.h"
 #include "settings.h"
 #include "sipwire_events.h"
 
@@ -100,9 +101,13 @@ static void bl_set_duty(uint32_t pct)
     ledc_update_duty(BL_LEDC_MODE, BL_LEDC_CHANNEL);
 }
 
-/* Caller holds bl_lock. */
+/* Caller holds bl_lock. Every backlight state change ends here, so this is also where the
+ * CPU frequency hold follows the screen: full speed while lit or dimmed (LVGL renders,
+ * touch / keys are answered), DFS minimum once the backlight is off. BL_INIT (boot) counts
+ * as lit. */
 static void bl_apply_locked(void)
 {
+    power_hold(POWER_HOLD_DISPLAY, s.bl_state != BL_OFF);
     switch (s.bl_state) {
     case BL_ON:
         bl_set_duty(s.bl_pct);
@@ -123,6 +128,7 @@ static esp_err_t bl_init(void)
     s.bl_lock = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(s.bl_lock, ESP_ERR_NO_MEM, TAG, "bl mutex");
     s.bl_present = board_cfg()->lcd.bl != GPIO_NUM_NC;
+    power_hold(POWER_HOLD_DISPLAY, true);   /* boot: first frames render at full speed */
     s.last_activity_us = esp_timer_get_time();
 
     if (s.bl_present) {

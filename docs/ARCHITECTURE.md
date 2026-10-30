@@ -15,6 +15,7 @@ components/
   sip/               minimal SIP UA: parser, digest auth, transactions, dialogs,
                      REGISTER / INVITE / ACK / BYE / CANCEL / OPTIONS, SDP,
                      SUBSCRIBE/NOTIFY for BLF (dialog) and MWI (message-summary)
+  power/             DFS policy (esp_pm, CPU_FREQ_MAX holds: call, display), console `power`
   cli/               serial REPL (esp_console): cfg/wifi/ip/free/tasks; console_register_command()
   net/               wifi manager, reconnect, SNTP, mDNS (optional)
   storage/           NVS config (settings)
@@ -192,6 +193,62 @@ worst frame is close to the average (icount max ~1.3-1.7 M instructions, ~7-9 ms
 QEMU runs the same code on a silent mic.
 Codec preference (settings `codec_pref`): G.722 > PCMU > PCMA. On the wire all
 three are 64 kbit/s with an 8000 Hz RTP clock (RFC 3551, G.722 included).
+
+## Power (`components/power`, `net`, console `power`)
+Rule: nothing that saves power may run while a call exists. `phone.c` `update_power()` runs
+on every foreground / background call state change and sets, for as long as any call exists
+(dialing, ringing in or out, active, held, call waiting, two calls, the ended screen):
+`net_set_low_latency(true)` (Wi-Fi `WIFI_PS_NONE`) and `power_hold(POWER_HOLD_CALL)` (CPU at
+full speed). Both drop when the phone is idle again.
+
+- **Wi-Fi modem sleep** (`net`): `WIFI_PS_MIN_MODEM` while idle. The radio sleeps between
+  beacons and wakes at every DTIM beacon; the AP buffers unicast frames for us meanwhile.
+  INVITE latency: up to one DTIM interval (beacon interval 102.4 ms x the AP's DTIM period;
+  DTIM 1-3 = 0.1-0.3 s worst case, half that on average); after an ARP cache expiry the
+  PBX's ARP request is also buffered, so up to two intervals. SIP T1 is 500 ms, so at DTIM <= 3
+  the INVITE is not even retransmitted; ringing starts within ~0.3 s. Keep the AP's DTIM at
+  1-3. `WIFI_PS_MAX_MODEM` (listen interval) is not used: it multiplies this latency.
+  During calls modem sleep is off: DTIM-paced RTP delivery underruns the jitter buffer.
+- **Dynamic frequency scaling** (`power`, `CONFIG_PM_ENABLE`, board Kconfig
+  `SIPWIRE_POWER_DFS` / `SIPWIRE_POWER_MIN_CPU_MHZ`): `esp_pm_configure` max =
+  `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ` (240), min = 80, light sleep off. One
+  `ESP_PM_CPU_FREQ_MAX` lock per reason: `call` (above) and `display` (backlight on or dimmed,
+  incl. boot; `display.c` `bl_apply_locked`). So the CPU is at 80 MHz only when idle with the
+  backlight off; a key, touch or incoming call takes it back to 240 before anything renders
+  or plays. Why min 80, not 40 (XTAL): from 80 MHz up the CPU runs from the PLL and APB stays
+  80 MHz, so no peripheral clock ever changes. Driver check: UART console (APB source),
+  LEDC backlight (`LEDC_AUTO_CLK`, APB), SPI LCD + XPT2046 (spi_master takes its own APB lock
+  per transaction), I2S (PLL_F160M source, its driver holds a PM lock while enabled; calls
+  hold `call` anyway), RMT status LED (APB, own lock), keypad (GPIO + esp_timer), esp_timer
+  (SYSTIMER, XTAL), PSRAM/flash (MSPI, PLL) and FreeRTOS run-time stats (esp_timer) all
+  ignore CPU-only changes. The QEMU build has `CONFIG_PM_ENABLE` off and `power.c` skips DFS
+  under `CONFIG_SIPWIRE_QEMU` (QEMU does not model the clock switching).
+- **Audio hardware** (`audio.c`): the stream (tones, ringtone, call) starts on demand and
+  stops when the phone has nothing to play; stopping fades out 20 ms, writes silence, drives
+  the amp SD_MODE low (MAX98357A shutdown) and disables both I2S channels (BCLK stops, the
+  MEMS mic sleeps without a clock). Starting primes the DMA with one silent frame before the
+  amp wakes (no pop), so the ringtone starts ~20-40 ms after the INVITE is processed.
+  Gap closed: a tone-only stream started outside a call (ringtone preview in Settings >
+  Sounds, console `ring`) used to keep I2S + amp running after `stop` until the next call
+  ended. Now a stream with no callbacks whose tone has stopped (or a one-shot ended) for 2 s
+  is stopped by `idle_stop_cb` (esp_timer, under `api_mtx`, so it cannot race
+  `audio_start`; a tone requested meanwhile stays queued and restarts the stream). Phone
+  tones (ring, ringback, busy) loop, so no call path is affected.
+- **Automatic light sleep: not used**, deliberately (no setting either). What it would need
+  and why it is not safe to switch on without device measurements:
+  backlight PWM (LEDC on APB) stops in light sleep, so it could only run with the backlight
+  off; the keypad is a polled matrix scan (esp_timer), whose periodic timer would wake the
+  chip every scan period and remove most of the gain, and GPIO wake on a key needs the rows
+  parked low and the columns armed as wake sources (not implemented); XPT2046 PENIRQ would
+  need the same; the console UART loses the first characters typed while asleep; the LVGL
+  tick (esp_timer) and timer task wake periodically; Wi-Fi stays associated in light sleep
+  and still wakes at DTIM, but INVITE wake-up latency and beacon loss with
+  `PM_SLP_IRAM_OPT` etc. have to be measured on the device, and QEMU cannot show any of
+  it. Possible later steps, in order: ILI9341 SLPIN while the backlight is off (a few mA,
+  needs the LVGL lock around the panel commands), then light sleep only with the backlight
+  off and no call, keypad as a GPIO wake source, behind a setting defaulting off.
+- **Console `power`**: current CPU MHz, DFS range, active holds (`call`, `display`), Wi-Fi
+  power save mode; `power locks` dumps the IDF PM lock table (`esp_pm_dump_locks`).
 
 ## Config (NVS)
 wifi ssid/pass, sip server/port/transport, user, auth user, password,

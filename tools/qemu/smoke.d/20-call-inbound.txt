@@ -24,10 +24,15 @@ do history clear
 # 3: inbound call, answer, remote ends (Wait 1: Asterisk hangs up 1 s after we answer)
 shell ($ASTX 'channel originate PJSIP/1001 application Wait 1' >/dev/null 2>&1 &)
 expect call: ringing-in 10
+# power: the call hold (Wi-Fi PS off + full CPU on hardware) is on from the first ring
+do power
+expect ^holds\s+: call
 do answer
 expect call: active 5
 expect call: ended .*\(code 0\) 10
 expect call: idle 5
+do power
+expect ^holds\s+: (none|display$)
 
 # 4: inbound call rejected 486 by hangup (no busy tone for us)
 shell ($ASTX 'channel originate PJSIP/1001 application Wait 1' >/dev/null 2>&1 &)
@@ -64,3 +69,12 @@ expect registration: not registered
 do tasks
 do cpu 1
 expect ^IDLE0\s+0\s+\d+\.\d 5
+
+# 9: idle power: a ringtone preview stopped while idle must not leave I2S + amp running
+# (`ring` only plays while idle: wait out the ended screen of the refused call to 777)
+poll 10 ^call:\s+idle :: sip
+do ring 0
+expect audio: streaming started 5
+do ring stop
+expect audio: idle: stopping tone-only stream 6
+expect audio: streaming stopped 3

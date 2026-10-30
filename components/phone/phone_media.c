@@ -23,7 +23,6 @@
 #include <netinet/in.h>
 
 #include "audio.h"
-#include "net.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_random.h"
@@ -316,7 +315,6 @@ void phone_media_update(const sip_media_info_t *mi)
     int new_fd = -1;
     bool need_socket;
 
-    net_set_low_latency(true);      /* idempotent; undone in teardown */
     lock();
     if (m.fd >= 0 && m.local_port != mi->local_port) {
         release_fd_locked();        /* should not happen within one call */
@@ -419,7 +417,6 @@ void phone_media_teardown(void)
     recompute_locked();
     unlock();
     close_pending();
-    net_set_low_latency(false);
 }
 
 void phone_media_set_server_ip(uint32_t ip)

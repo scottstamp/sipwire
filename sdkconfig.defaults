@@ -56,3 +56,8 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # (net, display); the bridge restarts SNTP from the event loop task.
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=3584
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
+
+# Power (components/power, docs/ARCHITECTURE.md "Power"): dynamic frequency scaling. The CPU
+# drops to CONFIG_SIPWIRE_POWER_MIN_CPU_MHZ (80) only with no call and the backlight off.
+# No automatic light sleep (FREERTOS_USE_TICKLESS_IDLE stays off).
+CONFIG_PM_ENABLE=y

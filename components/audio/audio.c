@@ -8,6 +8,7 @@
 #include "driver/i2s_std.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -36,6 +37,9 @@ _Static_assert(AUDIO_I2S_RATE == 16000, "I2S clocking below assumes 16 kHz");
 #define RX_STACK_BYTES          6144
 
 #define DC_BLOCK_HZ             20
+/* A tone-only stream (no callbacks: ringtone preview, console `ring`) whose tone has stopped
+ * or ended is shut down after this long, so I2S and the amp do not stay on while idle. */
+#define IDLE_STOP_FRAMES        (2000 / 20)
 #define DEFAULT_VOLUME          70
 
 #define EVT_TX_DONE             BIT0
@@ -57,6 +61,8 @@ static struct {
     EventGroupHandle_t done;
     atomic_bool running;
     atomic_bool stop;
+    atomic_bool idle_stopping;      /* tx_task armed idle_timer; tone requests wait in req_* */
+    esp_timer_handle_t idle_timer;
     audio_source_cb_t src;
     audio_sink_cb_t sink;
     void *ctx;
@@ -281,6 +287,7 @@ static void tx_task(void *arg)
 
     int32_t vol_g = dsp_gain_q15(atomic_load(&s.volume));
     int32_t fade = 0;
+    int idle_frames = 0;
 
     for (;;) {
         bool stopping = atomic_load(&s.stop);
@@ -289,14 +296,26 @@ static void tx_task(void *arg)
         }
         int32_t fade_to = stopping ? 0 : DSP_GAIN_UNITY;     /* 20 ms fade in / out */
 
-        tone_poll(&tone);
+        bool idle_stopping = atomic_load(&s.idle_stopping);
+        if (!idle_stopping) {
+            tone_poll(&tone);       /* while stopping, a request stays queued for idle_stop_cb */
+        }
 
         memset(src, 0, sizeof(src));
         xSemaphoreTake(s.cb_mtx, portMAX_DELAY);
+        bool have_cb = s.src != NULL || s.sink != NULL;
         if (s.src) {
             s.src(src, s.ctx);
         }
         xSemaphoreGive(s.cb_mtx);
+
+        if (have_cb || dsp_tone_active(&tone) || stopping || idle_stopping) {
+            idle_frames = 0;
+        } else if (++idle_frames >= IDLE_STOP_FRAMES) {
+            idle_frames = 0;
+            atomic_store(&s.idle_stopping, true);
+            esp_timer_start_once(s.idle_timer, 0);
+        }
 
         for (int i = 0; i < AUDIO_FRAME_SAMPLES; i++) {
             mix[i] = src[i];
@@ -401,6 +420,8 @@ static void rx_task(void *arg)
 /* start / stop                                                       */
 /* ------------------------------------------------------------------ */
 
+static void post_tone_req(tone_req_kind_t kind, audio_tone_t tone, char digit);
+
 /* Caller holds api_mtx. */
 static esp_err_t stream_start_locked(void)
 {
@@ -412,6 +433,7 @@ static esp_err_t stream_start_locked(void)
     bool tx_en = false, rx_en = false, tx_task_up = false;
 
     atomic_store(&s.stop, false);
+    atomic_store(&s.idle_stopping, false);
     xEventGroupClearBits(s.done, EVT_TX_DONE | EVT_RX_DONE);
 
     audio_aec_session_start();          /* I2S sample indices restart with the channels */
@@ -484,6 +506,36 @@ static void stream_stop_locked(void)
     ESP_LOGI(TAG, "streaming stopped");
 }
 
+/* esp_timer task, armed by tx_task after IDLE_STOP_FRAMES of a tone-only stream with no tone
+ * playing. Blocks the timer task for the 20 ms fade-out. Under api_mtx, so it cannot race
+ * audio_start/audio_stop: it only stops if still no callback is installed. */
+static void idle_stop_cb(void *arg)
+{
+    (void)arg;
+    xSemaphoreTake(s.api_mtx, portMAX_DELAY);
+    if (atomic_load(&s.running) && atomic_load(&s.idle_stopping)) {
+        xSemaphoreTake(s.cb_mtx, portMAX_DELAY);
+        bool have_cb = s.src != NULL || s.sink != NULL;
+        xSemaphoreGive(s.cb_mtx);
+        if (!have_cb) {
+            ESP_LOGI(TAG, "idle: stopping tone-only stream");
+            stream_stop_locked();
+            /* a tone requested on the fast path meanwhile is still queued: play it */
+            portENTER_CRITICAL(&s.req_mux);
+            tone_req_kind_t kind = s.req_kind;
+            audio_tone_t tone = s.req_tone;
+            char digit = s.req_digit;
+            portEXIT_CRITICAL(&s.req_mux);
+            if (kind != REQ_NONE && !(kind == REQ_TONE && tone == AUDIO_TONE_NONE) &&
+                stream_start_locked() == ESP_OK) {
+                post_tone_req(kind, tone, digit);
+            }
+        }
+    }
+    atomic_store(&s.idle_stopping, false);
+    xSemaphoreGive(s.api_mtx);
+}
+
 /* ------------------------------------------------------------------ */
 /* public API                                                         */
 /* ------------------------------------------------------------------ */
@@ -506,6 +558,8 @@ esp_err_t audio_init(void)
     /* speaker sample i is heard at mic sample i + one full TX DMA ring (see audio_aec.h) */
     ESP_GOTO_ON_ERROR(audio_aec_init(I2S_DMA_DESC_NUM * I2S_CHUNK_SAMPLES, I2S_CHUNK_SAMPLES), err, TAG,
                       "aec init");
+    const esp_timer_create_args_t idle_args = { .callback = idle_stop_cb, .name = "audio_idle" };
+    ESP_GOTO_ON_ERROR(esp_timer_create(&idle_args, &s.idle_timer), err, TAG, "idle timer");
     ESP_GOTO_ON_ERROR(amp_init(), err, TAG, "amp init");
     ESP_GOTO_ON_ERROR(i2s_setup(), err, TAG, "i2s setup");
 
@@ -515,6 +569,10 @@ esp_err_t audio_init(void)
              s.cfg->mic.slot_right ? "right" : "left", s.cfg->mic.shift);
     return ESP_OK;
 err:
+    if (s.idle_timer) {
+        esp_timer_delete(s.idle_timer);
+        s.idle_timer = NULL;
+    }
     if (s.api_mtx) {
         vSemaphoreDelete(s.api_mtx);
         s.api_mtx = NULL;
