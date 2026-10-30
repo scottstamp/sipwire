@@ -14,4 +14,4 @@ expect \bsip_server\s+=
 expect registration: registered 20
 do sip
 expect registration: registered
-shell $ASTX 'pjsip show contacts' | tee /dev/stderr | grep -q '1001/sip:1001@'
+shell $ASTX 'pjsip show contacts' | tee -a /dev/stderr | grep -q '1001/sip:1001@'

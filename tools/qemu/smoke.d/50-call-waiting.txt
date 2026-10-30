@@ -3,8 +3,8 @@ include _account.inc
 
 # DND: refused with 486 without ringing, reported as a missed call
 do dnd on
-expect ^do not disturb on 5
-# the setting reaches the SIP task a moment after the reply
+# the SIP task's log line: it can come before or after the console reply (the task wakes on
+# the command at once), so only this one is expected
 expect phone: do not disturb on 5
 shell ($ASTX 'channel originate PJSIP/1001 application Wait 1' >/dev/null 2>&1 &)
 expect missed call from .*\(do not disturb, 486\) 10
@@ -15,7 +15,6 @@ expect \sin\s+dnd\s
 expect ^1 calls, 0 unseen missed
 do history clear
 do dnd off
-expect ^do not disturb off 5
 expect phone: do not disturb off 5
 
 # page (Call-Info: <...>;answer-after=0 on the INVITE, extension 650): answered at once on
