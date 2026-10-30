@@ -42,6 +42,13 @@ static const char *TAG = "display";
 #define DRAW_BUF_DIVIDER    10                /* each draw buffer = 1/10 screen */
 #define SWALLOW_GAP_US      (250 * 1000)      /* touch "release" = no sample for this long */
 #define XPT2046_ADC_MAX     4096
+#define TOUCH_REARM_US      (30 * 1000)       /* finger still down but not reported: next look */
+/* LVGL task: longest sleep with no LVGL timer due. Anything that needs it sooner wakes it
+ * (touch interrupt, lv_timer resume / display invalidation via the resume callback). */
+#define LVGL_MAX_SLEEP_MS   2000
+/* esp_lvgl_port's periodic lv_tick_inc() timer would wake the chip every 5 ms; LVGL reads its
+ * clock from esp_timer instead (lv_tick_set_cb) and the port's timer is slowed to ~17 min. */
+#define LVGL_PORT_TICK_MS   1000000
 
 typedef enum {
     BL_INIT = 0,    /* waiting for the first frame; backlight stays off */
@@ -65,7 +72,7 @@ static struct {
     uint8_t bl_pct;                 /* user brightness (settings), guarded by bl_lock */
     volatile uint32_t bl_timeout_s; /* 0 = never */
     volatile int64_t last_activity_us;
-    esp_timer_handle_t bl_tick;
+    esp_timer_handle_t bl_tick;         /* runs only while the backlight is on or dimmed */
     esp_timer_handle_t bl_first;
     bool first_flushed;             /* touched only from the LVGL task */
     bool first_done;
@@ -74,6 +81,11 @@ static struct {
     touch_cal_t cal;                /* guarded by cal_lock */
     bool swallow;                   /* first touch while backlight off: eat until release */
     int64_t swallow_last_us;        /* touched only from the LVGL task */
+
+    /* touch interrupt (level, also the light-sleep wake source) */
+    gpio_num_t touch_irq;
+    esp_timer_handle_t touch_rearm;
+    bool touch_raw;                 /* last read saw the panel touched (before swallow / hook) */
 
     /* raw touch hook (calibration); all of this is touched only with the LVGL lock held */
     esp_lcd_touch_handle_t tp;
@@ -84,6 +96,7 @@ static struct {
     int32_t raw_x, raw_y;
 } s = {
     .cal_lock = portMUX_INITIALIZER_UNLOCKED,
+    .touch_irq = GPIO_NUM_NC,
 };
 
 /* ------------------------------------------------------------------ backlight */
@@ -109,6 +122,14 @@ static void bl_apply_locked(void)
 {
     bool lit = s.bl_state != BL_OFF;
     power_hold(POWER_HOLD_DISPLAY, lit);
+    /* the dim/off check has nothing to do while the backlight is off: no 2 Hz wake-ups then */
+    if (s.bl_tick) {
+        if (lit) {
+            esp_timer_start_periodic(s.bl_tick, BL_TICK_US);    /* ESP_ERR_INVALID_STATE if running */
+        } else {
+            esp_timer_stop(s.bl_tick);
+        }
+    }
     static int8_t s_lit_posted = -1;    /* last DISPLAY_EVENT_BACKLIGHT value (-1: none yet) */
     if (s_lit_posted != (int8_t)lit) {
         /* status LED: dark while the screen is off (night) */
@@ -343,6 +364,7 @@ static void touch_process_coordinates(esp_lcd_touch_handle_t tp, uint16_t *x, ui
     if (*point_num == 0) {
         return;
     }
+    s.touch_raw = true;
     int64_t now = esp_timer_get_time();
 
     /* A touch that woke a dark screen must not act on whatever is under the finger:
@@ -386,6 +408,34 @@ static void touch_process_coordinates(esp_lcd_touch_handle_t tp, uint16_t *x, ui
     }
 }
 
+/* PENIRQ, level low: wakes the LVGL task (and the chip from light sleep, same level). Masked
+ * here until a read finds the panel released, so a held finger does not keep firing it;
+ * LVGL's own read timer samples while it reports a press. */
+static void touch_isr(void *arg)
+{
+    gpio_intr_disable(s.touch_irq);
+    lvgl_port_task_wake(LVGL_PORT_EVENT_TOUCH, arg);
+}
+
+static void touch_rearm_cb(void *arg)
+{
+    (void)arg;
+    gpio_intr_enable(s.touch_irq);
+}
+
+/* LVGL task. 0: unmask now (a touch already down fires at once), else after delay_us. */
+static void touch_irq_arm(uint32_t delay_us)
+{
+    if (s.touch_irq == GPIO_NUM_NC) {
+        return;
+    }
+    if (delay_us == 0 || s.touch_rearm == NULL) {
+        gpio_intr_enable(s.touch_irq);
+    } else {
+        esp_timer_start_once(s.touch_rearm, delay_us);          /* ESP_ERR_INVALID_STATE if armed */
+    }
+}
+
 /* Replaces esp_lvgl_port's indev read callback (same job: read the controller, report the first
  * point) so a release can be reported to the raw hook too; process_coordinates only runs on
  * samples with a touch. */
@@ -396,9 +446,16 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     uint8_t cnt = 0;
 
     s.raw_have = false;
+    s.touch_raw = false;
     if (esp_lcd_touch_read_data(s.tp) != ESP_OK ||
         esp_lcd_touch_get_data(s.tp, pt, &cnt, 1) != ESP_OK) {
         cnt = 0;
+    }
+    if (cnt == 0) {
+        /* LVGL sees no press, so its read timer stops: the interrupt takes over again. While
+         * the finger is still down (swallowed wake-up touch, calibration hook) look again in
+         * TOUCH_REARM_US instead of at once, or the level interrupt would re-fire per read. */
+        touch_irq_arm(s.touch_raw ? TOUCH_REARM_US : 0);
     }
 
     display_touch_raw_cb_t cb = s.raw_cb;
@@ -482,6 +539,18 @@ static esp_err_t touch_init(lv_display_t *disp)
         lv_indev_set_read_cb(indev, touch_read_cb);
         lvgl_port_unlock();
     }
+    if (b->touch.irq != GPIO_NUM_NC) {
+        /* esp_lcd_touch armed a falling-edge interrupt, which cannot wake the chip from light
+         * sleep. Swap in a level-low interrupt (wake source too) with our own masking ISR. */
+        const esp_timer_create_args_t ra = { .callback = touch_rearm_cb, .name = "touch_rearm" };
+        ESP_RETURN_ON_ERROR(esp_timer_create(&ra, &s.touch_rearm), TAG, "touch timer");
+        gpio_intr_disable(b->touch.irq);
+        ESP_RETURN_ON_ERROR(gpio_isr_handler_remove(b->touch.irq), TAG, "touch isr remove");
+        s.touch_irq = b->touch.irq;
+        ESP_RETURN_ON_ERROR(gpio_isr_handler_add(b->touch.irq, touch_isr, indev), TAG, "touch isr");
+        ESP_RETURN_ON_ERROR(gpio_wakeup_enable(b->touch.irq, GPIO_INTR_LOW_LEVEL), TAG, "touch wake");
+        ESP_RETURN_ON_ERROR(gpio_intr_enable(b->touch.irq), TAG, "touch intr");
+    }
     ESP_LOGI(TAG, "touch xpt2046: cs=%d irq=%d %d Hz (%s)", b->touch.cs, b->touch.irq, (int)io_cfg.pclk_hz,
              b->touch.irq == GPIO_NUM_NC ? "polling" : "interrupt");
     return ESP_OK;
@@ -493,6 +562,36 @@ esp_err_t display_touch_calibrate_start(void)
 }
 
 /* ------------------------------------------------------------------------ LCD */
+
+static uint32_t lvgl_tick_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+/* Any task, under the LVGL lock: a timer was created / resumed / made ready (incl. the display
+ * refresh timer on invalidation): end the LVGL task's sleep so it runs now. */
+static void lvgl_resume_cb(void *data)
+{
+    (void)data;
+    lvgl_port_task_wake(LVGL_PORT_EVENT_USER, NULL);
+}
+
+/* LVGL port (task + tick), once. Idle wake-ups: none from LVGL itself except due lv_timers and
+ * one per LVGL_MAX_SLEEP_MS. */
+static esp_err_t lvgl_start(void)
+{
+    lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    port_cfg.task_affinity = 0;
+    port_cfg.task_stack = 8192;
+    port_cfg.task_max_sleep_ms = LVGL_MAX_SLEEP_MS;
+    port_cfg.timer_period_ms = LVGL_PORT_TICK_MS;
+    ESP_RETURN_ON_ERROR(lvgl_port_init(&port_cfg), TAG, "lvgl_port_init");
+    lvgl_port_lock(0);
+    lv_tick_set_cb(lvgl_tick_ms);
+    lv_timer_handler_set_resume_cb(lvgl_resume_cb, NULL);
+    lvgl_port_unlock();
+    return ESP_OK;
+}
 
 #if CONFIG_SIPWIRE_QEMU
 /* QEMU smoke-test build: no SPI panel, LVGL renders into a discarding display. */
@@ -506,10 +605,7 @@ static void qemu_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
 static esp_err_t display_init_qemu(lv_display_t **out_disp)
 {
     const board_cfg_t *b = board_cfg();
-    lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
-    port_cfg.task_affinity = 0;
-    port_cfg.task_stack = 8192;
-    ESP_RETURN_ON_ERROR(lvgl_port_init(&port_cfg), TAG, "lvgl_port_init");
+    ESP_RETURN_ON_ERROR(lvgl_start(), TAG, "lvgl");
 
     const size_t buf_size = (size_t)b->lcd.h_res * 40 * sizeof(lv_color16_t);
     void *buf = lv_malloc(buf_size);
@@ -573,10 +669,7 @@ esp_err_t display_init(lv_display_t **out_disp)
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(panel, true), TAG, "disp on");
 
     /* LVGL port (task + tick), once. */
-    lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
-    port_cfg.task_affinity = 0;
-    port_cfg.task_stack = 8192;
-    ESP_RETURN_ON_ERROR(lvgl_port_init(&port_cfg), TAG, "lvgl_port_init");
+    ESP_RETURN_ON_ERROR(lvgl_start(), TAG, "lvgl");
 
     /* Draw buffers: 1/10 screen each, double buffered, internal DMA RAM. One flush is a
      * single SPI transaction, so it must fit max_transfer_sz set in board_init()
@@ -621,7 +714,9 @@ esp_err_t display_init(lv_display_t **out_disp)
     const esp_timer_create_args_t tick_args = { .callback = bl_tick_cb, .name = "bl_tick" };
     ESP_RETURN_ON_ERROR(esp_timer_create(&first_args, &s.bl_first), TAG, "timer");
     ESP_RETURN_ON_ERROR(esp_timer_create(&tick_args, &s.bl_tick), TAG, "timer");
-    ESP_RETURN_ON_ERROR(esp_timer_start_periodic(s.bl_tick, BL_TICK_US), TAG, "timer start");
+    xSemaphoreTake(s.bl_lock, portMAX_DELAY);
+    bl_apply_locked();                  /* starts bl_tick unless the backlight is off */
+    xSemaphoreGive(s.bl_lock);
     if (lvgl_port_lock(0)) {
         lv_display_add_event_cb(disp, flush_finish_cb, LV_EVENT_FLUSH_FINISH, NULL);
         lv_display_add_event_cb(disp, refr_ready_cb, LV_EVENT_REFR_READY, NULL);

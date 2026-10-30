@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include <arpa/inet.h>
 
 #include "audio.h"
@@ -30,6 +31,7 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include "esp_vfs_eventfd.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -49,7 +51,11 @@ static const char *SIP_TAG = "sip";
 #define SIP_TASK_PRIO           5
 #define SIP_TASK_CORE           0
 #define CMD_QUEUE_LEN           8
-#define POLL_MS                 20
+#define POLL_MS                 20          /* fallback wait without the wake eventfd; error back-off */
+#define MAX_WAIT_MS             2000        /* sip task: longest block even with no deadline (safety net) */
+#define DTMF_BUSY_RETRY_MS      20          /* previous RFC 4733 event still being sent */
+#define SPIN_LIMIT              16          /* consecutive zero waits before forcing a short sleep */
+#define SPIN_WAIT_MS            10
 #define UNREG_WAIT_MS           2000
 #define RETRY_MS                10000       /* DNS / socket / create failure */
 #define VOLUME_SAVE_DELAY_MS    3000    /* debounce: one NVS write per burst of +/- presses */
@@ -108,6 +114,7 @@ static struct {
     bool inited;
     TaskHandle_t task;
     QueueHandle_t q;
+    int wake_fd;                        /* eventfd: ends the sip task's select() early, -1 = none */
     SemaphoreHandle_t st_mtx;
     _Atomic uint32_t net_ip;            /* host order, from NET_EVENT_GOT_IP */
 
@@ -152,11 +159,28 @@ static struct {
     sip_sub_handle_t blf_h[SIPWIRE_BLF_MAX];
 } s = {
     .udp = { .fd = -1 },
+    .wake_fd = -1,
 };
 
 static uint64_t now_ms(void)
 {
     return (uint64_t)(esp_timer_get_time() / 1000);
+}
+
+/* The sip task blocks in select() until its next deadline; anything another task hands it
+ * (a command, a notify bit, a new deadline) must end that wait. Any task, not an ISR. */
+static void wake_sip_task(void)
+{
+    if (s.wake_fd >= 0) {
+        const uint64_t one = 1;
+        (void)!write(s.wake_fd, &one, sizeof(one));
+    }
+}
+
+static void notify_sip_task(uint32_t bits)
+{
+    xTaskNotify(s.task, bits, eSetBits);
+    wake_sip_task();
 }
 
 static void st_lock(void)
@@ -1597,7 +1621,9 @@ static void housekeeping(uint64_t now)
     char d = phone_dtmf_seq_due(&s.dtmf, now);
     if (d) {
         phone_dtmf_res_t r = phone_media_send_dtmf(d);
-        if (r != PHONE_DTMF_BUSY) {
+        if (r == PHONE_DTMF_BUSY) {
+            phone_dtmf_seq_defer(&s.dtmf, now + DTMF_BUSY_RETRY_MS);
+        } else {
             phone_dtmf_seq_consume(&s.dtmf, now);
             audio_play_dtmf(d);
             if (r == PHONE_DTMF_UNAVAILABLE) {
@@ -1640,9 +1666,39 @@ static void housekeeping(uint64_t now)
     }
 }
 
+/* Earliest time housekeeping() or the UA has work, UINT64_MAX = none. Mirrors the
+ * conditions in housekeeping(); everything else arrives as a packet, a command or a notify,
+ * and each of those ends the wait (socket / wake_fd). */
+static uint64_t next_deadline(void)
+{
+    uint64_t d = s.ua ? sip_ua_next_deadline_ms(s.ua) : UINT64_MAX;
+    if (s.closing) {
+        d = phone_deadline_min(d, s.close_deadline);
+    }
+    if (s.need_ua && s.ua == NULL) {
+        d = phone_deadline_min(d, s.retry_at);
+    }
+    if (s.state == SIP_UA_CALL_ENDED) {
+        d = phone_deadline_min(d, s.ended_until);
+    }
+    if (s.aa_pending) {
+        d = phone_deadline_min(d, s.aa_at);
+    }
+    d = phone_deadline_min(d, phone_dtmf_seq_next_ms(&s.dtmf));
+    st_lock();
+    if (s.vol_dirty) {
+        d = phone_deadline_min(d, s.vol_save_at);
+    }
+    st_unlock();
+    return d;
+}
+
+/* Event-driven: one pass per received datagram, command, notify or deadline instead of a
+ * fixed 20 ms poll (idle: one wake-up per MAX_WAIT_MS at most, besides the SIP keepalive). */
 static void sip_task(void *arg)
 {
     (void)arg;
+    unsigned zero_waits = 0;
     for (;;) {
         uint32_t bits = 0;
         xTaskNotifyWait(0, UINT32_MAX, &bits, 0);
@@ -1655,15 +1711,33 @@ static void sip_task(void *arg)
         }
         /* NOTIFY_NET_DOWN: keep the UA; it retries and is rebuilt on GOT_IP */
 
+        now = now_ms();
+        uint32_t wait = phone_wait_ms(now, next_deadline(), s.wake_fd >= 0 ? MAX_WAIT_MS : POLL_MS);
+        if (uxQueueMessagesWaiting(s.q) > 0) {
+            wait = 0;
+        }
+        if (wait > 0) {
+            zero_waits = 0;
+        } else if (++zero_waits > SPIN_LIMIT) {
+            /* a deadline that stays due without anything happening is a bug, but it must never
+             * starve the lower-priority tasks on this core */
+            if (zero_waits == SPIN_LIMIT + 1) {
+                ESP_LOGW(TAG, "sip task: deadline stays due, throttling");
+            }
+            wait = SPIN_WAIT_MS;
+        }
+
         phone_cmd_t cmd;
         bool have_cmd = false;
-        if (s.ua) {
-            if (sip_udp_poll(&s.udp, s.ua, POLL_MS) < 0) {
+        if (s.ua || s.wake_fd >= 0) {
+            if (sip_udp_poll_wake(&s.udp, s.ua, (int)wait, s.wake_fd) < 0) {
                 vTaskDelay(pdMS_TO_TICKS(POLL_MS));     /* socket error: don't spin */
             }
-            sip_ua_tick(s.ua, now_ms());
         } else {
-            have_cmd = xQueueReceive(s.q, &cmd, pdMS_TO_TICKS(POLL_MS)) == pdTRUE;
+            have_cmd = xQueueReceive(s.q, &cmd, pdMS_TO_TICKS(wait)) == pdTRUE;
+        }
+        if (s.ua) {
+            sip_ua_tick(s.ua, now_ms());
         }
 
         now = now_ms();
@@ -1685,12 +1759,12 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     if (base == SIPWIRE_NET_EVENT && id == NET_EVENT_GOT_IP && data) {
         const net_event_ip_t *ev = data;
         atomic_store(&s.net_ip, ntohl(ev->ip));
-        xTaskNotify(s.task, NOTIFY_NET_UP, eSetBits);
+        notify_sip_task(NOTIFY_NET_UP);
     } else if (base == SIPWIRE_NET_EVENT && id == NET_EVENT_DISCONNECTED) {
         atomic_store(&s.net_ip, 0);     /* no new UA until the next GOT_IP */
-        xTaskNotify(s.task, NOTIFY_NET_DOWN, eSetBits);
+        notify_sip_task(NOTIFY_NET_DOWN);
     } else if (base == SIPWIRE_SETTINGS_EVENT && id == SETTINGS_EVENT_CHANGED) {
-        xTaskNotify(s.task, NOTIFY_SETTINGS, eSetBits);
+        notify_sip_task(NOTIFY_SETTINGS);
     }
 }
 
@@ -1705,6 +1779,16 @@ esp_err_t phone_init(void)
     s.q = xQueueCreate(CMD_QUEUE_LEN, sizeof(phone_cmd_t));
     ESP_RETURN_ON_FALSE(s.st_mtx && s.q, ESP_ERR_NO_MEM, TAG, "no memory");
     ESP_RETURN_ON_ERROR(phone_media_init(), TAG, "media init");
+
+    /* wake-up channel for the sip task's select(); without it the task polls every POLL_MS */
+    const esp_vfs_eventfd_config_t efd_cfg = ESP_VFS_EVENTD_CONFIG_DEFAULT();
+    esp_err_t efd_err = esp_vfs_eventfd_register(&efd_cfg);
+    if (efd_err == ESP_OK || efd_err == ESP_ERR_INVALID_STATE) {   /* INVALID_STATE: registered */
+        s.wake_fd = eventfd(0, 0);
+    }
+    if (s.wake_fd < 0) {
+        ESP_LOGW(TAG, "no eventfd (%s): sip task polls every %d ms", esp_err_to_name(efd_err), POLL_MS);
+    }
 
     settings_get(&s.acc);
     blf_apply(s.acc.blf);               /* the sip task does not run yet */
@@ -1743,7 +1827,7 @@ esp_err_t phone_init(void)
     uint32_t ip;
     if (net_is_connected() && sip_ip_parse(net_ip_str(), &ip)) {
         atomic_store(&s.net_ip, ip);
-        xTaskNotify(s.task, NOTIFY_NET_UP, eSetBits);
+        notify_sip_task(NOTIFY_NET_UP);
     }
 
     ESP_RETURN_ON_ERROR(phone_console_register(), TAG, "console commands");
@@ -1758,6 +1842,7 @@ static esp_err_t send_cmd(const phone_cmd_t *c)
         ESP_LOGW(TAG, "command queue full");
         return ESP_ERR_TIMEOUT;
     }
+    wake_sip_task();
     return ESP_OK;
 }
 
@@ -1915,6 +2000,7 @@ void phone_set_volume(uint8_t volume)
     s.vol_save_at = now_ms() + VOLUME_SAVE_DELAY_MS;
     s.st.volume = volume;
     st_unlock();
+    wake_sip_task();                    /* new deadline */
     audio_set_volume(volume);
 }
 

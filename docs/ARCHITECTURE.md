@@ -281,7 +281,7 @@ Rule: nothing that saves power may run while a call exists. `phone.c` `update_po
 on every foreground / background call state change and sets, for as long as any call exists
 (dialing, ringing in or out, active, held, call waiting, two calls, the ended screen):
 `net_set_low_latency(true)` (Wi-Fi `WIFI_PS_NONE`) and `power_hold(POWER_HOLD_CALL)` (CPU at
-full speed). Both drop when the phone is idle again.
+full speed, no light sleep). Both drop when the phone is idle again.
 
 - **Wi-Fi modem sleep** (`net`): `WIFI_PS_MIN_MODEM` while idle. The radio sleeps between
   beacons and wakes at every DTIM beacon; the AP buffers unicast frames for us meanwhile.
@@ -293,7 +293,7 @@ full speed). Both drop when the phone is idle again.
   During calls modem sleep is off: DTIM-paced RTP delivery underruns the jitter buffer.
 - **Dynamic frequency scaling** (`power`, `CONFIG_PM_ENABLE`, board Kconfig
   `SIPWIRE_POWER_DFS` / `SIPWIRE_POWER_MIN_CPU_MHZ`): `esp_pm_configure` max =
-  `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ` (240), min = 80, light sleep off. One
+  `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ` (240), min = 80, light sleep below. One
   `ESP_PM_CPU_FREQ_MAX` lock per reason: `call` (above) and `display` (backlight on or dimmed,
   incl. boot; `display.c` `bl_apply_locked`). So the CPU is at 80 MHz only when idle with the
   backlight off; a key, touch or incoming call takes it back to 240 before anything renders
@@ -301,7 +301,7 @@ full speed). Both drop when the phone is idle again.
   80 MHz, so no peripheral clock ever changes. Driver check: UART console (APB source),
   LEDC backlight (`LEDC_AUTO_CLK`, APB), SPI LCD + XPT2046 (spi_master takes its own APB lock
   per transaction), I2S (PLL_F160M source, its driver holds a PM lock while enabled; calls
-  hold `call` anyway), RMT status LED (APB, own lock), keypad (GPIO + esp_timer), esp_timer
+  hold `call` anyway), RMT status LED (APB, own lock), keypad (GPIO), esp_timer
   (SYSTIMER, XTAL), PSRAM/flash (MSPI, PLL) and FreeRTOS run-time stats (esp_timer) all
   ignore CPU-only changes. The QEMU build has `CONFIG_PM_ENABLE` off and `power.c` skips DFS
   under `CONFIG_SIPWIRE_QEMU` (QEMU does not model the clock switching).
@@ -316,25 +316,83 @@ full speed). Both drop when the phone is idle again.
   is stopped by `idle_stop_cb` (esp_timer, under `api_mtx`, so it cannot race
   `audio_start`; a tone requested meanwhile stays queued and restarts the stream). Phone
   tones (ring, ringback, busy) loop, so no call path is affected.
-- **Automatic light sleep: not used**, deliberately (no setting either). What it would need
-  and why it is not safe to switch on without device measurements:
-  backlight PWM (LEDC on APB) stops in light sleep, so it could only run with the backlight
-  off; the keypad is a polled matrix scan (esp_timer), whose periodic timer would wake the
-  chip every scan period and remove most of the gain, and GPIO wake on a key needs the rows
-  parked low and the columns armed as wake sources (not implemented); XPT2046 PENIRQ would
-  need the same; the console UART loses the first characters typed while asleep; the LVGL
-  tick (esp_timer) and timer task wake periodically; Wi-Fi stays associated in light sleep
-  and still wakes at DTIM, but INVITE wake-up latency and beacon loss with
-  `PM_SLP_IRAM_OPT` etc. have to be measured on the device, and QEMU cannot show any of
-  it. Possible later steps, in order: ILI9341 SLPIN while the backlight is off (a few mA,
-  needs the LVGL lock around the panel commands), then light sleep only with the backlight
-  off and no call, keypad as a GPIO wake source, behind a setting defaulting off.
+- **Idle wake-ups** (each one costs a light-sleep exit, so they come first). Screen off and
+  idle, measured before this work (`cpu 30`): core 0 6 % busy, sip 2.6 %, wifi 1.2 %, keypad
+  0.7 %, esp_timer 0.7 %, taskLVGL 0.4 %. Now:
+  - *sip task* (`phone.c` `sip_task`): event-driven instead of a 20 ms poll. It blocks in
+    `select()` on the SIP socket plus an eventfd (`esp_vfs_eventfd`, `wake_fd`) until the
+    earliest deadline: `sip_ua_next_deadline_ms()` (every timer in `components/sip`:
+    retransmissions and transaction timers, re-REGISTER / retry / keepalive, subscription
+    refresh / retry / expiry, call cleanup, pending hold re-INVITE, REFER timeout) combined with
+    the phone's own (`close_deadline`, `retry_at`, `ended_until`, `aa_at`, DTMF sequence,
+    `vol_save_at`), at most 2 s (safety net). Every producer that hands the task work writes the
+    eventfd: `send_cmd` (all commands), the net / settings notify bits, `phone_set_volume`.
+    Host tests check the deadline on every tick of every SIP test: a tick before it must change
+    nothing, a tick at it must act or move it (`test_host/sip/sip_test_util.c`). A deadline that
+    stays due is throttled to 10 ms after 16 passes (logged). Idle: one wake-up per 2 s plus
+    the 25 s CRLF keepalive. Without the eventfd it falls back to the 20 ms poll.
+  - *keypad*: scans every 10 ms only while a key is down or settling
+    (`keypad_scan_idle`); idle, all rows are parked low and the task sleeps until a
+    level-low interrupt on any column (masked by the ISR, re-armed when idle again).
+  - *LVGL*: esp_lvgl_port's 5 ms `lv_tick_inc` timer (200 esp_timer wake-ups/s) is replaced
+    by `lv_tick_set_cb` (esp_timer clock; the port timer runs every ~17 min, unused). The
+    LVGL task sleeps up to 2 s when no lv_timer is due and is woken by
+    `lv_timer_handler_set_resume_cb` (any timer created / resumed, incl. the refresh timer on
+    invalidation) and by the touch interrupt. LVGL 9 pauses the refresh timer when nothing is
+    invalid; the home screen's BLF blink timer pauses itself unless a tile rings.
+  - *touch*: the PENIRQ falling-edge interrupt of esp_lcd_touch is swapped for a level-low
+    one (`display.c` `touch_isr`, masked until a read finds the panel released; while a
+    finger is down but not reported, swallowed wake-up touch or calibration, it re-arms after
+    30 ms). It wakes the LVGL task only on a touch.
+  - *backlight*: the 500 ms dim/off check (`bl_tick`) runs only while the backlight is on or
+    dimmed. *rtp_rx* waits for its socket without a 500 ms timeout.
+  - Left: `ui_bridge` 1 s refresh (clock, phone status snapshot), net RSSI every 10 s,
+    LVGL's 2 s max sleep, SNTP, Wi-Fi DTIM beacons.
+- **Automatic light sleep** (`power`, board Kconfig `SIPWIRE_POWER_LIGHT_SLEEP`, default y;
+  needs `FREERTOS_USE_TICKLESS_IDLE`, set in `sdkconfig.defaults`; the QEMU overlay has
+  `PM_ENABLE` off, which drops it). `esp_pm_configure(light_sleep_enable)`: the chip
+  light-sleeps whenever both cores idle for 8 ticks and no `ESP_PM_NO_LIGHT_SLEEP` lock is
+  held. If esp_pm rejects it, DFS alone is configured (logged).
+  - Holds: `call` and `display` take a NO_LIGHT_SLEEP lock besides CPU_FREQ_MAX, so never
+    during a call (ringing, dialing, ended screen) or with the backlight on / dimmed (LEDC
+    PWM stops in light sleep, the panel needs SPI). `console` (NO_LIGHT_SLEEP only, DFS
+    unaffected): see console below.
+  - Wi-Fi: stays associated; `WIFI_PS_MIN_MODEM` + light sleep, the PM layer wakes the chip
+    for every DTIM beacon. Unicast for us (INVITE, ARP) is buffered by the AP and announced in
+    the beacon's TIM, so INVITE latency is as for modem sleep (one DTIM interval, see above)
+    plus the light-sleep exit (order of a millisecond). The INVITE turns into a call state change: `call`
+    hold (no more sleep), `WIFI_PS_NONE`, backlight on. No listen interval (MAX_MODEM is not
+    used). Wi-Fi sleep options left at the IDF defaults (`ESP_WIFI_SLP_IRAM_OPT`,
+    `PM_SLP_IRAM_OPT` off: they would cost IRAM, see "Memory and tasks").
+  - Wake sources (`power.c` `light_sleep_setup`): GPIO (`esp_sleep_enable_gpio_wakeup`) with
+    the keypad columns and the touch PENIRQ armed level-low by their drivers
+    (`gpio_wakeup_enable`). Both interrupts are level-triggered too, so the key or touch that
+    woke the chip is still pending afterwards: the first press is not lost (the touch that
+    wakes a dark screen is swallowed by design, as before). Columns can only go low while the
+    rows are parked low, i.e. while the keypad idles. Timer (esp_timer alarms, FreeRTOS).
+  - Console (UART0): RX edges wake the chip (`uart_wakeup_setup`, 3 edges), but the
+    characters that wake it are lost. A UART wake-up (seen in the light-sleep exit callback)
+    or any console input takes the `console` hold for `SIPWIRE_POWER_CONSOLE_AWAKE_S` (60 s)
+    after the last input. So: press Enter once, wait for the prompt, then type. Input on the
+    USB-Serial-JTAG secondary console does not wake the chip (use the UART port), and with
+    USB connected the host may see the JTAG device drop while the chip sleeps
+    (`USJ_NO_AUTO_LS_ON_CONNECTION` stays off so a USB-powered handset still sleeps).
+  - Audio: the I2S driver's PM lock is held only while its channels are enabled, i.e. while
+    a stream runs; the tone-only stream stops after 2 s idle (below), calls hold `call`.
+  - Stats: `power` prints sleep count, time asleep and % since boot and since the previous
+    `power`, and wake causes (timer / gpio / uart / wifi / other), from the exit callback
+    (`PM_LIGHT_SLEEP_CALLBACKS`). Note the `console` hold: the 60 s after typing `power` are
+    awake by design. `power locks` dumps every PM lock (a driver lock that blocks light sleep
+    shows up there with its time held) and the mode / light-sleep counters.
+  - To verify on the device: INVITE to ring latency asleep (DTIM 1-3), no missed INVITEs over
+    hours, key and touch wake with the first key press delivered, console wake, Wi-Fi beacon
+    loss / reconnects, current draw idle (screen off) before / after.
 - **Status LED** (`components/status_led`): the RMT channel is enabled only around each
   ~30 us WS2812 frame (an enabled RMT TX channel holds a CPU_FREQ_MAX lock, which pinned DFS
   at 240 MHz). While the backlight is off (`SIPWIRE_DISPLAY_EVENT` / `DISPLAY_EVENT_BACKLIGHT`)
   the LED is dark and its 20 ms pattern timer is stopped, except for an incoming call.
-- **Console `power`**: current CPU MHz, DFS range, active holds (`call`, `display`), Wi-Fi
-  power save mode; `power locks` dumps the IDF PM lock table (`esp_pm_dump_locks`) and, with
+- **Console `power`**: current CPU MHz, DFS range, active holds (`call`, `display`,
+  `console`), Wi-Fi power save mode, light sleep (state, wake sources, stats); `power locks` dumps the IDF PM lock table (`esp_pm_dump_locks`) and, with
   `CONFIG_PM_PROFILING`, the time spent in each mode since boot (CPU_MAX = 240 MHz, APB_MIN /
   APB_MAX = 80 MHz). "cpu now" always reads 240 MHz: IDF holds its `rtos0`/`rtos1` CPU_FREQ_MAX
   locks while a core runs any task (here: the console), so DFS only lowers the clock while both

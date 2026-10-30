@@ -422,6 +422,31 @@ static void test_keepalive_options_timeout_reregisters(void)
     TEST_ASSERT_EQUAL(nreg + 1, fx_count(f, "REGISTER"));
 }
 
+/* sip_ua_next_deadline_ms in the idle states an event-driven caller sleeps in. (Every
+ * fx_advance tick of every test also checks it: sip_test_util.c fx_tick_checked.) */
+static void test_next_deadline_idle(void)
+{
+    fx_init(f, keepalive_crlf_cfg);
+    TEST_ASSERT_TRUE(UINT64_MAX == sip_ua_next_deadline_ms(f->ua));    /* nothing armed */
+    TEST_ASSERT_EQUAL(SIP_OK, sip_ua_register(f->ua));
+    /* REGISTER in flight: its retransmission (timer E = T1) is next */
+    TEST_ASSERT_TRUE(f->now + 500 == sip_ua_next_deadline_ms(f->ua));
+    fx_free(f);
+    fx_init(f, keepalive_crlf_cfg);
+    do_register();
+    /* registered, client transaction lingering (timer K = T4 = 5 s) */
+    TEST_ASSERT_TRUE(f->now + 5000 == sip_ua_next_deadline_ms(f->ua));
+    fx_advance(f, 5000);
+    /* then only the CRLF keepalive (15 s after the 200) is armed: refresh is later */
+    TEST_ASSERT_TRUE(f->now + 10000 == sip_ua_next_deadline_ms(f->ua));
+    fx_advance(f, 10000);
+    TEST_ASSERT_EQUAL_STRING("\r\n\r\n", f->sent[f->n_sent - 1].buf);
+    TEST_ASSERT_TRUE(f->now + 15000 == sip_ua_next_deadline_ms(f->ua));
+    sip_ua_destroy(f->ua);
+    f->ua = NULL;
+    TEST_ASSERT_TRUE(UINT64_MAX == sip_ua_next_deadline_ms(NULL));
+}
+
 /* ------------------------------------------------------- outgoing calls */
 
 static void test_outgoing_call_success(void)
@@ -1537,6 +1562,7 @@ int main(void)
     RUN_TEST(test_unregister);
     RUN_TEST(test_keepalive_crlf);
     RUN_TEST(test_keepalive_options_timeout_reregisters);
+    RUN_TEST(test_next_deadline_idle);
     RUN_TEST(test_outgoing_call_success);
     RUN_TEST(test_outgoing_with_proxy_auth);
     RUN_TEST(test_outgoing_busy);

@@ -59,7 +59,11 @@ sip_sub_handle_t bob;
 sip_ua_subscribe_blf(ua, "1002", &bob);   /* sent once registered */
 sip_ua_subscribe_mwi(ua, NULL);
 for (;;) {
-    sip_udp_poll(&udp, ua, 50);                       /* feeds sip_ua_on_packet() */
+    /* event-driven: sleep until a datagram, a wake-up on wake_fd (eventfd written by
+     * whoever queues a command) or the UA's next timer; UINT64_MAX = none armed */
+    uint64_t now = esp_timer_get_time() / 1000, d = sip_ua_next_deadline_ms(ua);
+    int wait = d <= now ? 0 : d - now > 2000 ? 2000 : (int)(d - now);
+    sip_udp_poll_wake(&udp, ua, wait, wake_fd);       /* feeds sip_ua_on_packet() */
     sip_ua_tick(ua, esp_timer_get_time() / 1000);
     /* + drain a command queue from the phone task: dial/answer/hangup/hold */
 }
@@ -94,7 +98,10 @@ Functions return `sip_err_t` (0 / negative) because the core cannot depend on
 
 ### API summary
 
-* lifecycle: `sip_ua_create`, `sip_ua_destroy`, `sip_ua_tick`, `sip_ua_on_packet`
+* lifecycle: `sip_ua_create`, `sip_ua_destroy`, `sip_ua_tick`, `sip_ua_on_packet`,
+  `sip_ua_next_deadline_ms` (earliest timer: retransmissions, transaction timers,
+  re-REGISTER / retry / keepalive, subscription refresh / retry / expiry, call cleanup,
+  hold re-INVITE, REFER timeout; host tests check it on every tick of every test)
 * registration: `sip_ua_register` (refresh at min(expires/2, expires−30),
   honours the granted expires, 423 Min-Expires, backoff 5 s → 300 s on failure),
   `sip_ua_unregister` (Expires: 0), `sip_ua_reg_state`, `sip_ua_set_local_addr`

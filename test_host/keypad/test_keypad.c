@@ -107,6 +107,25 @@ static void test_bounce_release_yields_single_release(void)
     TEST_ASSERT_EQUAL_INT(2, (int)nrec);
 }
 
+/* keypad.c stops sampling (waits for a column interrupt) only while idle. */
+static void test_idle_only_when_nothing_pending(void)
+{
+    TEST_ASSERT_TRUE(keypad_scan_idle(&st));
+    feed(0, BIT(KEY_A));                     /* raw press, not debounced yet */
+    TEST_ASSERT_FALSE(keypad_scan_idle(&st));
+    feed(10, 0);                             /* a glitch: back to idle */
+    TEST_ASSERT_TRUE(keypad_scan_idle(&st));
+    TEST_ASSERT_EQUAL_INT(0, (int)nrec);
+    hold(0, 20, 100, BIT(KEY_A));            /* PRESS at 50 */
+    TEST_ASSERT_FALSE(keypad_scan_idle(&st));
+    feed(110, 0);                            /* released, RELEASE still debouncing */
+    TEST_ASSERT_FALSE(keypad_scan_idle(&st));
+    hold(0, 120, 140, 0);                    /* RELEASE at 140 */
+    TEST_ASSERT_TRUE(keypad_scan_idle(&st));
+    const exp_t e[] = { { KEYPAD_SCAN_PRESS, 50 }, { KEYPAD_SCAN_RELEASE, 140 } };
+    expect_key(KEY_A, e, 2);
+}
+
 static void test_short_press_no_long(void)
 {
     hold(0, 0, 90, BIT(KEY_A));
@@ -210,6 +229,7 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_bounce_press_yields_single_press);
     RUN_TEST(test_bounce_release_yields_single_release);
+    RUN_TEST(test_idle_only_when_nothing_pending);
     RUN_TEST(test_short_press_no_long);
     RUN_TEST(test_hold_2s_long_and_repeats);
     RUN_TEST(test_hold_2s_across_uint32_wrap);

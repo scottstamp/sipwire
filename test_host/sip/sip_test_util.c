@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "sip_ua_priv.h"
 #include "unity.h"
 
 const char *FX_SDP_PCMU =
@@ -235,12 +236,44 @@ void fx_free(fx_t *f)
     }
 }
 
+/* Every tick in every test also checks sip_ua_next_deadline_ms():
+ *  - a tick before the deadline must change nothing but the clock (else the
+ *    deadline was too late: an event-driven caller would miss that timer);
+ *  - a tick at or after the deadline must do something or move the deadline
+ *    past now (else an event-driven caller would spin). */
+static void fx_tick_checked(fx_t *f)
+{
+    static sip_ua_t before;
+    uint64_t d = sip_ua_next_deadline_ms(f->ua);
+    memcpy(&before, f->ua, sizeof(before));
+    int sent = f->n_sent, ev = f->n_ev;
+    sip_ua_tick(f->ua, f->now);
+    if (f->ua == NULL) {
+        return;
+    }
+    uint64_t now = f->ua->now;
+    before.now = now;
+    bool changed = f->n_sent != sent || f->n_ev != ev || memcmp(&before, f->ua, sizeof(before)) != 0;
+    if (now < d && changed) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "tick at %llu changed state before the deadline %llu",
+                 (unsigned long long)now, (unsigned long long)d);
+        TEST_FAIL_MESSAGE(msg);
+    }
+    if (now >= d && !changed && sip_ua_next_deadline_ms(f->ua) <= now) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "deadline %llu due at %llu but the tick did nothing (spin)",
+                 (unsigned long long)d, (unsigned long long)now);
+        TEST_FAIL_MESSAGE(msg);
+    }
+}
+
 void fx_advance(fx_t *f, uint64_t ms)
 {
     uint64_t end = f->now + ms;
     while (f->now < end && f->ua) {
         f->now += 10;
-        sip_ua_tick(f->ua, f->now);
+        fx_tick_checked(f);
         for (; f->auto_reg && f->reg_scan < f->n_sent; f->reg_scan++) {
             if (strncmp(f->sent[f->reg_scan].buf, "REGISTER ", 9) == 0) {
                 fx_reply(f, f->reg_scan, 200, "s1", "Expires: 300\r\n", NULL);

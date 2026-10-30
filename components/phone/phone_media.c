@@ -185,7 +185,7 @@ static void rx_task(void *arg)
             }
             unlock();
             if (fd < 0) {
-                ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500));
+                ulTaskNotifyTake(pdTRUE, portMAX_DELAY);   /* phone_media_start gives one per new socket */
                 continue;
             }
         }

@@ -59,6 +59,21 @@ static esp_err_t check_pins(const board_cfg_t *cfg)
     return ESP_OK;
 }
 
+/* Column interrupt (idle wait, see scan_task): fires while a column reads low with all rows
+ * parked low, i.e. on any key. Level-triggered, so a key pressed during light sleep (the same
+ * level is the GPIO wake source) is still seen after the wake-up: the first press is not lost.
+ * The ISR masks the columns again until the scan has seen every key released. */
+static void col_isr(void *arg)
+{
+    (void)arg;
+    for (int c = 0; c < KEYPAD_COLS; c++) {
+        gpio_intr_disable(s_cfg->keypad.cols[c]);
+    }
+    BaseType_t woken = pdFALSE;
+    vTaskNotifyGiveFromISR(s_task, &woken);
+    portYIELD_FROM_ISR(woken);
+}
+
 static esp_err_t configure_gpios(const board_cfg_t *cfg)
 {
     /* Columns: inputs with pull-ups; a pressed key pulls its column low. */
@@ -68,9 +83,10 @@ static esp_err_t configure_gpios(const board_cfg_t *cfg)
             .mode = GPIO_MODE_INPUT,
             .pull_up_en = GPIO_PULLUP_ENABLE,
             .pull_down_en = GPIO_PULLDOWN_DISABLE,
-            .intr_type = GPIO_INTR_DISABLE,
+            .intr_type = GPIO_INTR_LOW_LEVEL,
         };
         ESP_RETURN_ON_ERROR(gpio_config(&io), TAG, "col %d", c);
+        ESP_RETURN_ON_ERROR(gpio_intr_disable(cfg->keypad.cols[c]), TAG, "col %d intr", c);
     }
     /* Rows: open-drain. Level 0 sinks the row; level 1 releases it to high-Z,
      * so an idle row never drives anything and two keys can't short outputs. */
@@ -124,11 +140,39 @@ static void post_event(const keypad_scan_event_t *e)
     }
 }
 
+static void set_rows(int level)
+{
+    for (int r = 0; r < KEYPAD_ROWS; r++) {
+        gpio_set_level(s_cfg->keypad.rows[r], level);
+    }
+}
+
+/* Idle: park every row low and sleep until a column interrupt (any key) instead of scanning
+ * every SCAN_PERIOD_MS. */
+static void wait_for_key(void)
+{
+    set_rows(0);
+    esp_rom_delay_us(SETTLE_US);
+    ulTaskNotifyTake(pdTRUE, 0);                /* drop a stale notification */
+    for (int c = 0; c < KEYPAD_COLS; c++) {
+        gpio_intr_enable(s_cfg->keypad.cols[c]); /* a key already down fires at once */
+    }
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    for (int c = 0; c < KEYPAD_COLS; c++) {
+        gpio_intr_disable(s_cfg->keypad.cols[c]);
+    }
+    set_rows(1);
+}
+
 static void scan_task(void *arg)
 {
     (void)arg;
     TickType_t last = xTaskGetTickCount();
     for (;;) {
+        if (keypad_scan_idle(&s_scan)) {
+            wait_for_key();
+            last = xTaskGetTickCount();         /* vTaskDelayUntil must not catch up */
+        }
         const uint16_t raw = scan_matrix(s_cfg);
         const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
         keypad_scan_event_t ev[KEYPAD_MAX_EVENTS];
@@ -158,10 +202,22 @@ esp_err_t keypad_init(void)
 
     s_cfg = cfg;
     keypad_scan_reset(&s_scan);
+    /* the ISR service may already be installed (touch driver): INVALID_STATE is fine */
+    esp_err_t err = gpio_install_isr_service(0);
+    ESP_RETURN_ON_FALSE(err == ESP_OK || err == ESP_ERR_INVALID_STATE, err, TAG, "gpio isr service");
+    for (int c = 0; c < KEYPAD_COLS; c++) {
+        ESP_RETURN_ON_ERROR(gpio_isr_handler_add(cfg->keypad.cols[c], col_isr, NULL), TAG, "col %d isr", c);
+        /* light-sleep wake source (esp_sleep_enable_gpio_wakeup: components/power); same level
+         * as the interrupt, only reachable while the rows are parked low */
+        ESP_RETURN_ON_ERROR(gpio_wakeup_enable(cfg->keypad.cols[c], GPIO_INTR_LOW_LEVEL), TAG, "col %d wake", c);
+    }
+
+    /* after the ISR: the task enables the column interrupts */
     BaseType_t ok = xTaskCreatePinnedToCore(scan_task, TAG, TASK_STACK, NULL,
                                             TASK_PRIO, &s_task, TASK_CORE);
     ESP_RETURN_ON_FALSE(ok == pdPASS, ESP_ERR_NO_MEM, TAG, "scan task");
 
-    ESP_LOGI(TAG, "polling %d rows x %d cols every %d ms", KEYPAD_ROWS, KEYPAD_COLS, SCAN_PERIOD_MS);
+    ESP_LOGI(TAG, "%d rows x %d cols: scan every %d ms while a key is down, interrupt while idle",
+             KEYPAD_ROWS, KEYPAD_COLS, SCAN_PERIOD_MS);
     return ESP_OK;
 }

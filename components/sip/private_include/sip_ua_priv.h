@@ -346,6 +346,8 @@ void sipua_leave(sip_ua_t *ua);
 /* ---- sip_sub.c ---- */
 void sipua_sub_init(sip_ua_t *ua);
 void sipua_sub_tick(sip_ua_t *ua);
+/* Earliest time sipua_sub_tick() has work (see sip_ua_next_deadline_ms). */
+uint64_t sipua_sub_next_deadline(const sip_ua_t *ua);
 void sipua_sub_on_response(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m);
 void sipua_sub_on_timeout(sip_ua_t *ua, sip_txn_t *t);
 /* NOTIFY (in or out of dialog). Returns false if it matched no subscription

@@ -2037,6 +2037,50 @@ void sip_ua_tick(sip_ua_t *ua, uint64_t now_ms)
     sipua_leave(ua);
 }
 
+static uint64_t min_u64(uint64_t a, uint64_t b)
+{
+    return a < b ? a : b;
+}
+
+/* Mirrors sip_ua_tick / reg_tick / reinv_kick condition by condition. */
+uint64_t sip_ua_next_deadline_ms(const sip_ua_t *ua)
+{
+    if (!ua || ua->destroy_pending) {
+        return UINT64_MAX;
+    }
+    uint64_t d = sip_txn_next_deadline(&ua->txl);
+
+    const reg_t *r = &ua->reg;
+    if (r->active && !r->txn) {
+        if (r->t_refresh) {
+            d = min_u64(d, r->t_refresh);
+        }
+        if (r->t_retry) {
+            d = min_u64(d, r->t_retry);
+        }
+        if (r->state == SIP_UA_REG_REGISTERED && ua->keepalive_s) {
+            d = min_u64(d, r->t_keepalive);
+        }
+    }
+
+    d = min_u64(d, sipua_sub_next_deadline(ua));
+
+    for (int i = 0; i < MAX_CALLS; i++) {
+        const call_t *c = &ua->calls[i];
+        if (c->st == CS_ENDING) {
+            d = min_u64(d, c->deadline);
+        } else if (c->st == CS_CONFIRMED) {
+            if (!c->reinv_txn && !c->awaiting_ack && c->hold_want != c->local_hold) {
+                d = min_u64(d, c->reinv_retry_at);  /* 0: now */
+            }
+            if (c->refer_accepted) {
+                d = min_u64(d, c->refer_deadline);
+            }
+        }
+    }
+    return d;
+}
+
 void sip_ua_on_packet(sip_ua_t *ua, const void *data, size_t len, const sip_addr_t *from)
 {
     if (!ua || !data || !from || ua->destroy_pending) {

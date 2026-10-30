@@ -3,7 +3,9 @@
 /* sipwire SIP user agent (RFC 3261 subset over UDP).
  *
  * The protocol core is pure C17 with no OS dependencies:
- *   - time is injected: call sip_ua_tick(ua, now_ms) every 50-100 ms;
+ *   - time is injected: call sip_ua_tick(ua, now_ms) every 50-100 ms, or
+ *     event-driven: after every packet / API call and at
+ *     sip_ua_next_deadline_ms();
  *   - received datagrams are fed with sip_ua_on_packet();
  *   - datagrams are sent through cfg.send;
  *   - randomness (Call-ID, tags, branches, cnonce) comes from cfg.rand.
@@ -288,6 +290,15 @@ void sip_ua_destroy(sip_ua_t *ua);
  * once before anything else and then every 50-100 ms. */
 void sip_ua_tick(sip_ua_t *ua, uint64_t now_ms);
 
+/* Earliest time (same clock as sip_ua_tick) at which sip_ua_tick() has work:
+ * retransmission and transaction timers, re-REGISTER / retry / keepalive,
+ * subscription refresh / retry / expiry, call cleanup, hold re-INVITE, REFER
+ * timeout. A value <= now means "tick now"; UINT64_MAX means no timer is armed
+ * (the next change comes from a packet or an API call). Ticking earlier than
+ * this changes nothing but the clock, so a caller may sleep until then
+ * (re-query after every packet, API call and tick). */
+uint64_t sip_ua_next_deadline_ms(const sip_ua_t *ua);
+
 /* Feed one received datagram. Malformed or oversized input is dropped. */
 void sip_ua_on_packet(sip_ua_t *ua, const void *data, size_t len, const sip_addr_t *from);
 
@@ -386,6 +397,11 @@ int sip_udp_send(void *ctx, const sip_addr_t *to, const void *data, size_t len);
 /* Wait up to timeout_ms for datagrams and feed all pending ones to the UA.
  * Does not tick. Returns number of datagrams fed or a negative error. */
 int sip_udp_poll(sip_udp_t *u, sip_ua_t *ua, int timeout_ms);
+/* sip_udp_poll that also returns early when wake_fd (an eventfd or the read
+ * end of a pipe; -1 = none) becomes readable; the wake-up is consumed (one
+ * read of up to 8 bytes). u->fd may be -1 (no socket yet): then only wake_fd
+ * and the timeout end the wait, and ua may be NULL. */
+int sip_udp_poll_wake(sip_udp_t *u, sip_ua_t *ua, int timeout_ms, int wake_fd);
 
 /* Resolve host (IPv4 literal or DNS name) to an address. */
 sip_err_t sip_udp_resolve(const char *host, uint16_t port, sip_addr_t *out);

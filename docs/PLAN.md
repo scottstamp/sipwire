@@ -108,7 +108,10 @@ inside a phase are parallel unless noted.
   pattern; unit + fuzz tests, Asterisk integration (ringing/busy/idle, voicemail
   deposit/delete), QEMU smoke. Hardware: tile touch targets and blink, LED pattern,
   a real PBX's hints / mailboxes.
-- [cheap] Power: light sleep when idle, backlight timeout, battery ADC.
+- [x] [cheap] Power: automatic light sleep when idle (screen off, no call), event-driven
+  sip task, interrupt-driven keypad, LVGL without the 5 ms tick. Hardware: INVITE wake-up
+  latency, key / touch wake, console wake, current draw (docs/ARCHITECTURE.md "Power").
+- [cheap] Power: battery ADC.
 - [core] SIP over TCP/TLS, SRTP (mbedtls) — optional.
 - [cheap] Docs, CLAUDE.md upkeep, CI.
 
