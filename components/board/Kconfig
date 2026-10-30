@@ -57,6 +57,15 @@ menu "Sipwire board"
         config SIPWIRE_LCD_SWAP_XY
             bool "Swap XY (landscape)"
             default n
+        config SIPWIRE_DISPLAY_PANEL_SLEEP
+            bool "Put the panel to sleep while the backlight is off"
+            default y
+            help
+                ILI9341 SLPIN when the backlight goes off (DC/DC, oscillator and panel
+                scanning stop; frame memory and the SPI interface keep working, so LVGL
+                may still flush into it), SLPOUT before it comes back on. The backlight
+                is switched on only 120 ms after SLPOUT, so the panel's start-up is never
+                visible. No effect in the QEMU build (no panel).
     endmenu
 
     menu "Touch (XPT2046, shares LCD SPI bus)"
@@ -105,6 +114,12 @@ menu "Sipwire board"
         config SIPWIRE_SPK_EN
             int "Amp enable / shutdown pin (MAX98357A SD_MODE)"
             default 18
+            help
+                Driven "on" only while an audio stream plays (call, tone, ringtone,
+                until the 2 s idle stop of a tone-only stream), "off" otherwise, also
+                in light sleep. Between reset and audio_init() the pin is not driven:
+                if the amp breakout pulls SD_MODE up, fit an external pull-down
+                (docs/HARDWARE.md).
         config SIPWIRE_SPK_EN_ACTIVE_HIGH
             bool "Amp enable active high"
             default y
@@ -229,6 +244,21 @@ menu "Sipwire board"
     endmenu
 
     menu "Power (components/power)"
+        config SIPWIRE_WIFI_LISTEN_INTERVAL
+            int "Wi-Fi listen interval while idle (beacons; 1 = every DTIM)"
+            range 1 10
+            default 3
+            help
+                Wi-Fi power save while no call exists (components/net). 1: WIFI_PS_MIN_MODEM,
+                the radio wakes for every DTIM beacon. 2-10: WIFI_PS_MAX_MODEM, it wakes
+                every this many beacons (the listen interval is announced to the AP when
+                associating). Calls always use WIFI_PS_NONE.
+                Trade-off: the AP holds an incoming INVITE until the next wake-up, so
+                ringing may start up to listen interval x beacon interval later (3 x
+                102.4 ms = 0.3 s; 10 = 1 s, then SIP T1 retransmits the INVITE once).
+                Broadcasts (ARP requests from the PBX or router) come only at DTIM
+                beacons and are missed when the listen interval skips them: keep it a
+                multiple of the AP's DTIM period.
         config SIPWIRE_POWER_DFS
             bool "Dynamic CPU frequency scaling while idle"
             depends on PM_ENABLE
@@ -236,8 +266,8 @@ menu "Sipwire board"
             help
                 Run the CPU at the minimum frequency below when no call exists and
                 the backlight is off; full speed otherwise. Wi-Fi modem sleep while
-                idle is separate (net) and always on. Light sleep: next option
-                (docs/ARCHITECTURE.md "Power").
+                idle is separate (net, SIPWIRE_WIFI_LISTEN_INTERVAL) and always on.
+                Light sleep: next option (docs/ARCHITECTURE.md "Power").
         config SIPWIRE_POWER_MIN_CPU_MHZ
             int "Idle CPU frequency (MHz): 80, 160 or 240"
             depends on SIPWIRE_POWER_DFS

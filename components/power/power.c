@@ -44,6 +44,8 @@ static const char *TAG = "power";
 #endif
 
 #define UART_WAKE_EDGES     3       /* RX edges that wake the chip (those characters are lost) */
+#define POWER_STR_(x)       #x
+#define POWER_STR(x)        POWER_STR_(x)
 
 static const char *const s_hold_names[POWER_HOLD_COUNT] = {
     [POWER_HOLD_CALL] = "call",
@@ -235,7 +237,8 @@ static const char *wifi_ps_name(void)
     switch (ps) {
     case WIFI_PS_NONE:      return "off (WIFI_PS_NONE, call)";
     case WIFI_PS_MIN_MODEM: return "modem sleep (WIFI_PS_MIN_MODEM, wakes every DTIM)";
-    case WIFI_PS_MAX_MODEM: return "modem sleep (WIFI_PS_MAX_MODEM)";
+    case WIFI_PS_MAX_MODEM: return "modem sleep (WIFI_PS_MAX_MODEM, wakes every "
+                                   POWER_STR(CONFIG_SIPWIRE_WIFI_LISTEN_INTERVAL) " beacons = listen interval)";
     default:                return "?";
     }
 #endif
@@ -250,7 +253,7 @@ static void print_sleep(unsigned bits)
     }
     printf("sleep     : automatic light sleep, %s\n",
            bits ? "blocked now by the holds above" : "whenever both cores idle");
-    printf("wake      : wifi (DTIM beacons), keypad + touch (gpio), console uart (first chars "
+    printf("wake      : wifi (beacons), keypad + touch (gpio), console uart (first chars "
            "lost, then awake %d s after the last input)\n", CONFIG_SIPWIRE_POWER_CONSOLE_AWAKE_S);
 #if POWER_LS_STATS
     static ls_stats_t last;             /* console task only */

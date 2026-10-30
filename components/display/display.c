@@ -10,6 +10,7 @@
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_lcd_ili9341.h"
+#include "esp_lcd_panel_commands.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_vendor.h"
@@ -39,7 +40,7 @@ static const char *TAG = "display";
 #define BL_DIM_PCT          10                /* brightness while dimmed */
 #define BL_TICK_US          (500 * 1000)
 #define BL_FIRST_FRAME_US   (100 * 1000)      /* let the last SPI transfers finish */
-#define DRAW_BUF_DIVIDER    10                /* each draw buffer = 1/10 screen */
+#define DRAW_BUF_DIVIDER    20                /* each draw buffer = 1/20 screen (16 lines) */
 #define SWALLOW_GAP_US      (250 * 1000)      /* touch "release" = no sample for this long */
 #define XPT2046_ADC_MAX     4096
 #define TOUCH_REARM_US      (30 * 1000)       /* finger still down but not reported: next look */
@@ -49,6 +50,21 @@ static const char *TAG = "display";
 /* esp_lvgl_port's periodic lv_tick_inc() timer would wake the chip every 5 ms; LVGL reads its
  * clock from esp_timer instead (lv_tick_set_cb) and the port's timer is slowed to ~17 min. */
 #define LVGL_PORT_TICK_MS   1000000
+
+/* ILI9341 sleep (CONFIG_SIPWIRE_DISPLAY_PANEL_SLEEP): SLPIN while the backlight is off. Sleep In
+ * stops the DC/DC converter, oscillator and panel scanning; the SPI interface and the frame
+ * memory keep working, so a flush that reaches a sleeping panel still lands in GRAM and is
+ * shown after SLPOUT. Datasheet timing: 5 ms after SLPIN / SLPOUT before the next command,
+ * SLPIN no sooner than 120 ms after SLPOUT; the panel takes up to 120 ms after SLPOUT to come
+ * up, so the backlight waits that long (no start-up flash). */
+#if defined(CONFIG_SIPWIRE_DISPLAY_PANEL_SLEEP) && !CONFIG_SIPWIRE_QEMU
+#define PANEL_SLEEP         1
+#else
+#define PANEL_SLEEP         0
+#endif
+#define PANEL_CMD_WAIT_MS   5
+#define PANEL_SLPOUT_US     (120 * 1000)
+#define BL_OFF_LVGL_WAIT_MS 20                /* bl_tick: LVGL busy longer -> try at the next tick */
 
 typedef enum {
     BL_INIT = 0,    /* waiting for the first frame; backlight stays off */
@@ -74,6 +90,14 @@ static struct {
     volatile int64_t last_activity_us;
     esp_timer_handle_t bl_tick;         /* runs only while the backlight is on or dimmed */
     esp_timer_handle_t bl_first;
+    esp_timer_handle_t bl_ready;        /* lights the backlight once the panel is out of sleep */
+    int8_t lit_posted;                  /* last DISPLAY_EVENT_BACKLIGHT value (-1: none yet) */
+
+    /* panel sleep; changed only with the LVGL lock and then bl_lock held */
+    esp_lcd_panel_io_handle_t panel_io; /* NULL: no panel sleep (option off, QEMU) */
+    bool panel_asleep;
+    int64_t panel_slpout_us;            /* last SLPOUT */
+    int64_t panel_ready_us;             /* backlight may come on from here (guarded by bl_lock) */
     bool first_flushed;             /* touched only from the LVGL task */
     bool first_done;
 
@@ -97,6 +121,7 @@ static struct {
 } s = {
     .cal_lock = portMUX_INITIALIZER_UNLOCKED,
     .touch_irq = GPIO_NUM_NC,
+    .lit_posted = -1,
 };
 
 /* ------------------------------------------------------------------ backlight */
@@ -114,10 +139,22 @@ static void bl_set_duty(uint32_t pct)
     ledc_update_duty(BL_LEDC_MODE, BL_LEDC_CHANNEL);
 }
 
+/* Caller holds bl_lock. DISPLAY_EVENT_BACKLIGHT on every lit / dark change (status LED: dark
+ * at night; ui_bridge: no clock refresh while dark). A post the event queue refused is retried
+ * by the next bl_apply_locked() or bl_tick_cb. */
+static void bl_post_lit_locked(void)
+{
+    bool lit = s.bl_state != BL_OFF;
+    if (s.lit_posted != (int8_t)lit &&
+        esp_event_post(SIPWIRE_DISPLAY_EVENT, DISPLAY_EVENT_BACKLIGHT, &lit, sizeof(lit), 0) == ESP_OK) {
+        s.lit_posted = (int8_t)lit;
+    }
+}
+
 /* Caller holds bl_lock. Every backlight state change ends here, so this is also where the
  * CPU frequency hold follows the screen: full speed while lit or dimmed (LVGL renders,
  * touch / keys are answered), DFS minimum once the backlight is off. BL_INIT (boot) counts
- * as lit. */
+ * as lit. Until PANEL_SLPOUT_US after a panel wake-up the PWM stays at 0; bl_ready lights it. */
 static void bl_apply_locked(void)
 {
     bool lit = s.bl_state != BL_OFF;
@@ -130,11 +167,15 @@ static void bl_apply_locked(void)
             esp_timer_stop(s.bl_tick);
         }
     }
-    static int8_t s_lit_posted = -1;    /* last DISPLAY_EVENT_BACKLIGHT value (-1: none yet) */
-    if (s_lit_posted != (int8_t)lit) {
-        /* status LED: dark while the screen is off (night) */
-        if (esp_event_post(SIPWIRE_DISPLAY_EVENT, DISPLAY_EVENT_BACKLIGHT, &lit, sizeof(lit), 0) == ESP_OK) {
-            s_lit_posted = (int8_t)lit;
+    bl_post_lit_locked();
+    if (lit && s.bl_ready) {
+        int64_t wait_us = s.panel_ready_us - esp_timer_get_time();
+        if (wait_us > 0) {
+            bl_set_duty(0);
+            if (!esp_timer_is_active(s.bl_ready)) {
+                esp_timer_start_once(s.bl_ready, (uint64_t)wait_us);
+            }
+            return;
         }
     }
     switch (s.bl_state) {
@@ -150,6 +191,107 @@ static void bl_apply_locked(void)
         bl_set_duty(0);
         break;
     }
+}
+
+static void delay_ms(uint32_t ms)
+{
+    vTaskDelay(pdMS_TO_TICKS(ms) + 1);  /* +1: at least ms, whatever the tick phase */
+}
+
+/* Caller holds the LVGL lock, then bl_lock. Sleeps the panel while the backlight is off and
+ * wakes it otherwise. The LVGL lock keeps the LVGL task out of lv_timer_handler, so no flush
+ * starts meanwhile (LVGL also waits for its last flush before leaving a refresh), and
+ * esp_lcd's tx_param first waits for colour transfers still queued: a command never lands in
+ * the middle of pixel data. esp_lcd_panel_disp_sleep() is not used: the ILI9341 driver
+ * blocks 120 ms after both commands, which would hold the LVGL lock (and, on the way down, the
+ * esp_timer task) that long. The 5 ms command gaps are waited here with the LVGL lock held;
+ * the 120 ms start-up only delays the backlight (panel_ready_us), LVGL may draw meanwhile. */
+static void panel_sync_locked(void)
+{
+    if (s.panel_io == NULL) {
+        return;
+    }
+    bool sleep = s.bl_state == BL_OFF;
+    if (sleep == s.panel_asleep) {
+        return;
+    }
+    esp_err_t err;
+    if (sleep) {
+        int64_t early_us = s.panel_slpout_us + PANEL_SLPOUT_US - esp_timer_get_time();
+        if (early_us > 0) {
+            delay_ms((uint32_t)(early_us / 1000));      /* SLPIN >= 120 ms after SLPOUT */
+        }
+        err = esp_lcd_panel_io_tx_param(s.panel_io, LCD_CMD_SLPIN, NULL, 0);
+        delay_ms(PANEL_CMD_WAIT_MS);
+        if (err == ESP_OK) {
+            s.panel_asleep = true;
+        }
+    } else {
+        err = esp_lcd_panel_io_tx_param(s.panel_io, LCD_CMD_SLPOUT, NULL, 0);
+        s.panel_slpout_us = esp_timer_get_time();
+        s.panel_ready_us = s.panel_slpout_us + PANEL_SLPOUT_US;
+        delay_ms(PANEL_CMD_WAIT_MS);
+        s.panel_asleep = false;         /* also on error: the backlight must come back anyway */
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "panel %s: %s", sleep ? "SLPIN" : "SLPOUT", esp_err_to_name(err));
+    } else {
+        ESP_LOGD(TAG, "panel %s", sleep ? "asleep" : "awake");
+    }
+}
+
+/* Caller holds the LVGL lock (lvgl_held) and then bl_lock: apply a new bl_state. The panel
+ * sleeps after the backlight is dark and wakes before the backlight comes back. Without the
+ * LVGL lock the panel is left as it is (only bl_tick_cb going dark could get here like that,
+ * and it does not). */
+static void bl_update_locked(bool lvgl_held)
+{
+    if (s.bl_state == BL_OFF) {
+        bl_apply_locked();
+        if (lvgl_held) {
+            panel_sync_locked();
+        }
+    } else {
+        if (lvgl_held) {
+            panel_sync_locked();
+        }
+        bl_apply_locked();
+    }
+}
+
+/* Takes bl_lock and, while the backlight is off (the panel is asleep and has to wake), the
+ * LVGL lock before it. Lock order everywhere: LVGL lock, then bl_lock; the touch path calls
+ * display_wake() from the LVGL task with the (recursive) LVGL lock already held. Returns
+ * whether the LVGL lock was taken; hand that to bl_give(). */
+static bool bl_take(void)
+{
+    bool lvgl_held = false;
+    for (;;) {
+        xSemaphoreTake(s.bl_lock, portMAX_DELAY);
+        if (lvgl_held || s.panel_io == NULL || s.bl_state != BL_OFF) {
+            return lvgl_held;
+        }
+        xSemaphoreGive(s.bl_lock);
+        lvgl_port_lock(0);
+        lvgl_held = true;
+    }
+}
+
+static void bl_give(bool lvgl_held)
+{
+    xSemaphoreGive(s.bl_lock);
+    if (lvgl_held) {
+        lvgl_port_unlock();
+    }
+}
+
+/* One-shot, PANEL_SLPOUT_US after a panel wake-up: light the backlight. */
+static void bl_ready_cb(void *arg)
+{
+    (void)arg;
+    xSemaphoreTake(s.bl_lock, portMAX_DELAY);
+    bl_apply_locked();
+    xSemaphoreGive(s.bl_lock);
 }
 
 static esp_err_t bl_init(void)
@@ -191,14 +333,14 @@ void display_set_backlight(uint8_t pct)
     if (pct > 100) {
         pct = 100;
     }
-    xSemaphoreTake(s.bl_lock, portMAX_DELAY);
+    bool lvgl_held = bl_take();
     s.bl_pct = pct;
     s.last_activity_us = esp_timer_get_time();
     if (s.bl_state != BL_INIT) {
         s.bl_state = BL_ON;
-        bl_apply_locked();
+        bl_update_locked(lvgl_held);
     }
-    xSemaphoreGive(s.bl_lock);
+    bl_give(lvgl_held);
 }
 
 void display_wake(void)
@@ -211,12 +353,17 @@ void display_wake(void)
     if (st == BL_ON || st == BL_INIT) {
         return;
     }
-    xSemaphoreTake(s.bl_lock, portMAX_DELAY);
+    bool lvgl_held = bl_take();
     if (s.bl_state == BL_DIM || s.bl_state == BL_OFF) {
         s.bl_state = BL_ON;
-        bl_apply_locked();
+        bl_update_locked(lvgl_held);
     }
-    xSemaphoreGive(s.bl_lock);
+    bl_give(lvgl_held);
+}
+
+bool display_is_lit(void)
+{
+    return s.bl_state != BL_OFF;
 }
 
 /* Periodic idle check: ON -> DIM after the timeout, -> OFF after 2x the timeout. */
@@ -230,7 +377,17 @@ static void bl_tick_cb(void *arg)
     int64_t idle = esp_timer_get_time() - s.last_activity_us;
     int64_t timeout_us = (int64_t)timeout_s * 1000000;
 
+    /* Going dark sleeps the panel: LVGL lock first (lock order). Never wait long for it in the
+     * esp_timer task; while LVGL is busy the backlight goes off at a later tick instead. */
+    bool lvgl_held = false;
+    if (idle >= 2 * timeout_us && s.panel_io != NULL) {
+        if (!lvgl_port_lock(BL_OFF_LVGL_WAIT_MS)) {
+            return;
+        }
+        lvgl_held = true;
+    }
     xSemaphoreTake(s.bl_lock, portMAX_DELAY);
+    bl_post_lit_locked();               /* retry a post the event queue refused */
     bl_state_t next = s.bl_state;
     if (idle >= 2 * timeout_us) {
         next = BL_OFF;
@@ -239,10 +396,10 @@ static void bl_tick_cb(void *arg)
     }
     if ((next == BL_DIM || next == BL_OFF) && next != s.bl_state) {
         s.bl_state = next;
-        bl_apply_locked();
-        ESP_LOGI(TAG, "backlight %s", next == BL_DIM ? "dim" : "off");
+        bl_update_locked(lvgl_held);
+        ESP_LOGI(TAG, "backlight %s%s", next == BL_DIM ? "dim" : "off", s.panel_asleep ? ", panel asleep" : "");
     }
-    xSemaphoreGive(s.bl_lock);
+    bl_give(lvgl_held);
 }
 
 /* One-shot, shortly after the first complete frame has been flushed. */
@@ -290,14 +447,14 @@ static void apply_settings(void)
     s.cal.y_max = cfg.touch_cal.y_max;
     portEXIT_CRITICAL(&s.cal_lock);
 
-    xSemaphoreTake(s.bl_lock, portMAX_DELAY);
+    bool lvgl_held = bl_take();
     s.bl_pct = cfg.backlight > 100 ? 100 : cfg.backlight;
     s.bl_timeout_s = cfg.backlight_timeout_s;
     if (cfg.backlight_timeout_s == 0 && (s.bl_state == BL_DIM || s.bl_state == BL_OFF)) {
         s.bl_state = BL_ON;         /* timeout disabled: leave dim/off */
     }
-    bl_apply_locked();
-    xSemaphoreGive(s.bl_lock);
+    bl_update_locked(lvgl_held);
+    bl_give(lvgl_held);
 }
 
 static void settings_changed_cb(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -671,9 +828,11 @@ esp_err_t display_init(lv_display_t **out_disp)
     /* LVGL port (task + tick), once. */
     ESP_RETURN_ON_ERROR(lvgl_start(), TAG, "lvgl");
 
-    /* Draw buffers: 1/10 screen each, double buffered, internal DMA RAM. One flush is a
-     * single SPI transaction, so it must fit max_transfer_sz set in board_init()
-     * (h_res * 40 pixels * 2 bytes). */
+    /* Draw buffers: 1/20 screen each (240 x 16 px = 7.5 KB), double buffered, internal DMA
+     * RAM: LVGL renders into one while the other is sent. One flush is a single SPI
+     * transaction, so it must fit max_transfer_sz set in board_init() (h_res * 40 pixels *
+     * 2 bytes = 19.2 KB; 1/10 screen = 15 KB fitted too). The clamp keeps that true for other
+     * panel sizes. */
     uint32_t buf_px = (uint32_t)s.hres * s.vres / DRAW_BUF_DIVIDER;
     const uint32_t max_px = (uint32_t)b->lcd.h_res * 40;
     if (buf_px > max_px) {
@@ -712,10 +871,15 @@ esp_err_t display_init(lv_display_t **out_disp)
     /* Backlight timers; the backlight switches on after the first complete frame. */
     const esp_timer_create_args_t first_args = { .callback = bl_first_cb, .name = "bl_first" };
     const esp_timer_create_args_t tick_args = { .callback = bl_tick_cb, .name = "bl_tick" };
+    const esp_timer_create_args_t ready_args = { .callback = bl_ready_cb, .name = "bl_ready" };
     ESP_RETURN_ON_ERROR(esp_timer_create(&first_args, &s.bl_first), TAG, "timer");
     ESP_RETURN_ON_ERROR(esp_timer_create(&tick_args, &s.bl_tick), TAG, "timer");
+    ESP_RETURN_ON_ERROR(esp_timer_create(&ready_args, &s.bl_ready), TAG, "timer");
     xSemaphoreTake(s.bl_lock, portMAX_DELAY);
     bl_apply_locked();                  /* starts bl_tick unless the backlight is off */
+#if PANEL_SLEEP
+    s.panel_io = io;                    /* from now on the panel sleeps while the backlight is off */
+#endif
     xSemaphoreGive(s.bl_lock);
     if (lvgl_port_lock(0)) {
         lv_display_add_event_cb(disp, flush_finish_cb, LV_EVENT_FLUSH_FINISH, NULL);

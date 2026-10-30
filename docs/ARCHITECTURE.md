@@ -148,9 +148,10 @@ internal heap) is the scarce resource; PSRAM (8 MB octal) is plentiful but has r
   `heap_caps_malloc_prefer(n, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, MALLOC_CAP_8BIT)` for
   larger buffers only tasks use.
 
-**DMA**: LCD draw buffers 2 x 1/10 screen (240 x 32 px x 2 B = 15 KB each, 30 KB internal DMA,
-double buffered so LVGL renders while SPI at 40 MHz flushes); `max_transfer_sz` = 240 x 40 x 2
-= 19.2 KB covers one buffer in a single transaction. I2S: 4 descriptors x 160 frames (10 ms)
+**DMA**: LCD draw buffers 2 x 1/20 screen (240 x 16 px x 2 B = 7.5 KB each, 15 KB internal DMA,
+double buffered so LVGL renders while SPI at 40 MHz flushes; was 2 x 1/10 = 30 KB: 15 KB of
+internal heap back, a full-screen redraw now takes 20 flushes instead of 10);
+`max_transfer_sz` = 240 x 40 x 2 = 19.2 KB still covers one buffer in a single transaction. I2S: 4 descriptors x 160 frames (10 ms)
 per direction (TX 4 x 320 B, RX 4 x 640 B for 32-bit mic slots); the 40 ms TX ring is the AEC
 delay `D` (see Echo canceller) and the main playout latency besides the jitter buffer.
 
@@ -190,11 +191,12 @@ cannot preempt them.
 | task stacks changed | | sip -1.5 KB, ipc0+ipc1 +1.5 KB (net 0) |
 | https OTA (mbedTLS, ~20-40 KB peak) | internal | PSRAM |
 | contacts screen refetch (12.8 KB transient) | internal | PSRAM |
+| LCD draw buffers (internal DMA heap) | 2 x 15 KB | 2 x 7.5 KB (-15 KB heap; static DIRAM 164562 -> 164662 B, +100 B from the power changes' code) |
 
 Options not taken (need device testing): Wi-Fi/LWIP
 buffers in PSRAM (`SPIRAM_TRY_ALLOCATE_WIFI_LWIP`), Wi-Fi IRAM optimisations off
 (`ESP_WIFI_IRAM_OPT`, `ESP_WIFI_RX_IRAM_OPT`: ~15-19 KB of IRAM code back to the heap),
-smaller LCD draw buffers (1/20 screen: -15 KB), LVGL task stack in PSRAM (unsafe: contact
+LVGL task stack in PSRAM (unsafe: contact
 saves write FAT from the LVGL task), settings snapshots in PSRAM via `EXT_RAM_BSS_ATTR`
 (~9 KB of static `settings_t` copies; conflicts with `SPIRAM_IGNORE_NOTFOUND`), fewer I2S
 descriptors (lower latency, changes the AEC delay).
@@ -283,14 +285,25 @@ on every foreground / background call state change and sets, for as long as any 
 `net_set_low_latency(true)` (Wi-Fi `WIFI_PS_NONE`) and `power_hold(POWER_HOLD_CALL)` (CPU at
 full speed, no light sleep). Both drop when the phone is idle again.
 
-- **Wi-Fi modem sleep** (`net`): `WIFI_PS_MIN_MODEM` while idle. The radio sleeps between
-  beacons and wakes at every DTIM beacon; the AP buffers unicast frames for us meanwhile.
-  INVITE latency: up to one DTIM interval (beacon interval 102.4 ms x the AP's DTIM period;
-  DTIM 1-3 = 0.1-0.3 s worst case, half that on average); after an ARP cache expiry the
-  PBX's ARP request is also buffered, so up to two intervals. SIP T1 is 500 ms, so at DTIM <= 3
-  the INVITE is not even retransmitted; ringing starts within ~0.3 s. Keep the AP's DTIM at
-  1-3. `WIFI_PS_MAX_MODEM` (listen interval) is not used: it multiplies this latency.
-  During calls modem sleep is off: DTIM-paced RTP delivery underruns the jitter buffer.
+- **Wi-Fi modem sleep** (`net`, board Kconfig `SIPWIRE_WIFI_LISTEN_INTERVAL`, default 3,
+  range 1-10). Idle, the radio sleeps between beacons and the AP buffers unicast frames for
+  us meanwhile (announced in the beacon's TIM).
+  - Listen interval > 1 (default): `WIFI_PS_MAX_MODEM`. The STA config carries
+    `listen_interval` (set in `apply_creds` before every connect; the AP learns it from the
+    association request) and the radio wakes every `listen_interval` beacons. INVITE
+    latency: up to listen interval x beacon interval (3 x 102.4 ms = 0.31 s worst case, half
+    on average; 10 = 1.02 s, past SIP T1 = 500 ms, so the INVITE is retransmitted once and
+    both copies arrive together). After an ARP cache expiry the PBX's ARP request comes
+    first: broadcasts are sent only after DTIM beacons, and a wake-up that is not on a DTIM
+    beacon misses them (the PBX repeats its ARP, ~1 s later). Keep the listen interval a
+    multiple of the AP's DTIM period (DTIM 1 or 3 with the default 3).
+  - Listen interval 1: `WIFI_PS_MIN_MODEM` as before, wakes at every DTIM beacon (DTIM 1-3 =
+    0.1-0.3 s worst case INVITE latency, no missed broadcasts).
+  - Saving: with DTIM 1, MAX_MODEM at 3 receives one beacon in three; the radio's receive
+    wake-ups dominate idle Wi-Fi current. To measure on the device.
+  During calls (`net_set_low_latency(true)`) modem sleep is off: beacon-paced RTP delivery
+  underruns the jitter buffer. Afterwards the idle mode returns. `power` prints the mode
+  (`wifi ps`), incl. the listen interval.
 - **Dynamic frequency scaling** (`power`, `CONFIG_PM_ENABLE`, board Kconfig
   `SIPWIRE_POWER_DFS` / `SIPWIRE_POWER_MIN_CPU_MHZ`): `esp_pm_configure` max =
   `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ` (240), min = 80, light sleep below. One
@@ -316,6 +329,15 @@ full speed, no light sleep). Both drop when the phone is idle again.
   is stopped by `idle_stop_cb` (esp_timer, under `api_mtx`, so it cannot race
   `audio_start`; a tone requested meanwhile stays queued and restarts the stream). Phone
   tones (ring, ringback, busy) loop, so no call path is affected.
+  Amp pin (`SIPWIRE_SPK_EN`, GPIO 18): `amp_set(true)` exists only in `tx_task` after the
+  priming frame; its exit, `stream_stop_locked` and the start failure path set it off, and
+  stop waits for `tx_task` to exit. So the amp is on exactly while a stream runs: never idle,
+  not after the tone-only idle stop, not after a call (`phone_media_audio(false, NONE)` ->
+  `audio_stop`). Init sets the output latch off before the pin becomes an output (it used to
+  go through `gpio_reset_pin`, which enables the pull-up for a moment), with the internal
+  pull towards off, and takes the pin out of the light-sleep GPIO switch
+  (`PM_SLP_DISABLE_GPIO` would float it in sleep). From reset until `audio_init` the pin is
+  not driven: a breakout pull-up on SD_MODE needs the external pull-down (`HARDWARE.md`).
 - **Idle wake-ups** (each one costs a light-sleep exit, so they come first). Screen off and
   idle, measured before this work (`cpu 30`): core 0 6 % busy, sip 2.6 %, wifi 1.2 %, keypad
   0.7 %, esp_timer 0.7 %, taskLVGL 0.4 %. Now:
@@ -339,15 +361,27 @@ full speed, no light sleep). Both drop when the phone is idle again.
     LVGL task sleeps up to 2 s when no lv_timer is due and is woken by
     `lv_timer_handler_set_resume_cb` (any timer created / resumed, incl. the refresh timer on
     invalidation) and by the touch interrupt. LVGL 9 pauses the refresh timer when nothing is
-    invalid; the home screen's BLF blink timer pauses itself unless a tile rings.
+    invalid; the home screen's BLF blink timer pauses itself unless a tile rings. Screen
+    changes are instant (`ui.c` `show()`, no 120 ms slide: every slide frame re-rendered and
+    flushed the whole screen); the old screen is deleted 100 ms later, which is safe because
+    a load without animation never sets LVGL's `prev_scr`.
   - *touch*: the PENIRQ falling-edge interrupt of esp_lcd_touch is swapped for a level-low
     one (`display.c` `touch_isr`, masked until a read finds the panel released; while a
     finger is down but not reported, swallowed wake-up touch or calibration, it re-arms after
     30 ms). It wakes the LVGL task only on a touch.
   - *backlight*: the 500 ms dim/off check (`bl_tick`) runs only while the backlight is on or
     dimmed. *rtp_rx* waits for its socket without a 500 ms timeout.
-  - Left: `ui_bridge` 1 s refresh (clock, phone status snapshot), net RSSI every 10 s,
-    LVGL's 2 s max sleep, SNTP, Wi-Fi DTIM beacons.
+  - *ui_bridge*: the 1 s refresh (clock, call timer, phone status snapshot) runs only while
+    the backlight is on or dimmed (`display_is_lit()`); dark, the task blocks on its queue
+    until a message. Events still refresh at once while dark (incoming / missed call,
+    registration, BLF, settings, OTA), except the 10 s RSSI update (kept in `b.loc`, shown at
+    wake-up). `DISPLAY_EVENT_BACKLIGHT` (on) kicks one refresh and the ticks resume; every
+    refresh rebuilds the whole model, so nothing that changed while dark is lost. Incoming
+    call while dark: `on_event` calls `display_wake` (SLPOUT) before it kicks the bridge, so
+    the incoming-call screen is rendered into the panel during its 120 ms start-up, before
+    the backlight lights (see Panel sleep).
+  - Left: net RSSI every 10 s (Wi-Fi driver call; the UI ignores it while dark), LVGL's 2 s
+    max sleep, SNTP, Wi-Fi beacons.
 - **Automatic light sleep** (`power`, board Kconfig `SIPWIRE_POWER_LIGHT_SLEEP`, **default n**:
   on the handset, after the chip had light-slept once, answering or ending a call sometimes
   crashed it (PSRAM "MMU entry fault" / panic handler hung with the cache off, watchdog reset),
@@ -360,12 +394,12 @@ full speed, no light sleep). Both drop when the phone is idle again.
     during a call (ringing, dialing, ended screen) or with the backlight on / dimmed (LEDC
     PWM stops in light sleep, the panel needs SPI). `console` (NO_LIGHT_SLEEP only, DFS
     unaffected): see console below.
-  - Wi-Fi: stays associated; `WIFI_PS_MIN_MODEM` + light sleep, the PM layer wakes the chip
-    for every DTIM beacon. Unicast for us (INVITE, ARP) is buffered by the AP and announced in
-    the beacon's TIM, so INVITE latency is as for modem sleep (one DTIM interval, see above)
-    plus the light-sleep exit (order of a millisecond). The INVITE turns into a call state change: `call`
-    hold (no more sleep), `WIFI_PS_NONE`, backlight on. No listen interval (MAX_MODEM is not
-    used). Wi-Fi sleep options left at the IDF defaults (`ESP_WIFI_SLP_IRAM_OPT`,
+  - Wi-Fi: stays associated; modem sleep (above) + light sleep, the PM layer wakes the chip
+    for every beacon the radio listens to (each DTIM, or each listen interval). Unicast for us
+    (INVITE, ARP) is buffered by the AP and announced in the beacon's TIM, so INVITE latency
+    is as for modem sleep (see above) plus the light-sleep exit (order of a millisecond). The
+    INVITE turns into a call state change: `call` hold (no more sleep), `WIFI_PS_NONE`,
+    backlight on. Wi-Fi sleep options left at the IDF defaults (`ESP_WIFI_SLP_IRAM_OPT`,
     `PM_SLP_IRAM_OPT` off: they would cost IRAM, see "Memory and tasks").
   - Wake sources (`power.c` `light_sleep_setup`): GPIO (`esp_sleep_enable_gpio_wakeup`) with
     the keypad columns and the touch PENIRQ armed level-low by their drivers
@@ -390,6 +424,31 @@ full speed, no light sleep). Both drop when the phone is idle again.
   - To verify on the device: INVITE to ring latency asleep (DTIM 1-3), no missed INVITEs over
     hours, key and touch wake with the first key press delivered, console wake, Wi-Fi beacon
     loss / reconnects, current draw idle (screen off) before / after.
+- **Panel sleep** (`display.c`, board Kconfig `SIPWIRE_DISPLAY_PANEL_SLEEP`, default y): when
+  the backlight goes off (`bl_tick_cb`) the PWM goes to 0 first, then the ILI9341 gets SLPIN
+  (DC/DC, oscillator and scanning stop). Any way back (`display_wake`: key, touch, incoming or
+  missed call; `display_set_backlight`; a settings change that disables the timeout) sends
+  SLPOUT first and lights the backlight only 120 ms later (`bl_ready` one-shot): the panel's
+  start-up is never visible. Commands go straight through `esp_lcd_panel_io_tx_param`: the
+  driver's `esp_lcd_panel_disp_sleep()` blocks 120 ms after both commands. Datasheet gaps:
+  5 ms after SLPIN / SLPOUT before the next command (waited with the LVGL lock held), SLPIN
+  no sooner than 120 ms after SLPOUT.
+  - Flush safety: panel commands are sent only with the LVGL lock held, so the LVGL task is
+    outside `lv_timer_handler` and no flush can start; LVGL waits for its last flush before it
+    leaves a refresh, and `tx_param` drains queued colour transfers before a command anyway.
+    LVGL is *not* paused while the panel sleeps: in Sleep In the SPI interface and frame
+    memory keep working, so a flush to a sleeping panel completes normally (its
+    `on_color_trans_done` still calls `lv_display_flush_ready`) and lands in GRAM. That is the
+    safe choice: pausing the refresh timer would need every invalidation path to resume it,
+    and a missed resume is a frozen screen; with flushes allowed, whatever LVGL drew while dark
+    (the incoming-call screen, built during the 120 ms before the backlight lights) is what
+    SLPOUT shows. While dark the bridge skips its 1 s refresh, so such flushes are rare.
+  - Lock order: LVGL lock, then `bl_lock` (the touch path calls `display_wake` from the LVGL
+    task with the recursive LVGL lock held). `bl_take()` takes the LVGL lock first whenever
+    the backlight is off; `bl_tick_cb` (esp_timer task) waits at most 20 ms for it and
+    otherwise goes dark at a later tick. `display_wake` from off therefore blocks until the
+    LVGL task finishes its current pass (plus 5 ms): never call it holding a lock the LVGL
+    task may wait for.
 - **Status LED** (`components/status_led`): the RMT channel is enabled only around each
   ~30 us WS2812 frame (an enabled RMT TX channel holds a CPU_FREQ_MAX lock, which pinned DFS
   at 240 MHz). While the backlight is off (`SIPWIRE_DISPLAY_EVENT` / `DISPLAY_EVENT_BACKLIGHT`)
