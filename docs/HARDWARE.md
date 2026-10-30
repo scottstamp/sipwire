@@ -132,6 +132,10 @@ defaults.
 the module's SPIWP/SPIHD; the bootloader enables QIO, so flash each unit over serial once,
 see `docs/ARCHITECTURE.md` "Flash mode") and octal PSRAM
 (`CONFIG_SPIRAM_MODE_OCT`, malloc may use it; boot continues if absent).
+Flash layout (`partitions.csv`): NVS 24 KB @ 0x9000, otadata, phy_init, `coredump` 56 KB @
+0x12000, `ota_0` / `ota_1` 3 MB each @ 0x20000 / 0x320000, FAT `storage` 9.9 MB @ 0x620000
+(contacts, history). A partition table change needs one serial flash per unit (OTA does not
+write it).
 
 Status LED patterns (`components/status_led`): white = booting, red blink =
 no network, amber blink = registering, red = registration failed, green

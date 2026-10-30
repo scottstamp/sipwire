@@ -478,6 +478,10 @@ static int cmd_reboot(int argc, char **argv)
     return 0;
 }
 
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
+esp_err_t console_coredump_register(void);      /* console_coredump.c */
+#endif
+
 static void (*volatile s_input_hook)(void);
 
 /* linenoise ends the line on any read() <= 0, and the REPL's own reader does a
@@ -544,6 +548,9 @@ esp_err_t console_start(void)
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         ESP_RETURN_ON_ERROR(esp_console_cmd_register(&cmds[i]), TAG, "register %s", cmds[i].command);
     }
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
+    ESP_RETURN_ON_ERROR(console_coredump_register(), TAG, "register coredump");
+#endif
 
     esp_console_repl_t *repl = NULL;
     esp_console_repl_config_t repl_cfg = ESP_CONSOLE_REPL_CONFIG_DEFAULT();

@@ -113,3 +113,15 @@ CONFIG_PM_PROFILING=y
 # selects PM_LIGHT_SLEEP_CALLBACKS: console wake-up, `power` sleep stats). The QEMU overlay
 # turns PM_ENABLE off, which drops them.
 CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+
+# Core dump (docs/ARCHITECTURE.md "Core dumps"): on a panic, write an ELF core dump (all task
+# TCBs + the used part of each stack, SHA256 checksum; IDF 6 has no other format) to the
+# `coredump` partition, then reboot as before (ESP_SYSTEM_PANIC_PRINT_REBOOT, the default).
+# Console `coredump` prints the summary after the reboot. No CAPTURE_DRAM (.bss/.data/heap
+# would need >128 KB; the partition is 56 KB). Task stacks are all internal RAM; one in PSRAM
+# would be saved too. Coredump's own logs off: ~5 KB of internal DRAM for strings that only
+# repeat what `coredump` and the boot warning (components/cli) report. Without the logs the
+# boot-time checksum check would print nothing: the console's boot check does it instead.
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+# CONFIG_ESP_COREDUMP_LOGS is not set
+# CONFIG_ESP_COREDUMP_CHECK_BOOT is not set
