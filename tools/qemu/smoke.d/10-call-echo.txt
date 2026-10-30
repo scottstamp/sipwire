@@ -23,6 +23,10 @@ poll 10 ^frames [1-9]\d*, avg \d+ us/frame, max \d+ us/frame, resets 0 :: aec
 expect ^aec: on, running 5
 expect ^frames [1-9]\d*, avg \d+ us/frame, max \d+ us/frame, resets 0 5
 expect ^ref late 0, i2s xruns tx 0 rx 0, heap internal [1-9]\d* B 5
+# memory budget (docs/ARCHITECTURE.md "Memory and tasks"): heap and stack high-water
+# marks during a call with the echo canceller running, for the log
+do free
+do tasks
 # `aec` reports the canceller of the RX task, which follows the setting a frame or two
 # later than the "aec off/on" log line: poll until it shows the new state
 do cfg set aec false

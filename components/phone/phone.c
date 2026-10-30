@@ -44,7 +44,7 @@
 static const char *TAG = "phone";
 static const char *SIP_TAG = "sip";
 
-#define SIP_TASK_STACK          8192
+#define SIP_TASK_STACK          6656    /* worst seen 4.7 KB (QEMU smoke: transfers, call waiting, BLF) */
 #define SIP_TASK_PRIO           5
 #define SIP_TASK_CORE           0
 #define CMD_QUEUE_LEN           8

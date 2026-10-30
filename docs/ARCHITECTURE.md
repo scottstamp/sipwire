@@ -114,7 +114,84 @@ sim/web/             Emscripten build of components/ui + mock model → browser
   bridge installs `display_touch_raw_hook()` (raw samples to the UI, none to LVGL)
   between begin and end and stores the result in `settings.touch_cal`.
 - Tasks (core pin): audio_tx/rx (core1, prio high), rtp_rx (core1), sip (core0),
-  keypad (core0, low), lvgl (core0, esp_lvgl_port default).
+  keypad (core0, low), lvgl (core0, esp_lvgl_port default). Sizes and budget: "Memory and tasks".
+
+## Memory and tasks
+
+Internal RAM (~340 KB DIRAM, shared by IRAM code, .data/.bss, task stacks, DMA buffers and the
+internal heap) is the scarce resource; PSRAM (8 MB octal) is plentiful but has rules.
+
+**Placement rules**
+- PSRAM goes through the MMU cache. While flash is written or erased (NVS, FAT `storage`,
+  OTA, otadata) the cache is off: only IRAM code with internal-RAM data may run. A task whose
+  *stack* is in PSRAM must therefore never do a flash operation itself
+  (`SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY` only permits it). An ISR that is IRAM-safe must not
+  touch PSRAM. A task merely holding PSRAM *data* is fine: the cache is back before it runs.
+- Must stay internal: DMA buffers (LCD draw buffers, I2S rings, SPI), anything an ISR touches,
+  all task stacks (every task here can reach a flash write: LVGL saves contacts synchronously,
+  the bridge/console/sip tasks write NVS), FreeRTOS objects (`pvPortMalloc` is internal).
+- Hot audio state stays internal: RTP rx buffer, `rtp_session_t` (5.3 KB, jitter buffer),
+  audio task frames.
+- PSRAM: the LVGL heap (`components/display/lv_mem_psram.c`: objects, styles, layer buffers),
+  `sip_ua_t` (89 KB; plain `malloc` above `SPIRAM_MALLOC_ALWAYSINTERNAL` = 16 KB goes to
+  PSRAM), mbedTLS (`MBEDTLS_EXTERNAL_MEM_ALLOC`: https OTA record buffers 16 + 4 KB, WPA
+  crypto), the contacts-search scratch (12.8 KB, `heap_caps_malloc_prefer`), the AEC
+  (internal only while > 64 KB internal would stay free, i.e. PSRAM on the device).
+- `SPIRAM_MALLOC_RESERVE_INTERNAL` = 32 KB stays reserved for DMA/internal-only requests.
+- Allocations below 16 KB with plain `malloc` land in internal RAM: use
+  `heap_caps_malloc_prefer(n, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, MALLOC_CAP_8BIT)` for
+  larger buffers only tasks use.
+
+**DMA**: LCD draw buffers 2 x 1/10 screen (240 x 32 px x 2 B = 15 KB each, 30 KB internal DMA,
+double buffered so LVGL renders while SPI at 40 MHz flushes); `max_transfer_sz` = 240 x 40 x 2
+= 19.2 KB covers one buffer in a single transaction. I2S: 4 descriptors x 160 frames (10 ms)
+per direction (TX 4 x 320 B, RX 4 x 640 B for 32-bit mic slots); the 40 ms TX ring is the AEC
+delay `D` (see Echo canceller) and the main playout latency besides the jitter buffer.
+
+**Tasks** (stack bytes; high water = least free ever. "QEMU worst" = least free over the smoke
+shards incl. calls with AEC, transfers, call waiting, CSV import; QEMU has no Wi-Fi radio or
+LCD, so its heap numbers are far too optimistic, stack numbers are representative)
+
+| task | core | prio | stack | device free (idle) | QEMU worst free | note |
+|---|---|---|---|---|---|---|
+| audio_tx | 1 | 22 | 6144 | (call only) | 2664 | frames + rtp decode |
+| audio_rx | 1 | 22 | 6144 | (call only) | 2628 | AEC (~5-6 ms per 20 ms frame) |
+| rtp_rx | 1 | 21 | 4096 | 3336 | 2616 | |
+| sip | 0 | 5 | 8192 -> **6656** | 4580 | 3504 -> 1968 (4.7 KB used) | 2 KB margin |
+| taskLVGL | 0 | 4 | 8192 | 2264 | 2448 | software rendering, history page on stack |
+| ui_bridge | 0 | 3 | 6144 | 2172 | 2004 | |
+| console_repl | any | 2 | 6144 | 4748 | 2044 | `contact import`, `cfg show`: keep |
+| keypad | 0 | 2 | 3072 | 2292 | - | |
+| dir_save | any | 2 | 4096 | 3408 | 2172 | |
+| ota | any | 3 | 8192 | (updates only) | - | TLS handshake on https |
+| sys_evt | 0 | 20 | 3584 | 2524 | 2640 | |
+| tcpip | any | 18 | 3072 | 1772 | 1936 | |
+| esp_timer | 0 | 22 | 3584 | 3004 | 3268 | |
+| wifi | 0 | 23 | (IDF) | 4404 | - | |
+| ipc0/ipc1 | 0/1 | 24 | 1280 -> **2048** | ? | 228 -> 996 (1 KB used) | IDF cross-core calls |
+| Tmr Svc | any | 1 | 2048 | 1336 | 1380 | |
+
+Audio/RTP/AEC own core 1 (prio 21-22, above everything but IPC); Wi-Fi, LVGL, SIP and the UI
+glue are on core 0. tcpip (prio 18, no affinity) may use core 1 when the audio tasks sleep but
+cannot preempt them.
+
+**Budget** (device numbers from `free` / `tasks`; static sizes from `idf.py size`)
+
+| | before | after |
+|---|---|---|
+| DIRAM static (.text+.data+.bss) | 159.8 KB | 160.4 KB (+0.7 KB spi_flash .data, toolchain noise) |
+| internal free idle / min / largest | 53 / 40 / 31 KB | check on device |
+| task stacks changed | | sip -1.5 KB, ipc0+ipc1 +1.5 KB (net 0) |
+| https OTA (mbedTLS, ~20-40 KB peak) | internal | PSRAM |
+| contacts screen refetch (12.8 KB transient) | internal | PSRAM |
+
+Options not taken (need device testing): Wi-Fi/LWIP
+buffers in PSRAM (`SPIRAM_TRY_ALLOCATE_WIFI_LWIP`), Wi-Fi IRAM optimisations off
+(`ESP_WIFI_IRAM_OPT`, `ESP_WIFI_RX_IRAM_OPT`: ~15-19 KB of IRAM code back to the heap),
+smaller LCD draw buffers (1/20 screen: -15 KB), LVGL task stack in PSRAM (unsafe: contact
+saves write FAT from the LVGL task), settings snapshots in PSRAM via `EXT_RAM_BSS_ATTR`
+(~9 KB of static `settings_t` copies; conflicts with `SPIRAM_IGNORE_NOTFOUND`), fewer I2S
+descriptors (lower latency, changes the AEC delay).
 
 ## SIP stack choice
 Write our own minimal UA in C (UDP first, TCP later). Rationale:

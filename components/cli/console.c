@@ -302,7 +302,11 @@ static int cmd_tasks(int argc, char **argv)
         printf("out of memory\n");
         return 1;
     }
+#if CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID
+    printf("name            state prio stack-hwm num core(-1 = any)\n");
+#else
     printf("name            state prio stack-hwm num\n");
+#endif
     vTaskList(buf);
     printf("%s", buf);
     free(buf);

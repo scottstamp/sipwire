@@ -87,3 +87,6 @@ expect ^1 calls, 1 unseen missed
 do history seen
 do history
 expect ^1 calls, 0 unseen missed
+# stack high-water marks after the scenario, for the log (docs/ARCHITECTURE.md "Memory and tasks")
+do free
+do tasks
