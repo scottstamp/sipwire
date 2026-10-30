@@ -103,7 +103,7 @@ menu "Sipwire board"
             int "Touch release debounce (ms)"
             depends on SIPWIRE_TOUCH_ENABLE
             range 0 300
-            default 80
+            default 120
             help
                 A finger counts as lifted only after the panel reported no touch for this long.
                 A resistive panel drops out for a read or two (~33 ms each) when a dragging finger
