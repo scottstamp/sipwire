@@ -1549,6 +1549,122 @@ static void test_info_dtmf(void)
     TEST_ASSERT_EQUAL(SIP_UA_CALL_ACTIVE, sip_call_state(f->ua, h));
 }
 
+/* ------------------------------------------- transaction slot recovery */
+
+/* n Via lines, each padded to about len bytes; the top one carries branch. */
+static void big_vias(char *out, size_t cap, int n, int len, const char *branch)
+{
+    size_t o = 0;
+    for (int i = 0; i < n; i++) {
+        int k = snprintf(out + o, cap - o, "Via: SIP/2.0/UDP 10.0.0.%d:5060;branch=%s%s%d;x=", i + 1,
+                         i == 0 ? branch : "z9hG4bKhop", i == 0 ? "" : "-", i);
+        o += (size_t)k;
+        for (; k < len - 2 && o + 3 < cap; k++) {
+            out[o++] = 'a';
+        }
+        TEST_ASSERT_TRUE(o + 3 < cap);
+        o += (size_t)snprintf(out + o, cap - o, "\r\n");
+    }
+}
+
+/* Requests whose Via headers overflow the response template get no answer;
+ * their server transactions must not hold pool slots (16 of them used to
+ * leave the phone unable to REGISTER / call until the UA was rebuilt). */
+static void test_unanswerable_requests_free_txn(void)
+{
+    fx_init(f, NULL);
+    static char vias[2048];
+    for (int i = 0; i < 2 * SIP_MAX_TXN; i++) {
+        char br[32];
+        snprintf(br, sizeof(br), "z9hG4bKbig%d", i);
+        big_vias(vias, sizeof(vias), SIP_MAX_VIA, 120, br); /* > the 800-byte template */
+        const char *method = i % 2 ? "INVITE" : "OPTIONS";
+        inject_fmt("%s sip:1001@10.0.0.2:5060 SIP/2.0\r\n%s"
+                   "From: <sip:asterisk@10.0.0.1>;tag=q%d\r\nTo: <sip:1001@10.0.0.2>\r\n"
+                   "Call-ID: big%d@x\r\nCSeq: 1 %s\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n",
+                   method, vias, i, i, method);
+        TEST_ASSERT_EQUAL(0, f->n_sent);
+        TEST_ASSERT_EQUAL(0, sip_ua_debug_txn_count(f->ua));
+    }
+    TEST_ASSERT_EQUAL(0, fx_count_ev(f, FXE_INCOMING));
+    /* still reachable: a normal request gets its answer, a call goes out */
+    inject_fmt("OPTIONS sip:1001@10.0.0.2:5060 SIP/2.0\r\n"
+               "Via: SIP/2.0/UDP 10.0.0.1:5060;rport;branch=z9hG4bKo1\r\n"
+               "From: <sip:asterisk@10.0.0.1>;tag=q1\r\nTo: <sip:1001@10.0.0.2>\r\n"
+               "Call-ID: q1@x\r\nCSeq: 1 OPTIONS\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n");
+    TEST_ASSERT_TRUE(fx_find(f, "SIP/2.0 200", 0) >= 0);
+    sip_call_handle_t h;
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_dial(f->ua, "600", &h));
+    TEST_ASSERT_EQUAL(1, fx_count(f, "INVITE"));
+}
+
+/* The template fits but the 200 + SDP does not: a bare 500 completes the
+ * INVITE transaction instead (and the call ends), nothing lingers. */
+static void test_answer_too_big_sends_500(void)
+{
+    fx_init(f, NULL);
+    static char vias[2048];
+    big_vias(vias, sizeof(vias), 5, 120, "z9hG4bKfat");
+    char to_uri[200];
+    snprintf(to_uri, sizeof(to_uri), "sip:1001@10.0.0.2;x=%0140d", 0);
+    inject_fmt("INVITE sip:1001@10.0.0.2:5060 SIP/2.0\r\n%s"
+               "Max-Forwards: 70\r\n"
+               "From: \"Bob\" <sip:1002@10.0.0.1>;tag=remote1\r\n"
+               "To: <%s>\r\n"
+               "Contact: <sip:asterisk@10.0.0.1:5060>\r\n"
+               "Record-Route: <sip:p1.example.com;lr;x=%090d>\r\n"
+               "Record-Route: <sip:p2.example.com;lr;x=%090d>\r\n"
+               "Record-Route: <sip:p3.example.com;lr;x=%090d>\r\n"
+               "Call-ID: fat@x\r\nCSeq: 5 INVITE\r\n"
+               "Content-Type: application/sdp\r\nContent-Length: %u\r\n\r\n%s",
+               vias, to_uri, 0, 0, 0, (unsigned)strlen(FX_SDP_PCMU), FX_SDP_PCMU);
+    int r180 = fx_find(f, "SIP/2.0 180", 0);
+    TEST_ASSERT_TRUE_MESSAGE(r180 >= 0, "180 must still fit");
+    const fx_ev_t *in = fx_last_ev(f, FXE_INCOMING);
+    TEST_ASSERT_NOT_NULL(in);
+    TEST_ASSERT_EQUAL(SIP_ERR_STATE, sip_call_answer(f->ua, in->call));
+    TEST_ASSERT_EQUAL(0, fx_count(f, "SIP/2.0 200"));
+    int r500 = fx_find(f, "SIP/2.0 500", 0);
+    TEST_ASSERT_TRUE(r500 >= 0);
+    TEST_ASSERT_EQUAL_STRING(to_tag_of(r180), to_tag_of(r500));
+    TEST_ASSERT_EQUAL(SIP_METHOD_INVITE, fx_parse(f, r500)->cseq_method);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_ENDED, last_call_ev()->state);
+    TEST_ASSERT_EQUAL(SIP_END_ERROR, last_call_ev()->reason);
+    TEST_ASSERT_EQUAL(500, last_call_ev()->code);
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_call_slots(f->ua));
+    fx_advance(f, 510);
+    TEST_ASSERT_EQUAL(2, fx_count(f, "SIP/2.0 500")); /* timer G until the ACK */
+    fx_advance(f, 33000);                               /* timer H */
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_txn_count(f->ua));
+}
+
+/* Nobody answers for SIP_TIMER_C_MS (the caller side normally gives up
+ * first): 480, the call ends, the INVITE transaction completes normally. */
+static void test_incoming_unanswered_480(void)
+{
+    fx_init(f, NULL);
+    inject_invite("ring@x", "z9hG4bKring", 9, FX_SDP_PCMU, NULL);
+    const fx_ev_t *in = fx_last_ev(f, FXE_INCOMING);
+    TEST_ASSERT_NOT_NULL(in);
+    sip_call_handle_t h = in->call;
+    char tag[80];
+    snprintf(tag, sizeof(tag), "%s", to_tag_of(fx_find(f, "SIP/2.0 180", 0)));
+    fx_advance(f, 179000);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_RINGING_IN, sip_call_state(f->ua, h));
+    TEST_ASSERT_EQUAL(0, fx_count(f, "SIP/2.0 480"));
+    fx_advance(f, 1100);
+    int r = fx_find(f, "SIP/2.0 480", 0);
+    TEST_ASSERT_TRUE(r >= 0);
+    TEST_ASSERT_EQUAL_STRING(tag, to_tag_of(r));
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_ENDED, last_call_ev()->state);
+    TEST_ASSERT_EQUAL(SIP_END_TIMEOUT, last_call_ev()->reason);
+    TEST_ASSERT_EQUAL(480, last_call_ev()->code);
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_call_slots(f->ua));
+    inject_from_bob("ACK", 9, "ring@x", tag, "z9hG4bKring", NULL);
+    fx_advance(f, 6000); /* timer I */
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_txn_count(f->ua));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1604,5 +1720,8 @@ int main(void)
     RUN_TEST(test_refer_to_replaces_escaping);
     RUN_TEST(test_attended_transfer);
     RUN_TEST(test_info_dtmf);
+    RUN_TEST(test_unanswerable_requests_free_txn);
+    RUN_TEST(test_answer_too_big_sends_500);
+    RUN_TEST(test_incoming_unanswered_480);
     return UNITY_END();
 }

@@ -568,20 +568,38 @@ int sipua_tpl_from_msg(resp_tpl_t *tpl, const sip_msg_t *m, const sip_addr_t *sr
     return 0;
 }
 
-/* Build and send a response. t may be NULL (stateless). */
-void sipua_respond_tpl(sip_ua_t *ua, sip_txn_t *t, const resp_tpl_t *tpl, const sip_addr_t *peer,
-                        int code, const char *to_tag, unsigned flags, const char *extra,
-                        const char *body, size_t body_len)
+static void w_resp_head(sip_wbuf_t *w, const resp_tpl_t *tpl, int code, const char *to_tag)
+{
+    sip_w_fmt(w, "SIP/2.0 %d %s\r\n", code, sip_reason_phrase(code));
+    sip_w_mem(w, tpl->hdrs, tpl->hdrs_len);
+    sip_w_fmt(w, "To: %s", tpl->to);
+    if (!tpl->to_has_tag && to_tag && to_tag[0] && code != 100) {
+        sip_w_fmt(w, ";tag=%s", to_tag);
+    }
+    sip_w_cstr(w, "\r\n");
+}
+
+static void respond_send(sip_ua_t *ua, sip_txn_t *t, const sip_addr_t *peer, int code, size_t len)
+{
+    if (t) {
+        sipua_log_msg(ua, "send", ua->tx, len, &t->peer);
+        sip_txn_respond(&ua->txl, ua->now, t, code, ua->tx, len);
+    } else {
+        sipua_send_raw(ua, peer, ua->tx, len);
+    }
+}
+
+/* Build and send a response. t may be NULL (stateless). Returns 0 when sent,
+ * -1 when it did not fit: then a final response is replaced by a bare 500
+ * (template headers only, which always fit) so the transaction still
+ * completes; a provisional one is not sent at all. */
+int sipua_respond_tpl(sip_ua_t *ua, sip_txn_t *t, const resp_tpl_t *tpl, const sip_addr_t *peer,
+                      int code, const char *to_tag, unsigned flags, const char *extra,
+                      const char *body, size_t body_len)
 {
     sip_wbuf_t w;
     sip_w_init(&w, ua->tx, sizeof(ua->tx));
-    sip_w_fmt(&w, "SIP/2.0 %d %s\r\n", code, sip_reason_phrase(code));
-    sip_w_mem(&w, tpl->hdrs, tpl->hdrs_len);
-    sip_w_fmt(&w, "To: %s", tpl->to);
-    if (!tpl->to_has_tag && to_tag && to_tag[0] && code != 100) {
-        sip_w_fmt(&w, ";tag=%s", to_tag);
-    }
-    sip_w_cstr(&w, "\r\n");
+    w_resp_head(&w, tpl, code, to_tag);
     if (flags & RF_RR) {
         sip_w_mem(&w, tpl->rr, tpl->rr_len);
     }
@@ -601,40 +619,55 @@ void sipua_respond_tpl(sip_ua_t *ua, sip_txn_t *t, const resp_tpl_t *tpl, const 
     } else {
         sip_w_cstr(&w, "Content-Length: 0\r\n\r\n");
     }
-    if (w.overflow) {
-        LOGE("response %d does not fit", code);
-        return;
+    if (!w.overflow) {
+        respond_send(ua, t, peer, code, w.len);
+        return 0;
     }
-    if (t) {
-        sipua_log_msg(ua, "send", ua->tx, w.len, &t->peer);
-        sip_txn_respond(&ua->txl, ua->now, t, code, ua->tx, w.len);
-    } else {
-        sipua_send_raw(ua, peer, ua->tx, w.len);
+    if (code < 200) {
+        LOGE("response %d does not fit, not sent", code);
+        return -1;
     }
+    LOGE("response %d does not fit, sending 500", code);
+    sip_w_init(&w, ua->tx, sizeof(ua->tx));
+    w_resp_head(&w, tpl, 500, to_tag);
+    sip_w_cstr(&w, UA_HDR "Content-Length: 0\r\n\r\n");
+    if (!w.overflow) {
+        respond_send(ua, t, peer, 500, w.len);
+    } else if (t) {
+        sip_txn_terminate(t); /* cannot happen with the template sizes; never leak the slot */
+    }
+    return -1;
 }
 
-/* Respond to the request currently in ua->msg. */
-void sipua_respond_msg(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const sip_addr_t *from,
-                        int code, unsigned flags, const char *extra)
+/* Respond to the request currently in ua->msg. Returns sipua_respond_tpl's
+ * result; -1 also when no response can be built from the request at all
+ * (e.g. its Via headers do not fit the template): then t is terminated, as
+ * nothing will ever be sent on it (retransmissions start over). */
+int sipua_respond_msg(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const sip_addr_t *from,
+                      int code, unsigned flags, const char *extra)
 {
     char tag[TAG_LEN + 1];
     if (sipua_tpl_from_msg(&ua->tpl_scratch, m, from) != 0) {
-        LOGW("cannot build response template");
-        return;
+        LOGW("cannot build response template, %d not sent", code);
+        if (t) {
+            sip_txn_terminate(t);
+        }
+        return -1;
     }
     sipua_new_tag(ua, tag);
-    sipua_respond_tpl(ua, t, &ua->tpl_scratch, from, code, tag, flags, extra, NULL, 0);
+    return sipua_respond_tpl(ua, t, &ua->tpl_scratch, from, code, tag, flags, extra, NULL, 0);
 }
 
-/* response on a call's INVITE server transaction (tag = dialog local tag) */
-static void call_respond(sip_ua_t *ua, call_t *c, int code, unsigned flags, const char *body, size_t len)
+/* Response on a call's INVITE server transaction (tag = dialog local tag);
+ * result as sipua_respond_tpl, -1 also when the transaction is gone. */
+static int call_respond(sip_ua_t *ua, call_t *c, int code, unsigned flags, const char *body, size_t len)
 {
     sip_txn_t *t = sip_txn_find(&ua->txl, c->uas_inv_txn);
     if (!t) {
         LOGW("call %d: INVITE transaction gone, cannot send %d", c->handle, code);
-        return;
+        return -1;
     }
-    sipua_respond_tpl(ua, t, &c->tpl, &t->peer, code, c->dlg.local_tag, flags, NULL, body, len);
+    return sipua_respond_tpl(ua, t, &c->tpl, &t->peer, code, c->dlg.local_tag, flags, NULL, body, len);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1374,7 +1407,13 @@ static void tu_on_timeout(void *ctx, sip_txn_t *t)
         }
         break;
     case OWN_SERVER_INVITE:
-        if (c && t->state == SIP_TS_ACCEPTED && c->awaiting_ack && c->uas_inv_txn == t->id) {
+        if (c && t->state == SIP_TS_PROCEEDING && c->st == CS_IN_RINGING && c->uas_inv_txn == t->id) {
+            /* rang for SIP_TIMER_C_MS without an answer (the caller side
+             * normally gives up first): the final response keeps t alive */
+            LOGI("call %d: unanswered, sending 480", c->handle);
+            call_respond(ua, c, 480, 0, NULL, 0);
+            end_call(ua, c, SIP_END_TIMEOUT, 480, true);
+        } else if (c && t->state == SIP_TS_ACCEPTED && c->awaiting_ack && c->uas_inv_txn == t->id) {
             /* §13.3.1.4: no ACK for our 2xx → end the session */
             LOGW("call %d: no ACK for 2xx", c->handle);
             c->awaiting_ack = false;
@@ -1438,7 +1477,9 @@ static void refuse_invite(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const 
 
 static void on_invite_new(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const sip_addr_t *from)
 {
-    sipua_respond_msg(ua, t, m, from, 100, 0, NULL);
+    if (sipua_respond_msg(ua, t, m, from, 100, 0, NULL) != 0) {
+        return; /* no response fits (t terminated): nothing we can do with it */
+    }
     if (m->body.len && !is_sdp(m)) {
         sipua_respond_msg(ua, t, m, from, 415, 0, "Accept: application/sdp\r\n");
         return;
@@ -1484,7 +1525,11 @@ static void on_invite_new(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const 
         }
         c->have_offer = true;
     }
-    call_respond(ua, c, 180, RF_CONTACT | RF_RR, NULL, 0);
+    if (call_respond(ua, c, 180, RF_CONTACT | RF_RR, NULL, 0) != 0) {
+        call_respond(ua, c, 500, 0, NULL, 0); /* fits: the 100 did */
+        call_free(c);
+        return;
+    }
     c->last_code = 180;
     LOGI("incoming call %d from %s \"%s\"%s%s", c->handle, c->number, c->display, n ? " (waiting)" : "",
          c->answer_after >= 0 ? " (auto answer)" : "");
@@ -1496,7 +1541,10 @@ static void on_invite_new(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const 
     emit_state(ua, c);
 }
 
-/* 200 OK to an INVITE/re-INVITE with our answer (or offer). */
+/* 200 OK to an INVITE/re-INVITE with our answer (or offer). Returns 0, or
+ * -488 / -500 with nothing sent (the caller responds), or ANSWER_FAILED_500
+ * when the 200 did not fit and a 500 went out instead. */
+#define ANSWER_FAILED_500 (-1)
 static int answer_invite(sip_ua_t *ua, call_t *c, unsigned flags)
 {
     sip_sdp_neg_t neg;
@@ -1515,9 +1563,13 @@ static int answer_invite(sip_ua_t *ua, call_t *c, unsigned flags)
     if (n < 0) {
         return -500;
     }
+    if (call_respond(ua, c, 200, flags, ua->sdp, (size_t)n) != 0) {
+        c->offer_in_2xx = false;
+        c->have_offer = false;
+        return ANSWER_FAILED_500;
+    }
     c->awaiting_ack = true;
     c->uas_ack_cseq = c->dlg.remote_cseq;
-    call_respond(ua, c, 200, flags, ua->sdp, (size_t)n);
     c->have_offer = false;
     if (have_neg) {
         emit_media(ua, c, &neg, sip_sdp_dir_combine(want_dir(c), neg.remote_dir), false);
@@ -1558,7 +1610,9 @@ static void on_reinvite(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const si
     int r = answer_invite(ua, c, RF_CONTACT | RF_ALLOW);
     if (r < 0) {
         c->have_offer = false;
-        call_respond(ua, c, -r, 0, NULL, 0); /* session unchanged (§14.2) */
+        if (r != ANSWER_FAILED_500) {
+            call_respond(ua, c, -r, 0, NULL, 0); /* session unchanged (§14.2) */
+        }
     } else {
         LOGI("call %d: re-INVITE answered", c->handle);
     }
@@ -1615,6 +1669,9 @@ static void on_cancel(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const sip_
     call_t *c = find_call(ua, inv->owner_ref);
     if (sipua_tpl_from_msg(&ua->tpl_scratch, m, from) == 0) {
         sipua_respond_tpl(ua, t, &ua->tpl_scratch, from, 200, c ? c->dlg.local_tag : NULL, 0, NULL, NULL, 0);
+    } else {
+        LOGW("cannot build response template for CANCEL");
+        sip_txn_terminate(t); /* nothing will ever be sent on it */
     }
     if (c && c->st == CS_IN_RINGING && inv->state == SIP_TS_PROCEEDING) {
         call_respond(ua, c, 487, 0, NULL, 0);
@@ -2278,7 +2335,11 @@ sip_err_t sip_call_answer(sip_ua_t *ua, sip_call_handle_t call)
         c->dlg.confirmed = true;
         int r = answer_invite(ua, c, RF_CONTACT | RF_RR | RF_ALLOW);
         if (r < 0) {
-            call_respond(ua, c, -r, 0, NULL, 0);
+            if (r == ANSWER_FAILED_500) {
+                r = -500;
+            } else {
+                call_respond(ua, c, -r, 0, NULL, 0);
+            }
             end_call(ua, c, SIP_END_ERROR, -r, true);
             err = SIP_ERR_STATE;
         } else {

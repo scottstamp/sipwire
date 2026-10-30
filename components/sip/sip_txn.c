@@ -355,7 +355,6 @@ bool sip_txn_server_absorb(sip_txn_layer_t *l, uint64_t now, sip_txn_t *t, const
 sip_txn_t *sip_txn_server_create(sip_txn_layer_t *l, uint64_t now, const sip_msg_t *m,
                                  const sip_addr_t *from)
 {
-    (void)now;
     const sip_via_t *v = &m->via[0];
     if (v->branch.len >= SIP_BRANCH_MAX) {
         return NULL;
@@ -377,19 +376,25 @@ sip_txn_t *sip_txn_server_create(sip_txn_layer_t *l, uint64_t now, const sip_msg
     /* responses go back to the source address (RFC 3581 symmetric response) */
     t->peer = *from;
     t->len = 0;
+    /* Safety net until a final response arms the RFC timers: a request the TU
+     * never answers (its response did not fit, say) would otherwise hold the
+     * slot forever, absorbing retransmissions. Non-INVITE: the client gives
+     * up after 64*T1 (timer F) anyway. INVITE: may ring for a while; on
+     * expiry the TU gets on_timeout (still Proceeding) and answers 480. */
+    t->t_end = now + (invite ? SIP_TIMER_C_MS : 64u * SIP_T1_MS);
     return t;
 }
 
 void sip_txn_respond(sip_txn_layer_t *l, uint64_t now, sip_txn_t *t, int status,
                      const char *buf, size_t len)
 {
-    if (!store(t, buf, len)) {
+    if (t->id == 0 || !store(t, buf, len)) {
         return;
     }
     t->last_status = status;
     if (t->kind == SIP_TXN_SERVER_INVITE) {
         if (status < 200) {
-            t->state = SIP_TS_PROCEEDING;
+            t->state = SIP_TS_PROCEEDING; /* safety t_end from creation stays */
         } else if (status < 300) {
             /* 2xx retransmission by the UAS core, §13.3.1.4 */
             t->state = SIP_TS_ACCEPTED;
@@ -474,17 +479,20 @@ void sip_txn_tick(sip_txn_layer_t *l, uint64_t now)
                 notify = t->state == SIP_TS_TRYING || t->state == SIP_TS_PROCEEDING; /* F */
                 break;
             case SIP_TXN_SERVER_INVITE:
-                notify = t->state == SIP_TS_COMPLETED || t->state == SIP_TS_ACCEPTED; /* H */
+                /* H; or no final response within SIP_TIMER_C_MS */
+                notify = t->state == SIP_TS_COMPLETED || t->state == SIP_TS_ACCEPTED ||
+                         t->state == SIP_TS_PROCEEDING;
                 break;
             default:
-                break;
+                break; /* server non-INVITE never answered: just reclaim */
             }
             uint32_t id = t->id;
             if (notify) {
                 l->tu.on_timeout(l->tu.ctx, t);
             }
-            /* the TU may have terminated (and even reused) the slot */
-            if (t->id == id) {
+            /* the TU may have terminated (and even reused) the slot, or
+             * responded on it (new timers armed past now) */
+            if (t->id == id && !(t->t_end > now)) {
                 sip_txn_terminate(t);
             }
         }

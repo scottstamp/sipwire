@@ -235,7 +235,13 @@ answer or dialog-info document, plus vsnprintf); a 6 KB sip task stack is
 plenty (log callback not included).
 `sip_udp_poll` uses a static 2 KB receive buffer (one sip task).
 Limits: 2048 B in (larger datagrams are dropped), 1500 B out, 8 Via / Route /
-Contact entries per message, 64 header lines.
+Contact entries per message, 64 header lines. A request whose response cannot
+be built (Via / From / Call-ID over the 800 B template, To or Record-Route too
+long) gets no answer and its server transaction is dropped at once; a final
+response that does not fit 1500 B (e.g. a 200 + SDP behind long Via and
+Record-Route) is replaced by a bare 500. Server transactions also carry a
+safety timeout from creation (64*T1, INVITE 180 s: an unanswered ringing call
+then gets 480), so no request can hold a pool slot forever.
 
 ## Limitations / not implemented
 
@@ -270,7 +276,8 @@ Host (`tools/ci.sh host-test`, needs `IDF_PATH` for Unity), under ASan/UBSan:
   486 (ACK), CANCEL (incl. before provisional and the 200 race), incoming
   answer/reject/remote CANCEL/busy/488, BYE both ways, retransmissions,
   re-INVITE hold (remote and local), delayed offer, G.722 offer/answer and
-  codec preference config, callback re-entrancy.
+  codec preference config, callback re-entrancy, pool slots of requests that
+  cannot be answered, 200 too big → 500, unanswered call → 480.
 * `test_sip_sub` — SUBSCRIBE/401/200/NOTIFY, NOTIFY before the 2xx, refresh
   timing (granted / shortened expires), terminated + noresource / probation +
   retry-after / deactivated, 404 backoff to 5 min, 503 Retry-After, 481 to a
