@@ -108,7 +108,9 @@ menu "Sipwire board"
                 A finger counts as lifted only after the panel reported no touch for this long.
                 A resistive panel drops out for a read or two (~33 ms each) when a dragging finger
                 eases off; without this, that early release turns a scroll into a tap on the item
-                it started on. Taps are reported this much later. 0 = off.
+                it started on. Taps are reported this much later. 0 = off. 80 still let the
+                odd drag through on the reference board; if 120 does too, try lowering
+                XPT2046_Z_THRESHOLD (pressure cut-off, 400) so light contact still counts.
     endmenu
 
     menu "Speaker (I2S DAC + amp)"
