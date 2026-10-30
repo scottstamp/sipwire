@@ -477,9 +477,9 @@ void phone_media_audio(bool stream, phone_tone_t tone)
     }
     if (tone != m.tone) {
         if (tone == PHONE_TONE_RING) {
-            settings_t cfg;
-            settings_get(&cfg);
-            audio_play_ringtone(cfg.ring_tone);     /* selected ringtone, at the ring volume */
+            uint8_t ring_tone;
+            SETTINGS_GET(ring_tone, &ring_tone);
+            audio_play_ringtone(ring_tone);         /* selected ringtone, at the ring volume */
         } else {
             audio_play_tone(to_audio_tone(tone));   /* auto-starts the stream if needed */
         }

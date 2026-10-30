@@ -111,26 +111,26 @@ static int cmd_mute(int argc, char **argv)
 
 static int cmd_vol(int argc, char **argv)
 {
-    phone_status_t st;
     if (argc == 1) {
+        phone_status_t st;
         phone_get_status(&st);
-        settings_t cfg;
-        settings_get(&cfg);
+        uint8_t ring, call, spk;
+        SETTINGS_GET(ring_volume, &ring);
+        SETTINGS_GET(call_volume, &call);
+        SETTINGS_GET(speaker_volume, &spk);
         printf("volume %u%s (saved: ring %u, call %u, speaker %u)\n", st.volume, st.speaker ? " (speaker)" : "",
-               cfg.ring_volume, cfg.call_volume, cfg.speaker_volume);
+               ring, call, spk);
         return 0;
     }
     /* vol ring|call|spk <0-100>: set one stored volume directly (persisted at once; the phone
      * picks it up from the settings event) */
-    uint8_t *field = NULL;
-    settings_t cfg;
-    settings_get(&cfg);
+    size_t field = 0;               /* offset in settings_t (no volume is at 0) */
     if (argc == 3 && strcmp(argv[1], "ring") == 0) {
-        field = &cfg.ring_volume;
+        field = offsetof(settings_t, ring_volume);
     } else if (argc == 3 && strcmp(argv[1], "call") == 0) {
-        field = &cfg.call_volume;
+        field = offsetof(settings_t, call_volume);
     } else if (argc == 3 && (strcmp(argv[1], "spk") == 0 || strcmp(argv[1], "speaker") == 0)) {
-        field = &cfg.speaker_volume;
+        field = offsetof(settings_t, speaker_volume);
     }
     const char *num = field ? argv[2] : argv[1];
     char *end = NULL;
@@ -140,8 +140,8 @@ static int cmd_vol(int argc, char **argv)
         return 1;
     }
     if (field) {
-        *field = (uint8_t)v;
-        esp_err_t err = settings_set(&cfg);
+        uint8_t v8 = (uint8_t)v;
+        esp_err_t err = settings_set_field(field, &v8, sizeof(v8));
         if (err != ESP_OK) {
             printf("save failed: %s\n", esp_err_to_name(err));
             return 1;
@@ -155,13 +155,14 @@ static int cmd_vol(int argc, char **argv)
 static int cmd_ring(int argc, char **argv)
 {
     int n = audio_ringtone_count();
-    settings_t cfg;
-    settings_get(&cfg);
     if (argc == 1 || strcmp(argv[1], "list") == 0) {
+        uint8_t tone, vol;
+        SETTINGS_GET(ring_tone, &tone);
+        SETTINGS_GET(ring_volume, &vol);
         for (int i = 0; i < n; i++) {
-            printf("%d %s%s\n", i, audio_ringtone_name(i), i == cfg.ring_tone ? " *" : "");
+            printf("%d %s%s\n", i, audio_ringtone_name(i), i == tone ? " *" : "");
         }
-        printf("ring volume %u\n", cfg.ring_volume);
+        printf("ring volume %u\n", vol);
         return 0;
     }
     if (strcmp(argv[1], "stop") == 0) {
@@ -174,8 +175,8 @@ static int cmd_ring(int argc, char **argv)
         printf("usage: ring [list] | ring <0-%d> | ring stop\n", n - 1);
         return 1;
     }
-    cfg.ring_tone = (uint8_t)v;
-    esp_err_t err = settings_set(&cfg);
+    uint8_t tone = (uint8_t)v;
+    esp_err_t err = SETTINGS_SET(ring_tone, &tone);
     if (err != ESP_OK) {
         printf("save failed: %s\n", esp_err_to_name(err));
         return 1;

@@ -219,14 +219,16 @@ static void on_settings_event(void *arg, esp_event_base_t base, int32_t id, void
     if (id != SETTINGS_EVENT_CHANGED) {
         return;
     }
-    settings_t s;
-    settings_get(&s);
+    char ssid[sizeof(s_ssid)], pass[sizeof(s_pass)];
+    SETTINGS_GET(wifi_ssid, &ssid);
+    SETTINGS_GET(wifi_pass, &pass);
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (strcmp(s.wifi_ssid, s_ssid) != 0 || strcmp(s.wifi_pass, s_pass) != 0) {
-        apply_creds(s.wifi_ssid, s.wifi_pass);
+    if (strcmp(ssid, s_ssid) != 0 || strcmp(pass, s_pass) != 0) {
+        apply_creds(ssid, pass);
     }
     xSemaphoreGive(s_lock);
+    memset(pass, 0, sizeof(pass));
 }
 
 #if CONFIG_SIPWIRE_QEMU
@@ -299,10 +301,8 @@ esp_err_t net_init(void)
     ESP_RETURN_ON_ERROR(esp_timer_create(&retry_args, &s_retry_timer), TAG, "retry timer");
     ESP_RETURN_ON_ERROR(esp_timer_create(&rssi_args, &s_rssi_timer), TAG, "rssi timer");
 
-    settings_t s;
-    settings_get(&s);
-    memcpy(s_ssid, s.wifi_ssid, sizeof(s_ssid));
-    memcpy(s_pass, s.wifi_pass, sizeof(s_pass));
+    SETTINGS_GET(wifi_ssid, &s_ssid);
+    SETTINGS_GET(wifi_pass, &s_pass);
 
     ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif init");
     esp_netif_t *netif = esp_netif_create_default_wifi_sta();

@@ -637,11 +637,10 @@ static void apply_time_cfg(const char *ntp, const char *tz)
 
 static void apply_time_from_settings(void)
 {
-    static settings_t st;           /* default loop task (and init, before the handlers exist) */
-    settings_get(&st);
-    apply_time_cfg(st.ntp_server, st.tz);
-    memset(st.wifi_pass, 0, sizeof(st.wifi_pass));
-    memset(st.sip_password, 0, sizeof(st.sip_password));
+    char ntp[sizeof(s_ntp)], tz[sizeof(s_tz)];
+    SETTINGS_GET(ntp_server, &ntp);
+    SETTINGS_GET(tz, &tz);
+    apply_time_cfg(ntp, tz);
 }
 
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)

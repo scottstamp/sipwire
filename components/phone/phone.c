@@ -1955,16 +1955,7 @@ esp_err_t phone_transfer_attended_cancel(void)
 
 esp_err_t phone_set_dnd(bool on)
 {
-    settings_t *cur = malloc(sizeof(*cur));     /* ~1 KB: not on the caller's stack */
-    ESP_RETURN_ON_FALSE(cur, ESP_ERR_NO_MEM, TAG, "no memory");
-    settings_get(cur);
-    esp_err_t err = ESP_OK;
-    if (cur->dnd != on) {
-        cur->dnd = on;
-        err = settings_set(cur);        /* applied by the sip task on SETTINGS_EVENT_CHANGED */
-    }
-    free(cur);
-    return err;
+    return SETTINGS_SET(dnd, &on);      /* applied by the sip task on SETTINGS_EVENT_CHANGED */
 }
 
 void phone_set_mute(bool muted)
