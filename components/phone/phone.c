@@ -28,6 +28,7 @@
 #include "directory.h"
 #include "esp_check.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
@@ -161,6 +162,10 @@ static struct {
     .udp = { .fd = -1 },
     .wake_fd = -1,
 };
+
+/* Scratch settings_t (~1.3 KB) for on_settings() and the volume save: sip task only, both
+ * rare, so in PSRAM when there is some (internal RAM is the scarce resource). */
+static settings_t *s_cfg;
 
 static uint64_t now_ms(void)
 {
@@ -1304,26 +1309,26 @@ static void apply_features(const settings_t *st)
 
 static void on_settings(uint64_t now)
 {
-    static settings_t ns;               /* sip task only; keep it off the stack */
-    settings_get(&ns);
+    settings_t *ns = s_cfg;
+    settings_get(ns);
 
     st_lock();
     if (!s.vol_dirty) {
-        s.ring_vol = ns.ring_volume;
-        s.call_vol = ns.call_volume;
-        s.spk_vol = ns.speaker_volume;
+        s.ring_vol = ns->ring_volume;
+        s.call_vol = ns->call_volume;
+        s.spk_vol = ns->speaker_volume;
     }
     st_unlock();
     apply_volume();
-    apply_aec(&ns);
-    apply_features(&ns);
+    apply_aec(ns);
+    apply_features(ns);
 
-    if (account_changed(&ns, &s.acc)) {
+    if (account_changed(ns, &s.acc)) {
         ESP_LOGI(TAG, "SIP account changed, re-registering");
-        s.acc = ns;
+        s.acc = *ns;
         ua_restart(now);
     }
-    blf_apply(ns.blf);
+    blf_apply(ns->blf);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1655,13 +1660,13 @@ static void housekeeping(uint64_t now)
     }
     st_unlock();
     if (save) {
-        static settings_t cur;          /* sip task only */
-        settings_get(&cur);
-        if (cur.ring_volume != ring || cur.call_volume != call || cur.speaker_volume != spk) {
-            cur.ring_volume = ring;
-            cur.call_volume = call;
-            cur.speaker_volume = spk;
-            esp_err_t err = settings_set(&cur);
+        settings_t *cur = s_cfg;
+        settings_get(cur);
+        if (cur->ring_volume != ring || cur->call_volume != call || cur->speaker_volume != spk) {
+            cur->ring_volume = ring;
+            cur->call_volume = call;
+            cur->speaker_volume = spk;
+            esp_err_t err = settings_set(cur);
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "saving volume: %s", esp_err_to_name(err));
             }
@@ -1780,7 +1785,8 @@ esp_err_t phone_init(void)
     ESP_RETURN_ON_FALSE(!s.inited, ESP_ERR_INVALID_STATE, TAG, "already initialised");
     s.st_mtx = xSemaphoreCreateMutex();
     s.q = xQueueCreate(CMD_QUEUE_LEN, sizeof(phone_cmd_t));
-    ESP_RETURN_ON_FALSE(s.st_mtx && s.q, ESP_ERR_NO_MEM, TAG, "no memory");
+    s_cfg = heap_caps_malloc_prefer(sizeof(*s_cfg), 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, MALLOC_CAP_8BIT);
+    ESP_RETURN_ON_FALSE(s.st_mtx && s.q && s_cfg, ESP_ERR_NO_MEM, TAG, "no memory");
     ESP_RETURN_ON_ERROR(phone_media_init(), TAG, "media init");
 
     /* wake-up channel for the sip task's select(); without it the task polls every POLL_MS */
