@@ -14,7 +14,7 @@ OTA (confirmed on device, much faster than serial flashing).
 Built so far (all merged, host-tested, QEMU-smoke-tested):
 - `board` (all pins in Kconfig; defaults = the reference board), `common`
   (event bus), `storage` (NVS settings), `net` (Wi-Fi; power save off during
-  calls), `cli` (serial console `sipwire>`), `display` (ILI9341 + XPT2046,
+  calls), `power` (DFS), `cli` (serial console `sipwire>`), `display` (ILI9341 + XPT2046,
   backlight, raw-touch hook), `keypad`, `audio` (I2S full duplex 16 kHz,
   tones), `codec` (G.711, G.722, 2x resampler), `rtp` (jitter buffer, PLC,
   RFC 4733 DTMF), `sip` (own RFC 3261 UA + RFC 6665 subscriptions),
@@ -52,6 +52,10 @@ Open development work (see `docs/PLAN.md` for the full list):
   console `contact import`), SD card (not wanted: the `storage` partition is used).
 - Review task priorities, DMA sizing, PSRAM placement (`[core]`).
 - SIP over TCP/TLS, SRTP, RTCP (optional).
+- Power (2026-10-30, ARCHITECTURE "Power"): Wi-Fi modem sleep idle / PS_NONE for the whole
+  call (ringing, held, two calls), DFS 240/80 MHz (`power` component; 80 only with no call
+  and the backlight off), tone-only audio stream auto-stops after 2 s idle. No light sleep
+  (reasons documented). Console `power`. **Not yet verified on device.**
 - Known small gaps: https OTA untested. (SIP INFO DTMF fallback, 491 retry,
   RTP timestamps after hold and speaker-volume persistence are done.)
 - Call waiting / transfer / DND / page auto answer: phone + SIP done (see

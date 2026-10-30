@@ -6,6 +6,7 @@ idf_component_register(
     PRIV_REQUIRES
         board
         common
+        power
         storage
         esp_driver_gpio
         esp_driver_ledc

@@ -66,3 +66,8 @@ CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID=y
 # IPC tasks (ipc0/ipc1, IDF-internal cross-core calls): the 1280 default left only 228 B
 # free on ipc0 in the QEMU smoke test (during a call); +768 B each.
 CONFIG_ESP_IPC_TASK_STACK_SIZE=2048
+
+# Power (components/power, docs/ARCHITECTURE.md "Power"): dynamic frequency scaling. The CPU
+# drops to CONFIG_SIPWIRE_POWER_MIN_CPU_MHZ (80) only with no call and the backlight off.
+# No automatic light sleep (FREERTOS_USE_TICKLESS_IDLE stays off).
+CONFIG_PM_ENABLE=y

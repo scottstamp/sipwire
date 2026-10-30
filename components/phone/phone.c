@@ -35,6 +35,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "net.h"
+#include "power.h"
 #include "settings.h"
 #include "sip_ua.h"
 #include "sipwire_events.h"
@@ -310,6 +311,16 @@ static void apply_volume(void)
     audio_set_volume(v);
 }
 
+/* Power policy: from the first ring (or dial) of a call until no call is left, Wi-Fi power
+ * save is off (DTIM bursts stutter RTP) and the CPU stays at full speed (G.722, AEC). That
+ * covers ringing, active, held, a second (waiting or held) call and the ended screen. */
+static void update_power(void)
+{
+    bool busy = s.state != SIP_UA_CALL_IDLE || s.bg.h != 0;
+    net_set_low_latency(busy);
+    power_hold(POWER_HOLD_CALL, busy);
+}
+
 /* Publish s.state (+ number/name/end_code already in s.st) to everyone:
  * status snapshot, media flags, tones/streaming, volume, CALL_EVENT. */
 static void publish_call_state(void)
@@ -332,6 +343,7 @@ static void publish_call_state(void)
     s.st.line = s.line;
     st_unlock();
 
+    update_power();                     /* before media/tones: PS off ahead of RTP */
     phone_media_set_state(s.state);
     bool early = phone_media_early();
     bool stream = phone_media_active() &&
@@ -393,6 +405,7 @@ static void post_second(call_state_t state, int end_code, const char *number, co
         s.st.second.call = CALL_IDLE;
     }
     st_unlock();
+    update_power();
 
     call_event_state_t ev;
     memset(&ev, 0, sizeof(ev));

@@ -14,6 +14,7 @@
 #include "net.h"
 #include "ota.h"
 #include "phone.h"
+#include "power.h"
 #include "settings.h"
 #include "status_led.h"
 #include "ui_bridge.h"
@@ -40,6 +41,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(board_init());
     ESP_ERROR_CHECK(settings_init());
+    ESP_ERROR_CHECK(power_init());  /* DFS + `power` console command; before display/phone */
     ESP_ERROR_CHECK(dir_init());    /* contacts / speed dial / call history on the FAT partition */
     ESP_ERROR_CHECK(net_init());
     ESP_ERROR_CHECK(ota_init());    /* starts the rollback health watch; see ota.h */

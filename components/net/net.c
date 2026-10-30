@@ -35,6 +35,9 @@ static char s_pass[sizeof(((settings_t *)0)->wifi_pass)];
 static uint32_t s_backoff_ms = BACKOFF_MIN_MS;
 static bool s_associated;                 /* between STA_CONNECTED and STA_DISCONNECTED */
 static bool s_expect_leave;               /* we called esp_wifi_disconnect() to switch creds */
+#if !CONFIG_SIPWIRE_QEMU
+static bool s_low_latency;                /* WIFI_PS_NONE (call) instead of WIFI_PS_MIN_MODEM */
+#endif
 
 static atomic_bool s_connected;
 
@@ -343,11 +346,21 @@ void net_set_low_latency(bool enable)
 #if CONFIG_SIPWIRE_QEMU
     (void)enable;
 #else
-    esp_err_t err = esp_wifi_set_ps(enable ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "wifi ps: %s", esp_err_to_name(err));
-    } else {
-        ESP_LOGI(TAG, "power save %s", enable ? "off (call)" : "on");
+    /* Called on every call state change: only touch the driver when the mode changes. A
+     * failed switch leaves s_low_latency as it was, so the next call retries. */
+    if (s_lock == NULL) {
+        return;
     }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (enable != s_low_latency) {
+        esp_err_t err = esp_wifi_set_ps(enable ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "wifi ps: %s", esp_err_to_name(err));
+        } else {
+            s_low_latency = enable;
+            ESP_LOGI(TAG, "power save %s", enable ? "off (call)" : "on (modem sleep)");
+        }
+    }
+    xSemaphoreGive(s_lock);
 #endif
 }

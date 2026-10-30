@@ -228,6 +228,27 @@ menu "Sipwire board"
             default -1
     endmenu
 
+    menu "Power (components/power)"
+        config SIPWIRE_POWER_DFS
+            bool "Dynamic CPU frequency scaling while idle"
+            depends on PM_ENABLE
+            default y
+            help
+                Run the CPU at the minimum frequency below when no call exists and
+                the backlight is off; full speed otherwise. Wi-Fi modem sleep while
+                idle is separate (net) and always on. Automatic light sleep is never
+                used (docs/ARCHITECTURE.md "Power").
+        config SIPWIRE_POWER_MIN_CPU_MHZ
+            int "Idle CPU frequency (MHz): 80, 160 or 240"
+            depends on SIPWIRE_POWER_DFS
+            range 80 240
+            default 80
+            help
+                Not below 80: under 80 MHz the CPU runs from XTAL and APB drops to
+                40 MHz, which changes the UART, LEDC (backlight PWM) and other
+                APB-clocked peripherals mid-operation.
+    endmenu
+
     config SIPWIRE_QEMU
         bool "QEMU smoke-test build"
         default n
