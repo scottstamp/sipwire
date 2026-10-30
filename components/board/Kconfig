@@ -244,6 +244,21 @@ menu "Sipwire board"
     endmenu
 
     menu "Power (components/power)"
+        config SIPWIRE_WIFI_LISTEN_INTERVAL
+            int "Wi-Fi listen interval while idle (beacons; 1 = every DTIM)"
+            range 1 10
+            default 3
+            help
+                Wi-Fi power save while no call exists (components/net). 1: WIFI_PS_MIN_MODEM,
+                the radio wakes for every DTIM beacon. 2-10: WIFI_PS_MAX_MODEM, it wakes
+                every this many beacons (the listen interval is announced to the AP when
+                associating). Calls always use WIFI_PS_NONE.
+                Trade-off: the AP holds an incoming INVITE until the next wake-up, so
+                ringing may start up to listen interval x beacon interval later (3 x
+                102.4 ms = 0.3 s; 10 = 1 s, then SIP T1 retransmits the INVITE once).
+                Broadcasts (ARP requests from the PBX or router) come only at DTIM
+                beacons and are missed when the listen interval skips them: keep it a
+                multiple of the AP's DTIM period.
         config SIPWIRE_POWER_DFS
             bool "Dynamic CPU frequency scaling while idle"
             depends on PM_ENABLE
@@ -251,8 +266,8 @@ menu "Sipwire board"
             help
                 Run the CPU at the minimum frequency below when no call exists and
                 the backlight is off; full speed otherwise. Wi-Fi modem sleep while
-                idle is separate (net) and always on. Light sleep: next option
-                (docs/ARCHITECTURE.md "Power").
+                idle is separate (net, SIPWIRE_WIFI_LISTEN_INTERVAL) and always on.
+                Light sleep: next option (docs/ARCHITECTURE.md "Power").
         config SIPWIRE_POWER_MIN_CPU_MHZ
             int "Idle CPU frequency (MHz): 80, 160 or 240"
             depends on SIPWIRE_POWER_DFS

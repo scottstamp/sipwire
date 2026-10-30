@@ -36,7 +36,18 @@ static uint32_t s_backoff_ms = BACKOFF_MIN_MS;
 static bool s_associated;                 /* between STA_CONNECTED and STA_DISCONNECTED */
 static bool s_expect_leave;               /* we called esp_wifi_disconnect() to switch creds */
 #if !CONFIG_SIPWIRE_QEMU
-static bool s_low_latency;                /* WIFI_PS_NONE (call) instead of WIFI_PS_MIN_MODEM */
+static bool s_low_latency;                /* WIFI_PS_NONE (call) instead of NET_IDLE_PS */
+#endif
+
+/* Idle Wi-Fi power save. Listen interval 1 = WIFI_PS_MIN_MODEM: the radio wakes for every DTIM
+ * beacon. Above 1 = WIFI_PS_MAX_MODEM: it wakes every CONFIG_SIPWIRE_WIFI_LISTEN_INTERVAL
+ * beacons (the interval is announced in the association request, so it is set in the STA
+ * config before connecting, apply_creds). An incoming INVITE then waits in the AP for up to
+ * listen_interval x beacon interval (3 x 102.4 ms = 0.3 s by default). Calls: WIFI_PS_NONE. */
+#if CONFIG_SIPWIRE_WIFI_LISTEN_INTERVAL > 1
+#define NET_IDLE_PS     WIFI_PS_MAX_MODEM
+#else
+#define NET_IDLE_PS     WIFI_PS_MIN_MODEM
 #endif
 
 static atomic_bool s_connected;
@@ -106,6 +117,7 @@ static esp_err_t apply_creds(const char *ssid, const char *pass)
     memcpy(cfg.sta.password, pass, pass_len);
     cfg.sta.threshold.authmode = pass_len > 0 ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
     cfg.sta.pmf_cfg.capable = true;
+    cfg.sta.listen_interval = CONFIG_SIPWIRE_WIFI_LISTEN_INTERVAL;     /* only WIFI_PS_MAX_MODEM uses it */
 
     memmove(s_ssid, ssid, ssid_len + 1);   /* ssid may alias s_ssid */
     memmove(s_pass, pass, pass_len + 1);
@@ -311,10 +323,9 @@ esp_err_t net_init(void)
                         TAG, "register settings handler");
 
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi start");
-    /* WIFI_PS_MIN_MODEM while idle: radio sleeps between DTIM beacons only, enough for SIP
-     * signalling. Calls switch to PS_NONE (net_set_low_latency): during media the DTIM
-     * bursts stutter the audio. MAX_MODEM adds listen-interval latency to incoming INVITEs. */
-    ESP_RETURN_ON_ERROR(esp_wifi_set_ps(WIFI_PS_MIN_MODEM), TAG, "wifi ps");
+    /* Modem sleep while idle (NET_IDLE_PS above), enough for SIP signalling. Calls switch to
+     * PS_NONE (net_set_low_latency): during media the beacon-paced bursts stutter the audio. */
+    ESP_RETURN_ON_ERROR(esp_wifi_set_ps(NET_IDLE_PS), TAG, "wifi ps");
 
     ESP_LOGI(TAG, "wifi sta started%s", s_ssid[0] ? "" : " (no SSID configured, idle)");
     return ESP_OK;
@@ -353,7 +364,7 @@ void net_set_low_latency(bool enable)
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (enable != s_low_latency) {
-        esp_err_t err = esp_wifi_set_ps(enable ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM);
+        esp_err_t err = esp_wifi_set_ps(enable ? WIFI_PS_NONE : NET_IDLE_PS);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "wifi ps: %s", esp_err_to_name(err));
         } else {

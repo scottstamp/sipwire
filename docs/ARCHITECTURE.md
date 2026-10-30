@@ -283,14 +283,25 @@ on every foreground / background call state change and sets, for as long as any 
 `net_set_low_latency(true)` (Wi-Fi `WIFI_PS_NONE`) and `power_hold(POWER_HOLD_CALL)` (CPU at
 full speed, no light sleep). Both drop when the phone is idle again.
 
-- **Wi-Fi modem sleep** (`net`): `WIFI_PS_MIN_MODEM` while idle. The radio sleeps between
-  beacons and wakes at every DTIM beacon; the AP buffers unicast frames for us meanwhile.
-  INVITE latency: up to one DTIM interval (beacon interval 102.4 ms x the AP's DTIM period;
-  DTIM 1-3 = 0.1-0.3 s worst case, half that on average); after an ARP cache expiry the
-  PBX's ARP request is also buffered, so up to two intervals. SIP T1 is 500 ms, so at DTIM <= 3
-  the INVITE is not even retransmitted; ringing starts within ~0.3 s. Keep the AP's DTIM at
-  1-3. `WIFI_PS_MAX_MODEM` (listen interval) is not used: it multiplies this latency.
-  During calls modem sleep is off: DTIM-paced RTP delivery underruns the jitter buffer.
+- **Wi-Fi modem sleep** (`net`, board Kconfig `SIPWIRE_WIFI_LISTEN_INTERVAL`, default 3,
+  range 1-10). Idle, the radio sleeps between beacons and the AP buffers unicast frames for
+  us meanwhile (announced in the beacon's TIM).
+  - Listen interval > 1 (default): `WIFI_PS_MAX_MODEM`. The STA config carries
+    `listen_interval` (set in `apply_creds` before every connect; the AP learns it from the
+    association request) and the radio wakes every `listen_interval` beacons. INVITE
+    latency: up to listen interval x beacon interval (3 x 102.4 ms = 0.31 s worst case, half
+    on average; 10 = 1.02 s, past SIP T1 = 500 ms, so the INVITE is retransmitted once and
+    both copies arrive together). After an ARP cache expiry the PBX's ARP request comes
+    first: broadcasts are sent only after DTIM beacons, and a wake-up that is not on a DTIM
+    beacon misses them (the PBX repeats its ARP, ~1 s later). Keep the listen interval a
+    multiple of the AP's DTIM period (DTIM 1 or 3 with the default 3).
+  - Listen interval 1: `WIFI_PS_MIN_MODEM` as before, wakes at every DTIM beacon (DTIM 1-3 =
+    0.1-0.3 s worst case INVITE latency, no missed broadcasts).
+  - Saving: with DTIM 1, MAX_MODEM at 3 receives one beacon in three; the radio's receive
+    wake-ups dominate idle Wi-Fi current. To measure on the device.
+  During calls (`net_set_low_latency(true)`) modem sleep is off: beacon-paced RTP delivery
+  underruns the jitter buffer. Afterwards the idle mode returns. `power` prints the mode
+  (`wifi ps`), incl. the listen interval.
 - **Dynamic frequency scaling** (`power`, `CONFIG_PM_ENABLE`, board Kconfig
   `SIPWIRE_POWER_DFS` / `SIPWIRE_POWER_MIN_CPU_MHZ`): `esp_pm_configure` max =
   `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ` (240), min = 80, light sleep below. One
@@ -378,12 +389,12 @@ full speed, no light sleep). Both drop when the phone is idle again.
     during a call (ringing, dialing, ended screen) or with the backlight on / dimmed (LEDC
     PWM stops in light sleep, the panel needs SPI). `console` (NO_LIGHT_SLEEP only, DFS
     unaffected): see console below.
-  - Wi-Fi: stays associated; `WIFI_PS_MIN_MODEM` + light sleep, the PM layer wakes the chip
-    for every DTIM beacon. Unicast for us (INVITE, ARP) is buffered by the AP and announced in
-    the beacon's TIM, so INVITE latency is as for modem sleep (one DTIM interval, see above)
-    plus the light-sleep exit (order of a millisecond). The INVITE turns into a call state change: `call`
-    hold (no more sleep), `WIFI_PS_NONE`, backlight on. No listen interval (MAX_MODEM is not
-    used). Wi-Fi sleep options left at the IDF defaults (`ESP_WIFI_SLP_IRAM_OPT`,
+  - Wi-Fi: stays associated; modem sleep (above) + light sleep, the PM layer wakes the chip
+    for every beacon the radio listens to (each DTIM, or each listen interval). Unicast for us
+    (INVITE, ARP) is buffered by the AP and announced in the beacon's TIM, so INVITE latency
+    is as for modem sleep (see above) plus the light-sleep exit (order of a millisecond). The
+    INVITE turns into a call state change: `call` hold (no more sleep), `WIFI_PS_NONE`,
+    backlight on. Wi-Fi sleep options left at the IDF defaults (`ESP_WIFI_SLP_IRAM_OPT`,
     `PM_SLP_IRAM_OPT` off: they would cost IRAM, see "Memory and tasks").
   - Wake sources (`power.c` `light_sleep_setup`): GPIO (`esp_sleep_enable_gpio_wakeup`) with
     the keypad columns and the touch PENIRQ armed level-low by their drivers

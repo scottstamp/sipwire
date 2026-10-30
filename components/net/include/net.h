@@ -16,8 +16,9 @@ bool net_is_connected(void);
 const char *net_ip_str(void);
 
 /** Low-latency mode for calls: Wi-Fi power save off (WIFI_PS_NONE) while
- *  enabled, back to WIFI_PS_MIN_MODEM when disabled. Power save delivers RTP
- *  in bursts at DTIM wakeups, which underruns the jitter buffer. The phone
+ *  enabled, back to the idle mode when disabled (WIFI_PS_MAX_MODEM with
+ *  CONFIG_SIPWIRE_WIFI_LISTEN_INTERVAL > 1, else WIFI_PS_MIN_MODEM). Power save
+ *  delivers RTP in bursts at beacon wakeups, which underruns the jitter buffer. The phone
  *  enables it for as long as any call exists (ringing, active, held, two
  *  calls). Idempotent; only a change reaches the driver. */
 void net_set_low_latency(bool enable);
