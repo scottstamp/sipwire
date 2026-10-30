@@ -3,12 +3,18 @@
 /* RFC 3261 §17 transactions over UDP, plus the RFC 6026 "Accepted" state for
  * INVITE 2xx handling:
  *   client INVITE     Calling → Proceeding → Completed (ACK, timer D) |
- *                     Accepted (2xx passed up, timer M)
+ *                     Accepted (2xx passed up, timer M); Proceeding is
+ *                     bounded by timer C (SIP_TIMER_C_MS, restarted by each
+ *                     1xx) and, once CANCELled, by 64*T1 (§9.1)
  *   client non-INVITE Trying → Proceeding → Completed (timer K)
  *   server INVITE     Proceeding → Completed (G/H) → Confirmed (I) |
  *                     Accepted (2xx retransmitted until the TU sees the ACK,
  *                     §13.3.1.4; 64*T1 without ACK → TU timeout)
  *   server non-INVITE Trying → Proceeding → Completed (timer J)
+ * Server transactions are also armed with a safety timeout at creation
+ * (64*T1 non-INVITE, SIP_TIMER_C_MS INVITE): a request the TU never answers
+ * with a final response (e.g. the response did not fit) must not hold its
+ * pool slot forever while absorbing retransmissions.
  * The layer owns a fixed pool. The transaction user (UA) refers to entries
  * by id, so a freed slot is never confused with a reused one. */
 
@@ -22,6 +28,10 @@
 #define SIP_T2_MS          4000u
 #define SIP_T4_MS          5000u
 #define SIP_TIMER_D_MS     32000u
+/* Longest an INVITE may stay without a final response (RFC 3261 timer C is
+ * "> 3 min"): our client INVITE after a provisional, and a server INVITE
+ * still ringing (the TU then answers 480). */
+#define SIP_TIMER_C_MS     180000u
 #define SIP_MAX_TXN        16
 #define SIP_BRANCH_MAX     72
 #define SIP_SENTBY_MAX     80
@@ -56,6 +66,7 @@ typedef struct {
     uint32_t retx_iv;
     uint64_t t_end;                 /* timeout / linger end, 0 = none */
     int last_status;
+    bool cancelled;                 /* client INVITE: CANCEL sent (§9.1 64*T1 bound) */
     int owner;                      /* TU bookkeeping */
     int owner_ref;
     uint16_t len;
@@ -66,7 +77,9 @@ typedef struct {
     void (*send)(void *ctx, const sip_addr_t *to, const char *buf, size_t len);
     /* client: provisional/final response to pass up (incl. 2xx in Accepted) */
     void (*on_response)(void *ctx, sip_txn_t *t, const sip_msg_t *m);
-    /* client: timer B/F; server INVITE: timer H or no ACK for 2xx */
+    /* client: timer B/F, INVITE timer C / CANCEL bound; server INVITE: timer H, no ACK for 2xx, or no final
+     * response within SIP_TIMER_C_MS (still Proceeding). A TU that responds
+     * on the transaction from this callback keeps it alive (new timers). */
     void (*on_timeout)(void *ctx, sip_txn_t *t);
     void *ctx;
 } sip_txn_tu_t;
@@ -96,6 +109,9 @@ sip_txn_t *sip_txn_client_start(sip_txn_layer_t *l, uint64_t now, sip_method_t m
 bool sip_txn_on_response(sip_txn_layer_t *l, uint64_t now, const sip_msg_t *m);
 /* CANCEL for a client INVITE transaction (§9.1). Returns length or -1. */
 int sip_txn_build_cancel(const sip_txn_t *t, char *out, size_t cap);
+/* A CANCEL for this client INVITE went out: without a final response within
+ * 64*T1 the transaction ends (§9.1; on_timeout, as for timer B / C). */
+void sip_txn_cancel_sent(sip_txn_t *t, uint64_t now);
 
 /* Server: find the transaction a request belongs to (ACK → INVITE). */
 sip_txn_t *sip_txn_server_match(sip_txn_layer_t *l, const sip_msg_t *m);
@@ -103,7 +119,8 @@ sip_txn_t *sip_txn_server_match(sip_txn_layer_t *l, const sip_msg_t *m);
 bool sip_txn_server_absorb(sip_txn_layer_t *l, uint64_t now, sip_txn_t *t, const sip_msg_t *m);
 sip_txn_t *sip_txn_server_create(sip_txn_layer_t *l, uint64_t now, const sip_msg_t *m,
                                  const sip_addr_t *from);
-/* Send (and remember for retransmission) a response on a server txn. */
+/* Send (and remember for retransmission) a response on a server txn. A
+ * terminated transaction (id 0) is ignored. */
 void sip_txn_respond(sip_txn_layer_t *l, uint64_t now, sip_txn_t *t, int status,
                      const char *buf, size_t len);
 /* The TU received the ACK for a 2xx sent on this server INVITE txn. */

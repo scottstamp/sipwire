@@ -53,6 +53,9 @@ int sip_dialog_set_target(sip_dialog_t *d, const sip_msg_t *m)
     if (sip_uri_parse(m->contact[0].uri, &u) != 0) {
         return -1;
     }
+    if (m->contact[0].uri.len >= sizeof(d->remote_target)) {
+        return -1; /* checked first: sip_str_copy would wipe the old target */
+    }
     return sip_str_copy(d->remote_target, sizeof(d->remote_target), m->contact[0].uri) < 0 ? -1 : 0;
 }
 

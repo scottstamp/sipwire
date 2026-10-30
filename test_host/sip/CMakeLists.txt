@@ -21,6 +21,8 @@ foreach(t test_sip_msg test_sip_auth test_sip_sdp test_sip_ua test_sip_sub test_
     target_link_libraries(${t} sip_core unity)
     add_test(NAME ${t} COMMAND ${t})
 endforeach()
+# the UA tests also drive sip_udp_poll over a loopback socket
+target_sources(test_sip_ua PRIVATE ${SIP_DIR}/sip_udp.c)
 
 # integration client (integration.sh), not a ctest; speaks RTP for the
 # tone check, so it links rtp + codec too

@@ -13,7 +13,6 @@
 #include <netdb.h>
 #include <netinet/in.h>
 
-#include "sip_msg.h"
 #include "sip_ua.h"
 
 static void to_sockaddr(const sip_addr_t *a, struct sockaddr_in *sa)
@@ -113,13 +112,16 @@ int sip_udp_poll_wake(sip_udp_t *u, sip_ua_t *ua, int timeout_ms, int wake_fd)
     if (u->fd < 0 || !FD_ISSET(u->fd, &rf) || ua == NULL) {
         return 0;
     }
-    /* one byte more than the UA accepts so oversized datagrams are detected */
-    static char buf[SIP_MAX_MSG_IN + 1];
+    /* straight into the UA's receive buffer (no 2 KB copy buffer here); it
+     * is one byte larger than the UA accepts, so oversized datagrams are
+     * detected */
+    size_t cap;
+    char *buf = sip_ua_rx_buffer(ua, &cap);
     int fed = 0;
     for (;;) {
         struct sockaddr_in sa;
         socklen_t sl = sizeof(sa);
-        ssize_t n = recvfrom(u->fd, buf, sizeof(buf), 0, (struct sockaddr *)&sa, &sl);
+        ssize_t n = recvfrom(u->fd, buf, cap, 0, (struct sockaddr *)&sa, &sl);
         if (n < 0) {
             break; /* EWOULDBLOCK: drained */
         }
@@ -127,7 +129,7 @@ int sip_udp_poll_wake(sip_udp_t *u, sip_ua_t *ua, int timeout_ms, int wake_fd)
             continue;
         }
         sip_addr_t from = { .ip = ntohl(sa.sin_addr.s_addr), .port = ntohs(sa.sin_port) };
-        sip_ua_on_packet(ua, buf, (size_t)n, &from);
+        sip_ua_on_rx(ua, (size_t)n, &from);
         fed++;
     }
     return fed;

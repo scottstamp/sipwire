@@ -1549,6 +1549,302 @@ static void test_info_dtmf(void)
     TEST_ASSERT_EQUAL(SIP_UA_CALL_ACTIVE, sip_call_state(f->ua, h));
 }
 
+/* ------------------------------------------- transaction slot recovery */
+
+/* n Via lines, each padded to about len bytes; the top one carries branch. */
+static void big_vias(char *out, size_t cap, int n, int len, const char *branch)
+{
+    size_t o = 0;
+    for (int i = 0; i < n; i++) {
+        int k = snprintf(out + o, cap - o, "Via: SIP/2.0/UDP 10.0.0.%d:5060;branch=%s%s%d;x=", i + 1,
+                         i == 0 ? branch : "z9hG4bKhop", i == 0 ? "" : "-", i);
+        o += (size_t)k;
+        for (; k < len - 2 && o + 3 < cap; k++) {
+            out[o++] = 'a';
+        }
+        TEST_ASSERT_TRUE(o + 3 < cap);
+        o += (size_t)snprintf(out + o, cap - o, "\r\n");
+    }
+}
+
+/* Requests whose Via headers overflow the response template get no answer;
+ * their server transactions must not hold pool slots (16 of them used to
+ * leave the phone unable to REGISTER / call until the UA was rebuilt). */
+static void test_unanswerable_requests_free_txn(void)
+{
+    fx_init(f, NULL);
+    static char vias[2048];
+    for (int i = 0; i < 2 * SIP_MAX_TXN; i++) {
+        char br[32];
+        snprintf(br, sizeof(br), "z9hG4bKbig%d", i);
+        big_vias(vias, sizeof(vias), SIP_MAX_VIA, 120, br); /* > the 800-byte template */
+        const char *method = i % 2 ? "INVITE" : "OPTIONS";
+        inject_fmt("%s sip:1001@10.0.0.2:5060 SIP/2.0\r\n%s"
+                   "From: <sip:asterisk@10.0.0.1>;tag=q%d\r\nTo: <sip:1001@10.0.0.2>\r\n"
+                   "Call-ID: big%d@x\r\nCSeq: 1 %s\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n",
+                   method, vias, i, i, method);
+        TEST_ASSERT_EQUAL(0, f->n_sent);
+        TEST_ASSERT_EQUAL(0, sip_ua_debug_txn_count(f->ua));
+    }
+    TEST_ASSERT_EQUAL(0, fx_count_ev(f, FXE_INCOMING));
+    /* still reachable: a normal request gets its answer, a call goes out */
+    inject_fmt("OPTIONS sip:1001@10.0.0.2:5060 SIP/2.0\r\n"
+               "Via: SIP/2.0/UDP 10.0.0.1:5060;rport;branch=z9hG4bKo1\r\n"
+               "From: <sip:asterisk@10.0.0.1>;tag=q1\r\nTo: <sip:1001@10.0.0.2>\r\n"
+               "Call-ID: q1@x\r\nCSeq: 1 OPTIONS\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n");
+    TEST_ASSERT_TRUE(fx_find(f, "SIP/2.0 200", 0) >= 0);
+    sip_call_handle_t h;
+    TEST_ASSERT_EQUAL(SIP_OK, sip_call_dial(f->ua, "600", &h));
+    TEST_ASSERT_EQUAL(1, fx_count(f, "INVITE"));
+}
+
+/* The template fits but the 200 + SDP does not: a bare 500 completes the
+ * INVITE transaction instead (and the call ends), nothing lingers. */
+static void test_answer_too_big_sends_500(void)
+{
+    fx_init(f, NULL);
+    static char vias[2048];
+    big_vias(vias, sizeof(vias), 5, 120, "z9hG4bKfat");
+    char to_uri[200];
+    snprintf(to_uri, sizeof(to_uri), "sip:1001@10.0.0.2;x=%0140d", 0);
+    inject_fmt("INVITE sip:1001@10.0.0.2:5060 SIP/2.0\r\n%s"
+               "Max-Forwards: 70\r\n"
+               "From: \"Bob\" <sip:1002@10.0.0.1>;tag=remote1\r\n"
+               "To: <%s>\r\n"
+               "Contact: <sip:asterisk@10.0.0.1:5060>\r\n"
+               "Record-Route: <sip:p1.example.com;lr;x=%090d>\r\n"
+               "Record-Route: <sip:p2.example.com;lr;x=%090d>\r\n"
+               "Record-Route: <sip:p3.example.com;lr;x=%090d>\r\n"
+               "Call-ID: fat@x\r\nCSeq: 5 INVITE\r\n"
+               "Content-Type: application/sdp\r\nContent-Length: %u\r\n\r\n%s",
+               vias, to_uri, 0, 0, 0, (unsigned)strlen(FX_SDP_PCMU), FX_SDP_PCMU);
+    int r180 = fx_find(f, "SIP/2.0 180", 0);
+    TEST_ASSERT_TRUE_MESSAGE(r180 >= 0, "180 must still fit");
+    const fx_ev_t *in = fx_last_ev(f, FXE_INCOMING);
+    TEST_ASSERT_NOT_NULL(in);
+    TEST_ASSERT_EQUAL(SIP_ERR_STATE, sip_call_answer(f->ua, in->call));
+    TEST_ASSERT_EQUAL(0, fx_count(f, "SIP/2.0 200"));
+    int r500 = fx_find(f, "SIP/2.0 500", 0);
+    TEST_ASSERT_TRUE(r500 >= 0);
+    TEST_ASSERT_EQUAL_STRING(to_tag_of(r180), to_tag_of(r500));
+    TEST_ASSERT_EQUAL(SIP_METHOD_INVITE, fx_parse(f, r500)->cseq_method);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_ENDED, last_call_ev()->state);
+    TEST_ASSERT_EQUAL(SIP_END_ERROR, last_call_ev()->reason);
+    TEST_ASSERT_EQUAL(500, last_call_ev()->code);
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_call_slots(f->ua));
+    fx_advance(f, 510);
+    TEST_ASSERT_EQUAL(2, fx_count(f, "SIP/2.0 500")); /* timer G until the ACK */
+    fx_advance(f, 33000);                               /* timer H */
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_txn_count(f->ua));
+}
+
+/* Nobody answers for SIP_TIMER_C_MS (the caller side normally gives up
+ * first): 480, the call ends, the INVITE transaction completes normally. */
+static void test_incoming_unanswered_480(void)
+{
+    fx_init(f, NULL);
+    inject_invite("ring@x", "z9hG4bKring", 9, FX_SDP_PCMU, NULL);
+    const fx_ev_t *in = fx_last_ev(f, FXE_INCOMING);
+    TEST_ASSERT_NOT_NULL(in);
+    sip_call_handle_t h = in->call;
+    char tag[80];
+    snprintf(tag, sizeof(tag), "%s", to_tag_of(fx_find(f, "SIP/2.0 180", 0)));
+    fx_advance(f, 179000);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_RINGING_IN, sip_call_state(f->ua, h));
+    TEST_ASSERT_EQUAL(0, fx_count(f, "SIP/2.0 480"));
+    fx_advance(f, 1100);
+    int r = fx_find(f, "SIP/2.0 480", 0);
+    TEST_ASSERT_TRUE(r >= 0);
+    TEST_ASSERT_EQUAL_STRING(tag, to_tag_of(r));
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_ENDED, last_call_ev()->state);
+    TEST_ASSERT_EQUAL(SIP_END_TIMEOUT, last_call_ev()->reason);
+    TEST_ASSERT_EQUAL(480, last_call_ev()->code);
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_call_slots(f->ua));
+    inject_from_bob("ACK", 9, "ring@x", tag, "z9hG4bKring", NULL);
+    fx_advance(f, 6000); /* timer I */
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_txn_count(f->ua));
+}
+
+/* 180, then the PBX goes away: the user hangs up, the CANCEL is never
+ * answered and no 487 comes. The INVITE transaction used to stay in
+ * Proceeding forever (16 such calls exhausted the pool). */
+static void test_cancel_unanswered_frees_invite_txn(void)
+{
+    fx_init(f, NULL);
+    for (int i = 0; i < SIP_MAX_TXN + 2; i++) {
+        sip_call_handle_t h;
+        fx_clear_sent(f);
+        TEST_ASSERT_EQUAL(SIP_OK, sip_call_dial(f->ua, "600", &h));
+        int inv = fx_find(f, "INVITE", 0);
+        TEST_ASSERT_TRUE(inv >= 0);
+        fx_reply(f, inv, 180, "gone", NULL, NULL);
+        TEST_ASSERT_EQUAL(SIP_OK, sip_call_hangup(f->ua, h));
+        TEST_ASSERT_EQUAL(1, fx_count(f, "CANCEL"));
+        fx_advance(f, 64 * 500 + 100);
+        TEST_ASSERT_EQUAL(0, sip_ua_debug_txn_count(f->ua));
+        TEST_ASSERT_EQUAL(0, sip_ua_debug_call_slots(f->ua));
+    }
+}
+
+/* Only 100 Trying, never a final response: timer C ends the call (408)
+ * instead of DIALING forever, CANCELs the INVITE and still ACKs the 487. */
+static void test_outgoing_timer_c(void)
+{
+    fx_init(f, NULL);
+    sip_call_handle_t h;
+    sip_call_dial(f->ua, "600", &h);
+    int inv = fx_find(f, "INVITE", 0);
+    fx_reply(f, inv, 100, NULL, NULL, NULL);
+    fx_advance(f, 179990);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_DIALING, sip_call_state(f->ua, h));
+    TEST_ASSERT_EQUAL(0, fx_count(f, "CANCEL"));
+    TEST_ASSERT_EQUAL(1, fx_count(f, "INVITE")); /* timer A stopped by the 100 */
+    fx_advance(f, 20);
+    const fx_ev_t *e = last_call_ev();
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_ENDED, e->state);
+    TEST_ASSERT_EQUAL(SIP_END_TIMEOUT, e->reason);
+    TEST_ASSERT_EQUAL(408, e->code);
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_call_slots(f->ua));
+    int can = fx_find(f, "CANCEL", 0);
+    TEST_ASSERT_TRUE(can >= 0);
+    int nev = f->n_ev;
+    fx_reply(f, can, 200, "late", NULL, NULL);
+    fx_reply(f, inv, 487, "late", NULL, NULL);
+    TEST_ASSERT_EQUAL(1, fx_count(f, "ACK"));
+    TEST_ASSERT_EQUAL(nev, f->n_ev);
+    fx_advance(f, 33000); /* timer D */
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_txn_count(f->ua));
+}
+
+/* Timer C restarts with every provisional: a long ring with 18x refreshes
+ * keeps going. */
+static void test_timer_c_restarted_by_1xx(void)
+{
+    fx_init(f, NULL);
+    sip_call_handle_t h;
+    sip_call_dial(f->ua, "600", &h);
+    int inv = fx_find(f, "INVITE", 0);
+    fx_reply(f, inv, 180, "c1", NULL, NULL);
+    fx_advance(f, 120000);
+    fx_reply(f, inv, 180, "c1", NULL, NULL);
+    fx_advance(f, 120000);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_RINGING_OUT, sip_call_state(f->ua, h));
+    fx_advance(f, 60010);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_ENDED, last_call_ev()->state);
+    TEST_ASSERT_EQUAL(408, last_call_ev()->code);
+    TEST_ASSERT_EQUAL(1, fx_count(f, "CANCEL"));
+    fx_advance(f, 33000); /* CANCEL unanswered too */
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_txn_count(f->ua));
+}
+
+/* A re-INVITE (target refresh) whose Contact URI is longer than the
+ * remote_target buffer used to wipe the target: the BYE then went out with
+ * an empty Request-URI. Now the old target is kept. */
+static void test_long_contact_keeps_remote_target(void)
+{
+    fx_init(f, NULL);
+    const char *t;
+    establish_incoming("lc@x", &t);
+    char tag[80];
+    snprintf(tag, sizeof(tag), "%s", t);
+    inject_fmt("INVITE sip:1001@10.0.0.2:5060 SIP/2.0\r\n"
+               "Via: SIP/2.0/UDP 10.0.0.1:5060;rport;branch=z9hG4bKlc1\r\n"
+               "Max-Forwards: 70\r\n"
+               "From: \"Bob\" <sip:1002@10.0.0.1>;tag=remote1\r\n"
+               "To: <sip:1001@10.0.0.2>;tag=%s\r\n"
+               "Contact: <sip:moved@10.0.0.1:5060;x=%0200d>\r\n"
+               "Call-ID: lc@x\r\n"
+               "CSeq: 101 INVITE\r\n"
+               "Content-Type: application/sdp\r\n"
+               "Content-Length: %u\r\n\r\n%s",
+               tag, 0, (unsigned)strlen(FX_SDP_PCMU), FX_SDP_PCMU);
+    int ok = fx_find(f, "SIP/2.0 200", 0);
+    TEST_ASSERT_EQUAL_UINT32(101, fx_parse(f, ok)->cseq);
+    inject_from_bob("ACK", 101, "lc@x", tag, "z9hG4bKlc1ack", NULL);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_ACTIVE, sip_call_state(f->ua, last_call_ev()->call));
+    sip_call_hangup(f->ua, last_call_ev()->call);
+    int bye = fx_find(f, "BYE", 0);
+    TEST_ASSERT_TRUE(bye >= 0);
+    TEST_ASSERT_EQUAL_STRING("BYE sip:asterisk@10.0.0.1:5060 SIP/2.0", strtok(strcpy(sbuf, f->sent[bye].buf), "\r"));
+}
+
+/* ------------------------------------------------ zero-copy receive path */
+
+/* OPTIONS padded (X-Pad) to exactly len bytes, written to out */
+static size_t padded_options(char *out, size_t len)
+{
+    const char *head = "OPTIONS sip:1001@10.0.0.2:5060 SIP/2.0\r\n"
+                       "Via: SIP/2.0/UDP 10.0.0.1:5060;rport;branch=z9hG4bKpad\r\n"
+                       "From: <sip:asterisk@10.0.0.1>;tag=p1\r\nTo: <sip:1001@10.0.0.2>\r\n"
+                       "Call-ID: pad@x\r\nCSeq: 1 OPTIONS\r\nContent-Length: 0\r\nX-Pad: ";
+    size_t h = strlen(head);
+    TEST_ASSERT_TRUE(len > h + 4);
+    memcpy(out, head, h);
+    memset(out + h, 'a', len - h - 4);
+    memcpy(out + len - 4, "\r\n\r\n", 4);
+    return len;
+}
+
+static void test_rx_buffer_in_place(void)
+{
+    fx_init(f, NULL);
+    size_t cap = 0;
+    char *rx = sip_ua_rx_buffer(f->ua, &cap);
+    TEST_ASSERT_NOT_NULL(rx);
+    TEST_ASSERT_EQUAL(SIP_MAX_MSG_IN + 1, cap);
+    /* largest accepted datagram */
+    sip_ua_on_rx(f->ua, padded_options(rx, SIP_MAX_MSG_IN), &f->server);
+    TEST_ASSERT_EQUAL(1, fx_count(f, "SIP/2.0 200"));
+    /* one byte more (the buffer is full): dropped, no write past it */
+    fx_clear_sent(f);
+    rx = sip_ua_rx_buffer(f->ua, &cap);
+    sip_ua_on_rx(f->ua, padded_options(rx, cap), &f->server);
+    sip_ua_on_rx(f->ua, cap + 100, &f->server); /* a caller bug is clamped */
+    TEST_ASSERT_EQUAL(0, f->n_sent);
+    /* sip_ua_on_packet still copies (also from the rx buffer itself) */
+    static char big[SIP_MAX_MSG_IN + 64];
+    sip_ua_on_packet(f->ua, big, padded_options(big, sizeof(big)), &f->server);
+    TEST_ASSERT_EQUAL(0, f->n_sent);
+    size_t n = padded_options(big, 600);
+    sip_ua_on_packet(f->ua, big, n, &f->server);
+    TEST_ASSERT_EQUAL(1, fx_count(f, "SIP/2.0 200"));
+    rx = sip_ua_rx_buffer(f->ua, &cap);
+    memcpy(rx, big, n);
+    sip_ua_on_packet(f->ua, rx, n, &f->server);
+    TEST_ASSERT_EQUAL(2, fx_count(f, "SIP/2.0 200")); /* retransmission: same response */
+}
+
+static void any_source_cfg(sip_ua_config_t *c)
+{
+    c->accept_any_source = true;
+}
+
+/* sip_udp_poll receives straight into the UA buffer (loopback socket). */
+static void test_udp_poll_into_ua(void)
+{
+    fx_init(f, any_source_cfg);
+    sip_udp_t u, tx;
+    TEST_ASSERT_EQUAL(SIP_OK, sip_udp_open(&u, 0));
+    TEST_ASSERT_EQUAL(SIP_OK, sip_udp_open(&tx, 0));
+    sip_addr_t to = { 0x7f000001, u.port };
+    static char big[SIP_MAX_MSG_IN + 64];
+    size_t n = padded_options(big, 700);
+    TEST_ASSERT_EQUAL(0, sip_udp_send(&tx, &to, big, n));
+    TEST_ASSERT_EQUAL(1, sip_udp_poll(&u, f->ua, 1000));
+    TEST_ASSERT_EQUAL(1, fx_count(f, "SIP/2.0 200"));
+    /* oversized: fed (and dropped by the UA) */
+    TEST_ASSERT_EQUAL(0, sip_udp_send(&tx, &to, big, padded_options(big, sizeof(big))));
+    TEST_ASSERT_EQUAL(1, sip_udp_poll(&u, f->ua, 1000));
+    TEST_ASSERT_EQUAL(1, f->n_sent);
+    /* exactly the limit still works */
+    fx_clear_sent(f);
+    TEST_ASSERT_EQUAL(0, sip_udp_send(&tx, &to, big, padded_options(big, SIP_MAX_MSG_IN)));
+    TEST_ASSERT_EQUAL(1, sip_udp_poll(&u, f->ua, 1000));
+    TEST_ASSERT_EQUAL(1, fx_count(f, "SIP/2.0 200"));
+    sip_udp_close(&tx);
+    sip_udp_close(&u);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1604,5 +1900,14 @@ int main(void)
     RUN_TEST(test_refer_to_replaces_escaping);
     RUN_TEST(test_attended_transfer);
     RUN_TEST(test_info_dtmf);
+    RUN_TEST(test_unanswerable_requests_free_txn);
+    RUN_TEST(test_answer_too_big_sends_500);
+    RUN_TEST(test_incoming_unanswered_480);
+    RUN_TEST(test_cancel_unanswered_frees_invite_txn);
+    RUN_TEST(test_outgoing_timer_c);
+    RUN_TEST(test_timer_c_restarted_by_1xx);
+    RUN_TEST(test_long_contact_keeps_remote_target);
+    RUN_TEST(test_rx_buffer_in_place);
+    RUN_TEST(test_udp_poll_into_ua);
     return UNITY_END();
 }

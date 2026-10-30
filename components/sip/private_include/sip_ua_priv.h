@@ -323,10 +323,14 @@ void sipua_w_contact(sip_ua_t *ua, sip_wbuf_t *w);
 void sipua_w_auth(sip_ua_t *ua, sip_wbuf_t *w, const char *method, const char *uri);
 ev_t *sipua_ev_push(sip_ua_t *ua, ev_kind_t kind, sip_call_handle_t call);
 int sipua_tpl_from_msg(resp_tpl_t *tpl, const sip_msg_t *m, const sip_addr_t *src);
-void sipua_respond_tpl(sip_ua_t *ua, sip_txn_t *t, const resp_tpl_t *tpl, const sip_addr_t *peer, int code,
-                       const char *to_tag, unsigned flags, const char *extra, const char *body, size_t body_len);
-void sipua_respond_msg(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const sip_addr_t *from, int code,
-                       unsigned flags, const char *extra);
+/* 0 = sent; -1 = did not fit: a final response is replaced by a bare 500
+ * (so t completes), a provisional one is not sent. */
+int sipua_respond_tpl(sip_ua_t *ua, sip_txn_t *t, const resp_tpl_t *tpl, const sip_addr_t *peer, int code,
+                      const char *to_tag, unsigned flags, const char *extra, const char *body, size_t body_len);
+/* As sipua_respond_tpl; -1 also when the request yields no template at all
+ * (then t is terminated: nothing can ever be sent on it). */
+int sipua_respond_msg(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const sip_addr_t *from, int code,
+                      unsigned flags, const char *extra);
 bool sipua_auth_retry(sip_ua_t *ua, uint8_t *tries, const sip_msg_t *m);
 uint32_t sipua_refresh_delay_s(uint32_t expires);
 /* "sip:" URI for a number / user part (escaped) or a full sip: URI. */
