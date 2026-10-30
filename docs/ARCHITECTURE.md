@@ -155,6 +155,14 @@ internal heap back, a full-screen redraw now takes 20 flushes instead of 10);
 per direction (TX 4 x 320 B, RX 4 x 640 B for 32-bit mic slots); the 40 ms TX ring is the AEC
 delay `D` (see Echo canceller) and the main playout latency besides the jitter buffer.
 
+**Heap debugging** (`sdkconfig.debug-heap` overlay, `HEAP_POISONING_COMPREHENSIVE`, console
+`heapwatch [ms [psram_s]]`): a background task runs `heap_caps_check_integrity` on the internal
+heap every `ms` (default 200; a few ms each) and on PSRAM only every `psram_s` seconds (default
+10, 0 = never). Each check holds that heap's spinlock for the whole walk (interrupts masked on
+the checking core, the other core spins on its next malloc); the 7.5 MB PSRAM walk with
+poison verification takes ~100 ms, longer than the 40 ms I2S ring, so every PSRAM check is
+an expected audio click / Wi-Fi hiccup in that build. Release builds have no `heapwatch`.
+
 **Tasks** (stack bytes; high water = least free ever. "QEMU worst" = least free over the smoke
 shards incl. calls with AEC, transfers, call waiting, CSV import; QEMU has no Wi-Fi radio or
 LCD, so its heap numbers are far too optimistic, stack numbers are representative)
