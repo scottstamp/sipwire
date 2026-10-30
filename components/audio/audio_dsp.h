@@ -41,6 +41,7 @@ typedef enum {
     DSP_TONE_RING,
     DSP_TONE_KEYCLICK,
     DSP_TONE_CALL_WAITING,
+    DSP_TONE_WEAK_SIGNAL,           /* two short high beeps, once (out-of-range warning) */
 } dsp_tone_kind_t;
 
 typedef struct {
@@ -49,6 +50,8 @@ typedef struct {
     uint16_t period_ms;             /* on + off; ignored when continuous or one-shot */
     uint16_t warble_ms;             /* > 0: alternate f1/f2 every warble_ms (single oscillator) */
     bool oneshot;                   /* play on_ms once, then go inactive */
+    uint8_t count;                  /* oneshot with count > 1: count bursts of on_ms every
+                                     * period_ms, then inactive */
 } dsp_tone_def_t;
 
 typedef struct {
@@ -58,6 +61,7 @@ typedef struct {
     uint32_t warble_n, warble_pos;
     bool warble_hi;
     bool oneshot, active, stopping, single;
+    uint8_t bursts;                 /* bursts left of a counted one-shot, 0 = not counted */
     int32_t env, env_step;          /* Q15 attack/release envelope */
     int32_t amp;                    /* Q15 per component */
     /* step sequence (ringtones): repeats forever, takes over from the cadence fields */

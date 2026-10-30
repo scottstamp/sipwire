@@ -153,6 +153,7 @@ static const dsp_tone_def_t PRESETS[] = {
     [DSP_TONE_RING]     = { .f1 = 1000, .f2 = 1200, .on_ms = 1000, .period_ms = 3000, .warble_ms = 40 },
     [DSP_TONE_KEYCLICK] = { .f1 = 1000, .f2 = 2000, .on_ms = 30, .oneshot = true },
     [DSP_TONE_CALL_WAITING] = { .f1 = 440, .on_ms = 300, .period_ms = 10000 },
+    [DSP_TONE_WEAK_SIGNAL] = { .f1 = 1400, .on_ms = 70, .period_ms = 150, .oneshot = true, .count = 2 },
 };
 
 #define S(a, b, ms) { a, b, ms }
@@ -255,7 +256,9 @@ void dsp_tone_start_def(dsp_tone_t *t, const dsp_tone_def_t *def)
     t->inc2 = freq_to_inc(def->f2, t->rate);
     t->single = def->f2 == 0;
     t->on_n = ms_to_n(def->on_ms, t->rate);
-    t->oneshot = def->oneshot && t->on_n > 0;
+    /* a counted one-shot runs as a cadence and stops itself after its last period */
+    t->bursts = def->oneshot && def->count > 1 && def->period_ms > def->on_ms && t->on_n > 0 ? def->count : 0;
+    t->oneshot = def->oneshot && t->on_n > 0 && t->bursts == 0;
     t->period_n = (t->on_n == 0 || t->oneshot) ? 0 : ms_to_n(def->period_ms, t->rate);
     if (t->on_n > 0 && !t->oneshot && t->period_n <= t->on_n) {
         t->on_n = 0;                            /* degenerate cadence: continuous */
@@ -356,6 +359,9 @@ void dsp_tone_add(dsp_tone_t *t, int32_t *acc, size_t n)
         } else if (t->period_n > 0) {
             if (++t->pos >= t->period_n) {
                 t->pos = 0;
+                if (t->bursts > 0 && --t->bursts == 0) {
+                    t->stopping = true;         /* off phase: the envelope is already 0 */
+                }
             }
         } else if (t->on_n > 0 && t->pos < UINT32_MAX) {
             t->pos++;                           /* one-shot: runs past on_n */

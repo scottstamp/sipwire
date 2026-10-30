@@ -41,6 +41,7 @@ _Static_assert(AUDIO_I2S_RATE == 16000, "I2S clocking below assumes 16 kHz");
  * or ended is shut down after this long, so I2S and the amp do not stay on while idle. */
 #define IDLE_STOP_FRAMES        (2000 / 20)
 #define DEFAULT_VOLUME          70
+#define ALERT_AMP               2458    /* Q15: single tone peaks at 2 x amp = 0.15 FS, before volume */
 
 #define EVT_TX_DONE             BIT0
 #define EVT_RX_DONE             BIT1
@@ -72,6 +73,7 @@ static struct {
     tone_req_kind_t req_kind;
     audio_tone_t req_tone;
     char req_digit;
+    atomic_int alert_req;           /* audio_alert_t + 1, 0 = none; tx_task takes it */
 } s = {
     .req_mux = portMUX_INITIALIZER_UNLOCKED,
     .volume = DEFAULT_VOLUME,
@@ -299,8 +301,11 @@ static void tx_task(void *arg)
     int32_t mix[AUDIO_FRAME_SAMPLES];
     int16_t pcm16[I2S_FRAME_SAMPLES];
     dsp_tone_t tone;
+    dsp_tone_t alert;               /* audio_play_alert: own slot, on top of the tone */
 
     dsp_tone_init(&tone, AUDIO_SAMPLE_RATE);
+    dsp_tone_init(&alert, AUDIO_SAMPLE_RATE);
+    alert.amp = ALERT_AMP;
 
     /* Prime the DMA with silence, then wake the amp: no turn-on pop. */
     memset(pcm16, 0, sizeof(pcm16));
@@ -331,6 +336,11 @@ static void tx_task(void *arg)
         }
         xSemaphoreGive(s.cb_mtx);
 
+        int alert_req = atomic_exchange(&s.alert_req, 0);
+        if (alert_req > 0 && have_cb && !stopping) {
+            dsp_tone_start(&alert, DSP_TONE_WEAK_SIGNAL);   /* the only alert so far */
+        }
+
         if (have_cb || dsp_tone_active(&tone) || stopping || idle_stopping) {
             idle_frames = 0;
         } else if (++idle_frames >= IDLE_STOP_FRAMES) {
@@ -343,6 +353,7 @@ static void tx_task(void *arg)
             mix[i] = src[i];
         }
         dsp_tone_add(&tone, mix, AUDIO_FRAME_SAMPLES);
+        dsp_tone_add(&alert, mix, AUDIO_FRAME_SAMPLES);
 
         int32_t vol_to = dsp_gain_q15(atomic_load(&s.volume));
         dsp_gain_ramp(mix, AUDIO_FRAME_SAMPLES,
@@ -464,6 +475,7 @@ static esp_err_t stream_start_locked(void)
     portENTER_CRITICAL(&s.req_mux);
     s.req_kind = REQ_NONE;
     portEXIT_CRITICAL(&s.req_mux);
+    atomic_store(&s.alert_req, 0);
 
     ESP_GOTO_ON_ERROR(i2s_channel_enable(s.tx), fail, TAG, "enable tx");
     tx_en = true;
@@ -684,6 +696,14 @@ static void tone_request(tone_req_kind_t kind, audio_tone_t tone, char digit)
 void audio_play_tone(audio_tone_t tone)
 {
     tone_request(REQ_TONE, tone, 0);
+}
+
+void audio_play_alert(audio_alert_t alert)
+{
+    if (!s.inited || !atomic_load(&s.running)) {
+        return;                         /* no stream: no call to warn about */
+    }
+    atomic_store(&s.alert_req, (int)alert + 1);
 }
 
 int audio_ringtone_count(void)
