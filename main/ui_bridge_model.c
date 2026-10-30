@@ -276,6 +276,7 @@ void ui_bridge_build_model(const ui_bridge_local_t *loc, const phone_status_t *p
     /* call features */
     out->dnd = loc->dnd;
     out->auto_answered = out->call != UI_CALL_IDLE && ph->auto_answered;
+    out->find_ringing = out->call == UI_CALL_RINGING_IN && ph->find;
     out->second_call = ui_bridge_map_second(ph->second.call);
     if (out->second_call != UI_CALL_IDLE) {
         copy(out->second_number, sizeof(out->second_number), ph->second.number);

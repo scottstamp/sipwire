@@ -20,6 +20,7 @@ typedef enum {
     PHONE_TONE_RING,
     PHONE_TONE_BUSY,
     PHONE_TONE_CALL_WAITING,            /* beep in the foreground call while a call waits */
+    PHONE_TONE_FIND,                    /* find-the-handset ring (own pattern, full volume) */
 } phone_tone_t;
 
 /** Tone to play locally in `state`. `early_media`: a 183 delivered media for
@@ -40,6 +41,29 @@ phone_tone_t phone_tone_waiting(phone_tone_t base, sip_ua_call_state_t fg, sip_u
  *  is offered as a normal waiting call). DND never gets here: the UA refuses
  *  every call with 486 first (a page under DND is ignored). */
 bool phone_auto_answer(int answer_after, bool setting_on, bool other_call);
+
+/* Incoming call screening (sip_ua cb.screen), decided per new INVITE. */
+typedef enum {
+    PHONE_SCREEN_NORMAL,                /* UA policy: rings; DND / busy refused by the UA (486) */
+    PHONE_SCREEN_FIND,                  /* find the handset: rings through DND and quiet hours */
+    PHONE_SCREEN_QUIET,                 /* refused (486) by quiet hours, logged like DND */
+    PHONE_SCREEN_FWD_ALWAYS,            /* 302 to fwd_always */
+    PHONE_SCREEN_FWD_BUSY,              /* 302 to fwd_busy */
+} phone_screen_t;
+
+typedef struct {
+    bool find;                          /* Alert-Info carries the find_alert marker */
+    bool dnd;                           /* setting dnd */
+    bool quiet;                         /* inside quiet hours (enabled and the clock is set) */
+    bool caller_allowed;                /* quiet_allow_contacts and the caller is a contact */
+    bool busy;                          /* the UA would refuse it as busy (no free line) */
+    bool fwd_always;                    /* fwd_always set */
+    bool fwd_busy;                      /* fwd_busy set */
+} phone_screen_in_t;
+
+/** Order: find (unless busy) > always-forward > DND > quiet hours (contacts may pass) >
+ *  busy-forward (only when busy) > normal. */
+phone_screen_t phone_screen_decide(const phone_screen_in_t *in);
 
 /** Event-level transfer state for a UA transfer report. */
 xfer_state_t phone_xfer_map(sip_xfer_state_t st);
@@ -68,13 +92,15 @@ typedef enum {
     PHONE_LOG_MISSED = 1,
     PHONE_LOG_REJECTED = 2,
     PHONE_LOG_DND = 3,
+    PHONE_LOG_FORWARDED = 4,
 } phone_log_result_t;
 
 /** Result of an ended call. `answered`: media was established (the call was
  *  ACTIVE at some point; transferred calls were). `rejected_local`: the user
- *  declined the ringing incoming call. `dnd`: refused by do-not-disturb.
- *  An outgoing call that never connected is MISSED (no answer / failed). */
-phone_log_result_t phone_log_result(bool outgoing, bool answered, bool rejected_local, bool dnd);
+ *  declined the ringing incoming call. `dnd`: refused by do-not-disturb (or quiet
+ *  hours). `forwarded`: sent on with a 302 (always / busy / no answer / declined with
+ *  busy forwarding). An outgoing call that never connected is MISSED (no answer / failed). */
+phone_log_result_t phone_log_result(bool outgoing, bool answered, bool rejected_local, bool dnd, bool forwarded);
 
 /** Talk time in whole seconds from start_us (0 = never answered) to now_us. */
 uint32_t phone_log_duration_s(int64_t start_us, int64_t now_us);

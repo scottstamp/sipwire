@@ -100,6 +100,7 @@ typedef struct {
     char name[64];
     int64_t start_us;
     bool rej;                           /* the user declined it (call log) */
+    bool find;                          /* find-the-handset call */
     bool media_valid;
     sip_media_info_t media;
 } phone_line_t;
@@ -144,6 +145,7 @@ static struct {
     uint8_t line;                       /* foreground line number, 0 = none */
     bool rej;                           /* foreground: the user declined the ringing call (call log) */
     int answer_after;                   /* foreground: caller asked for auto answer, -1 = no */
+    bool find;                          /* foreground: find-the-handset call (full volume, own ring) */
     bool aa_pending;                    /* auto answer due at aa_at */
     uint64_t aa_at;
     bool fg_media_valid;                /* last media of the foreground call */
@@ -153,6 +155,8 @@ static struct {
     sip_call_handle_t xfer_h, xfer_consult;
     /* call features (settings) */
     bool f_dnd, f_cw, f_aa;
+    /* last screening decision (ua_screen), for the call_rejected report of the same INVITE */
+    phone_screen_t scr_last;
     /* BLF: the parsed `blf` setting and one subscription per entry */
     char blf_list[SIPWIRE_BLF_LIST_MAX];
     sipwire_blf_entry_t blf[SIPWIRE_BLF_MAX];
@@ -334,7 +338,8 @@ static void apply_aec(const settings_t *st)
 static void apply_volume(void)
 {
     st_lock();
-    uint8_t v = *current_volume_locked();
+    /* find the handset: full volume while it rings (+/- still changes the ring volume) */
+    uint8_t v = s.vstate == SIP_UA_CALL_RINGING_IN && s.st.find ? 100 : *current_volume_locked();
     s.st.volume = v;
     st_unlock();
     audio_set_volume(v);
@@ -373,6 +378,7 @@ static void publish_call_state(void)
 
     st_lock();
     s.st.line = s.line;
+    s.st.find = s.find && s.state == SIP_UA_CALL_RINGING_IN;
     st_unlock();
 
     update_power();                     /* before media/tones: PS off ahead of RTP */
@@ -382,6 +388,9 @@ static void publish_call_state(void)
                   (s.state == SIP_UA_CALL_ACTIVE || s.state == SIP_UA_CALL_HELD ||
                    ((s.state == SIP_UA_CALL_DIALING || s.state == SIP_UA_CALL_RINGING_OUT) && early));
     phone_tone_t tone = phone_tone_for(s.state, s.outgoing, early, s.end_code);
+    if (tone == PHONE_TONE_RING && s.find) {
+        tone = PHONE_TONE_FIND;
+    }
     tone = phone_tone_waiting(tone, s.state, s.bg.h ? s.bg.state : SIP_UA_CALL_IDLE);
     phone_media_audio(stream, tone);
     apply_volume();
@@ -471,6 +480,7 @@ static void fg_save(phone_line_t *l)
     l->outgoing = s.outgoing;
     l->answer_after = s.answer_after;
     l->rej = s.rej;
+    l->find = s.find;
     l->line = s.line;
     l->media_valid = s.fg_media_valid;
     l->media = s.fg_media;
@@ -488,6 +498,7 @@ static void fg_load(const phone_line_t *l)
     s.outgoing = l->outgoing;
     s.answer_after = l->answer_after;
     s.rej = l->rej;
+    s.find = l->find;
     s.line = l->line;
     s.end_code = 0;
     s.fg_media_valid = l->media_valid;
@@ -622,12 +633,13 @@ _Static_assert((int)PHONE_LOG_ANSWERED == DIR_RES_ANSWERED && (int)PHONE_LOG_MIS
 
 /* One history entry per ended call. Unnamed numbers are named from the contacts by
  * dir_history_add(). `start_us` != 0: the call was answered (talk time since). */
-static void log_call(bool outgoing, const char *number, const char *name, int64_t start_us, bool rej, bool dnd)
+static void log_call(bool outgoing, const char *number, const char *name, int64_t start_us, bool rej, bool dnd,
+                     bool fwd)
 {
     dir_call_t c;
     memset(&c, 0, sizeof(c));
     c.direction = outgoing ? DIR_CALL_OUT : DIR_CALL_IN;
-    c.result = (uint8_t)phone_log_result(outgoing, start_us != 0, rej, dnd);
+    c.result = (uint8_t)phone_log_result(outgoing, start_us != 0, rej, dnd, fwd);
     c.duration_s = phone_log_duration_s(start_us, esp_timer_get_time());
     c.start = (time_t)phone_log_start((int64_t)time(NULL) > 1700000000 ? (int64_t)time(NULL) : 0, c.duration_s);
     strlcpy(c.number, number ? number : "", sizeof(c.number));
@@ -647,8 +659,9 @@ static void call_ended(int end_code)
     st_lock();
     int64_t start_us = s.st.call_start_us;
     st_unlock();
-    log_call(s.outgoing, s.st.number, s.st.name, start_us, s.rej, false);   /* before promote_bg() */
+    log_call(s.outgoing, s.st.number, s.st.name, start_us, s.rej, false, false);   /* before promote_bg() */
     s.rej = false;
+    s.find = false;
     phone_media_teardown();
     phone_dtmf_seq_clear(&s.dtmf);
     reset_call_audio_prefs();
@@ -669,7 +682,7 @@ static void bg_ended(int end_code)
 {
     phone_line_t l = s.bg;
     memset(&s.bg, 0, sizeof(s.bg));
-    log_call(l.outgoing, l.number, l.name, l.start_us, l.rej, false);
+    log_call(l.outgoing, l.number, l.name, l.start_us, l.rej, false, false);
     post_second(CALL_ENDED, end_code, l.number, l.name);
     publish_call_state();               /* stop the call-waiting beep */
 }
@@ -894,6 +907,7 @@ static void on_incoming(void *ctx, sip_call_handle_t call, const char *number, c
     s.end_code = 0;
     s.line = 1;
     s.rej = false;
+    s.find = false;
     s.answer_after = -1;
     s.aa_pending = false;
     s.fg_media_valid = false;
@@ -940,6 +954,7 @@ static void on_bg_state(sip_call_handle_t call, const sip_call_info_t *info)
     }
     if (info->state == SIP_UA_CALL_RINGING_IN) {
         s.bg.answer_after = info->answer_after;  /* a page during a call just waits */
+        s.bg.find = info->alert_match;           /* ... and so does a find-the-handset call */
     }
     bool changed = s.bg.state != info->state;
     s.bg.state = info->state;
@@ -980,7 +995,10 @@ static void on_call_state(void *ctx, sip_call_handle_t call, const sip_call_info
     }
     if (info->state == SIP_UA_CALL_RINGING_IN && s.state != SIP_UA_CALL_RINGING_IN) {
         s.answer_after = info->answer_after;
-        if (phone_auto_answer(info->answer_after, s.f_aa, s.bg.h != 0)) {
+        s.find = info->alert_match;
+        if (s.find) {
+            ESP_LOGI(TAG, "find the handset: ringing at full volume");
+        } else if (phone_auto_answer(info->answer_after, s.f_aa, s.bg.h != 0)) {
             s.state = SIP_UA_CALL_RINGING_IN;
             if (info->answer_after == 0 && auto_answer_now()) {
                 return;                 /* ACTIVE follows; never rings */
@@ -1027,6 +1045,34 @@ static void on_xfer(void *ctx, sip_call_handle_t call, sip_xfer_state_t st, int 
     }
 }
 
+/* Screening of a new INVITE (sip_ua cb.screen): runs synchronously inside the UA, so only
+ * settings / directory lookups here, no UA calls. The decision is kept for on_rejected,
+ * which reports the same INVITE when it is refused. */
+static void ua_screen(void *ctx, const sip_screen_info_t *in, sip_screen_t *out)
+{
+    (void)ctx;
+    const phone_screen_in_t p = {
+        .find = in->alert_match,
+        .dnd = s.f_dnd,
+        .busy = in->busy,
+    };
+    phone_screen_t d = phone_screen_decide(&p);
+    s.scr_last = d;
+    if (d == PHONE_SCREEN_FIND) {
+        out->action = SIP_SCREEN_RING;
+        ESP_LOGI(TAG, "find the handset call from %s", in->number);
+    }
+}
+
+/* Setting `find_alert` -> the UA's Alert-Info marker. */
+static void apply_alert_marker(const char *marker)
+{
+    if (s.ua && sip_ua_set_alert_marker(s.ua, marker) != SIP_OK) {
+        ESP_LOGW(TAG, "find_alert '%s' unusable: find the handset is off", marker);
+        sip_ua_set_alert_marker(s.ua, "");
+    }
+}
+
 static void on_rejected(void *ctx, const char *number, const char *name, int code)
 {
     (void)ctx;
@@ -1036,7 +1082,7 @@ static void on_rejected(void *ctx, const char *number, const char *name, int cod
     strlcpy(ev.name, name ? name : "", sizeof(ev.name));
     ev.code = code;
     ev.dnd = s.f_dnd;
-    log_call(false, ev.number, ev.name, 0, false, ev.dnd);
+    log_call(false, ev.number, ev.name, 0, false, ev.dnd, false);
     ESP_LOGI(TAG, "missed call from %s \"%s\" (%s, %d)", ev.number, ev.name, ev.dnd ? "do not disturb" : "busy",
              code);
     esp_err_t err = esp_event_post(SIPWIRE_CALL_EVENT, CALL_EVENT_MISSED, &ev, sizeof(ev), EVENT_POST_TIMEOUT);
@@ -1207,6 +1253,7 @@ static void ua_create(uint64_t now)
             .mwi = on_mwi,
             .transfer = on_xfer,
             .call_rejected = on_rejected,
+            .screen = ua_screen,
         },
     };
     cfg.n_codecs = (uint8_t)phone_codec_pref_parse(s.acc.codec_pref, cfg.codecs, SIP_UA_MAX_CODECS);
@@ -1228,6 +1275,7 @@ static void ua_create(uint64_t now)
     s.ua_ip = lip;
     sip_ua_set_dnd(s.ua, s.f_dnd);
     sip_ua_set_call_waiting(s.ua, s.f_cw);
+    apply_alert_marker(s.acc.find_alert);
     phone_media_set_server_ip(srv.ip);
 
     char ip[16];
@@ -1287,7 +1335,7 @@ static void on_net_up(uint64_t now)
     (void)now;
 }
 
-/* Settings `dnd`, `call_waiting`, `auto_answer`, live. */
+/* Settings `dnd`, `call_waiting`, `auto_answer`, `find_alert`, live. */
 static void apply_features(const settings_t *st)
 {
     if (st->dnd != s.f_dnd) {
@@ -1305,6 +1353,7 @@ static void apply_features(const settings_t *st)
         sip_ua_set_dnd(s.ua, s.f_dnd);
         sip_ua_set_call_waiting(s.ua, s.f_cw);
     }
+    apply_alert_marker(st->find_alert);
 }
 
 static void on_settings(uint64_t now)
@@ -1347,6 +1396,7 @@ static void cmd_dial(const char *number)
     }
     s.outgoing = true;
     s.rej = false;
+    s.find = false;
     s.end_code = 0;
     s.line = 1;
     s.answer_after = -1;
@@ -1461,6 +1511,7 @@ static sip_err_t cmd_xfer_start(const char *target)
     s.call = 0;
     s.outgoing = true;
     s.rej = false;
+    s.find = false;
     s.end_code = 0;
     s.line = line;
     s.answer_after = -1;

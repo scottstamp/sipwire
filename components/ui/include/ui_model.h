@@ -158,6 +158,7 @@ typedef struct {
      * held one (UI_CALL_HELD); UI_CALL_IDLE = none. */
     bool dnd;                  /* do not disturb on */
     bool auto_answered;        /* foreground call was answered automatically (page / intercom) */
+    bool find_ringing;         /* the ringing call is a find-the-handset call (full volume) */
     ui_call_state_t second_call;
     char second_number[64];
     char second_name[64];      /* may be empty */
