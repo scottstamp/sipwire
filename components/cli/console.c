@@ -38,6 +38,7 @@ typedef enum {
     F_I16,
     F_BOOL,
     F_TRANSPORT,
+    F_HHMM,         /* uint16_t minutes after midnight, shown and set as "HH:MM" (or minutes) */
 } field_type_t;
 
 typedef struct {
@@ -69,6 +70,15 @@ static const field_t s_fields[] = {
     FIELD(call_waiting, F_BOOL, 0, 1),
     FIELD(dnd, F_BOOL, 0, 1),
     FIELD(auto_answer, F_BOOL, 0, 1),
+    STR_FIELD(find_alert, F_STR),
+    FIELD(quiet_hours, F_BOOL, 0, 1),
+    FIELD(quiet_start, F_HHMM, 0, SETTINGS_MINUTES_PER_DAY - 1),
+    FIELD(quiet_end, F_HHMM, 0, SETTINGS_MINUTES_PER_DAY - 1),
+    FIELD(quiet_allow_contacts, F_BOOL, 0, 1),
+    STR_FIELD(fwd_always, F_STR),
+    STR_FIELD(fwd_busy, F_STR),
+    STR_FIELD(fwd_noanswer, F_STR),
+    FIELD(fwd_noanswer_s, F_U16, 0, SETTINGS_FWD_NOANSWER_MAX),
     FIELD(ring_volume, F_U8, 0, 100),
     FIELD(call_volume, F_U8, 0, 100),
     FIELD(mic_gain, F_U8, 0, 100),
@@ -121,6 +131,11 @@ static void field_print(const field_t *f, const settings_t *s)
     case F_TRANSPORT:
         printf("%s\n", *(const sip_transport_t *)p == SIP_TRANSPORT_TCP ? "tcp" : "udp");
         break;
+    case F_HHMM: {
+        unsigned m = *(const uint16_t *)p;
+        printf("%02u:%02u\n", m / 60, m % 60);
+        break;
+    }
     }
 }
 
@@ -158,6 +173,24 @@ static bool field_parse(const field_t *f, settings_t *s, const char *val)
             printf("%s: expected true or false\n", f->name);
             return false;
         }
+        return true;
+    }
+
+    if (f->type == F_HHMM) {
+        /* "HH:MM" (24 h) or plain minutes after midnight */
+        unsigned long h = strtoul(val, &end, 10), m = 0;
+        bool ok = val[0] >= '0' && val[0] <= '9' && end != val;
+        if (ok && *end == ':') {
+            const char *mm = end + 1;
+            m = strtoul(mm, &end, 10);
+            ok = end - mm == 2 && h < 24 && m < 60;
+            h = h * 60 + m;
+        }
+        if (!ok || *end != '\0' || h > f->max) {
+            printf("%s: expected HH:MM (00:00-23:59) or minutes 0..%" PRIu32 "\n", f->name, f->max);
+            return false;
+        }
+        *(uint16_t *)p = (uint16_t)h;
         return true;
     }
 
