@@ -1,9 +1,10 @@
-/* Pure text formatting for the history screen (host-tested in test_host/ui_fmt). */
+/* Pure helpers for the history screen (host-tested in test_host/ui_fmt). */
 
 #include "ui_fmt.h"
 
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 
 /* Days since 1970-01-01 of a civil date (proleptic Gregorian). */
@@ -37,5 +38,34 @@ void ui_fmt_when(char *buf, size_t cap, const struct tm *t, const struct tm *now
         snprintf(buf, cap, "%s %d", MON[t->tm_mon], t->tm_mday);
     } else {
         snprintf(buf, cap, "-");
+    }
+}
+
+static bool same_call(const ui_call_t *a, const ui_call_t *b)
+{
+    return a->start == b->start && a->direction == b->direction && a->result == b->result &&
+           a->duration_s == b->duration_s && strcmp(a->number, b->number) == 0;
+}
+
+int32_t ui_hist_shift(const ui_call_t *old_first, const ui_call_t *items, int32_t n)
+{
+    for (int32_t i = 0; i < n; i++) {
+        if (same_call(old_first, &items[i])) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void ui_hist_carry_fresh(bool *fresh, int32_t old_n, int32_t shift, const ui_call_t *items, int32_t n)
+{
+    for (int32_t i = n - 1; i >= 0; i--) {     /* downwards: entries move to higher indices */
+        int32_t from = shift >= 0 ? i - shift : -1;
+        if (from >= 0 && from < old_n) {
+            fresh[i] = fresh[from];
+        } else {
+            fresh[i] = items[i].direction == UI_CALLDIR_IN && items[i].result == UI_CALLRES_MISSED &&
+                       !items[i].seen;
+        }
     }
 }

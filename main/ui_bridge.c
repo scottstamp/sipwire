@@ -354,7 +354,8 @@ static void act_set_dnd(void *ctx, bool on)
 }
 
 /* ---- directory: the lists are read straight from the directory (in RAM, one mutex); saves
- * write a small FAT file (tens of ms) because the screen refetches right after them. ---- */
+ * change RAM at once (the screen refetches right after them) and leave the flash write to the
+ * directory's writer task. ---- */
 
 static size_t act_contacts_search(void *ctx, const char *query, ui_contact_t *out, size_t max)
 {
@@ -665,6 +666,19 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         ((const call_event_state_t *)data)->state == CALL_RINGING_IN) {
         display_wake();
     }
+    char missed_from[sizeof(b.loc.missed_from)] = "";
+    if (base == SIPWIRE_CALL_EVENT && id == CALL_EVENT_MISSED && data) {
+        /* a call refused without ringing: the UI shows who it was (the history has it already) */
+        const call_event_missed_t *ev = data;
+        strlcpy(missed_from, ev->name, sizeof(missed_from));
+        if (!missed_from[0] && !dir_contact_lookup(ev->number, missed_from, sizeof(missed_from))) {
+            dir_normalize(ev->number, missed_from, sizeof(missed_from));
+        }
+        if (!missed_from[0]) {
+            strlcpy(missed_from, "Unknown", sizeof(missed_from));
+        }
+        display_wake();
+    }
 
     xSemaphoreTake(b.mtx, portMAX_DELAY);
     if (base == SIPWIRE_NET_EVENT) {
@@ -692,6 +706,10 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         }
     } else if (base == SIPWIRE_SETTINGS_EVENT) {
         update_settings_locked();
+    } else if (base == SIPWIRE_CALL_EVENT && id == CALL_EVENT_MISSED && data) {
+        b.loc.missed_seq++;
+        b.loc.missed_dnd = ((const call_event_missed_t *)data)->dnd;
+        strlcpy(b.loc.missed_from, missed_from, sizeof(b.loc.missed_from));
     }
     /* SIP / CALL / BLF events: the phone status already holds the news */
     xSemaphoreGive(b.mtx);
@@ -842,8 +860,26 @@ static void refresh(void)
 
     phone_get_status(&ph);
     ui_bridge_build_model(&loc, &ph, esp_timer_get_time(), &model);
-    unsigned missed = dir_history_unseen_missed();
+    /* history: the rev tells an open History screen to refetch; the newest unseen missed call
+     * names the home screen's notice (looked up only when the history changed) */
+    static uint32_t hist_rev;
+    static bool have_rev;
+    static char missed_last[UI_NAME_LEN];
+    static unsigned missed;
+    uint32_t rev = dir_history_rev();
+    if (!have_rev || rev != hist_rev) {
+        static dir_call_t c;        /* bridge task only */
+        missed = dir_history_unseen_missed();
+        missed_last[0] = 0;
+        if (dir_history_last_unseen_missed(&c)) {
+            strlcpy(missed_last, c.name[0] ? c.name : c.number[0] ? c.number : "Unknown", sizeof(missed_last));
+        }
+        hist_rev = rev;
+        have_rev = true;
+    }
+    model.history_rev = rev;
     model.missed_unseen = (uint8_t)(missed > 99 ? 99 : missed);
+    strlcpy(model.missed_last, missed_last, sizeof(model.missed_last));
     model.now = loc.time_valid ? (int64_t)(now / 60) * 60 : 0;
     if (model.call != UI_CALL_IDLE && !model.remote_name[0] && model.remote_number[0]) {
         /* caller ID from the contacts when the far end sent no display name (and for outgoing

@@ -206,6 +206,10 @@
     // directory stubs: mark the n newest missed incoming calls unseen; clear_directory(0 history | 1 contacts)
     set_unseen: function (n) { Module.ccall('sim_set_unseen', null, ['number'], [n]); },
     clear_directory: function (w) { Module.ccall('sim_clear_directory', null, ['number'], [w]); },
+    // history_add(dir 0 in | 1 out, result 0 answered | 1 missed | 2 declined | 3 dnd, number, name, seconds)
+    history_add: function (d, r, n, nm, s) { Module.ccall('sim_history_add', null, ['number', 'number', 'string', 'string', 'number'], [d, r, n, nm || '', s || 0]); },
+    // missed(number, name, dnd): incoming call refused without ringing (CALL_EVENT_MISSED)
+    missed: function (n, nm, dnd) { Module.ccall('sim_missed', null, ['string', 'string', 'number'], [n, nm || '', dnd ? 1 : 0]); },
     model: function () { return JSON.parse(getModelJson()); }
   };
 

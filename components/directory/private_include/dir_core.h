@@ -53,6 +53,8 @@ typedef struct {
 void dir_hist_add(dir_hist_t *h, const dir_call_t *c);
 const dir_call_t *dir_hist_get(const dir_hist_t *h, size_t i);  /* 0 = newest; NULL if out of range */
 unsigned dir_hist_unseen_missed(const dir_hist_t *h);
+/* Newest missed incoming call not yet seen, NULL if none. */
+const dir_call_t *dir_hist_last_unseen_missed(const dir_hist_t *h);
 bool dir_hist_mark_seen(dir_hist_t *h);                          /* true if anything changed */
 
 #define DIR_HIST_REC_SIZE 80

@@ -92,3 +92,5 @@ void ui_fmt_duration(char *buf, size_t cap, uint32_t seconds);
 
 /** Short-lived message at the bottom of the display. */
 void ui_toast(const char *text);
+/** Same, shown for `ms` milliseconds. */
+void ui_toast_for(const char *text, uint32_t ms);

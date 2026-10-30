@@ -17,6 +17,15 @@ static const char *TAG = "directory";
 #define IMPORT_MAX   (24 * 1024)
 #define IMPORT_IDLE  60     /* seconds without a byte before `contact import` gives up */
 
+/* The mutators only queue the file write (directory.h): the console waits for it, so what it
+ * prints is on flash (and a save error is reported). */
+#define FLUSH_MS 10000
+
+static esp_err_t saved(esp_err_t err)
+{
+    return err == ESP_OK ? dir_flush(FLUSH_MS) : err;
+}
+
 static void print_contacts(const dir_contact_t *c, size_t n)
 {
     for (size_t i = 0; i < n; i++) {
@@ -90,7 +99,7 @@ static int contact_import(void)
         text[len++] = c;
     }
     size_t added = 0, bad = 0;
-    esp_err_t err = dir_contact_import_csv(text, len, &added, &bad);
+    esp_err_t err = saved(dir_contact_import_csv(text, len, &added, &bad));
     free(text);
     printf("imported %u contacts, %u bad lines, %u total%s%s\n", (unsigned)added, (unsigned)bad,
            (unsigned)dir_contact_count(), err == ESP_OK ? "" : "; save failed: ",
@@ -105,7 +114,7 @@ static int cmd_contact(int argc, char **argv)
         for (int i = 3; i < argc; i++) {
             snprintf(name + strlen(name), sizeof(name) - strlen(name), "%s%s", i > 3 ? " " : "", argv[i]);
         }
-        esp_err_t err = dir_contact_set(argv[2], name);
+        esp_err_t err = saved(dir_contact_set(argv[2], name));
         if (err != ESP_OK) {
             printf("contact add failed: %s\n", esp_err_to_name(err));
             return 1;
@@ -117,7 +126,7 @@ static int cmd_contact(int argc, char **argv)
         return 0;
     }
     if (argc == 3 && strcmp(argv[1], "del") == 0) {
-        esp_err_t err = dir_contact_del(argv[2]);
+        esp_err_t err = saved(dir_contact_del(argv[2]));
         if (err != ESP_OK) {
             printf("contact del failed: %s\n", esp_err_to_name(err));
             return 1;
@@ -177,7 +186,7 @@ static int cmd_speed(int argc, char **argv)
         return 1;
     }
     if (argc == 3) {
-        esp_err_t err = dir_speed_set(d, strcmp(argv[2], "-") == 0 ? "" : argv[2]);
+        esp_err_t err = saved(dir_speed_set(d, strcmp(argv[2], "-") == 0 ? "" : argv[2]));
         if (err != ESP_OK) {
             printf("speed failed: %s\n", esp_err_to_name(err));
             return 1;
@@ -195,7 +204,7 @@ static int cmd_speed(int argc, char **argv)
 static int cmd_history(int argc, char **argv)
 {
     if (argc == 2 && strcmp(argv[1], "clear") == 0) {
-        esp_err_t err = dir_history_clear();
+        esp_err_t err = saved(dir_history_clear());
         printf("history cleared%s%s\n", err == ESP_OK ? "" : "; save failed: ",
                err == ESP_OK ? "" : esp_err_to_name(err));
         return err == ESP_OK ? 0 : 1;
@@ -216,7 +225,7 @@ static int cmd_history(int argc, char **argv)
             }
         }
         snprintf(e.number, sizeof(e.number), "%s", argv[4]);
-        esp_err_t err = dir_history_add(&e);
+        esp_err_t err = saved(dir_history_add(&e));
         printf("history add: %s\n", esp_err_to_name(err));
         return err == ESP_OK ? 0 : 1;
     }

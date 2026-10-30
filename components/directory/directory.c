@@ -35,11 +35,20 @@ static wl_handle_t s_wl = WL_INVALID_HANDLE;
 static dir_ctab_t s_contacts;
 static dir_speed_tab_t s_speed;
 static dir_hist_t s_hist;
-/* History changes come from the sip task (call end, small stack, must not stall on flash) and the
- * LVGL task: they only mark the history dirty, and this task writes it (s_lock is held just for
- * the in-RAM serialisation, not for the flash write). */
+/* All file writes happen in this task, never in the caller: history changes come from the sip
+ * task (call end, small stack, must not stall on flash), contact / speed dial saves from the
+ * LVGL task (the UI must not block on flash) and the console. A change only updates RAM and
+ * marks the file dirty; the writer snapshots the data under s_lock and writes it without the
+ * lock, so readers never wait for flash either. */
 static TaskHandle_t s_writer;
 static bool s_hist_dirty;           /* under s_lock */
+static bool s_contacts_dirty;       /* under s_lock */
+static bool s_speed_dirty;          /* under s_lock */
+static uint32_t s_req_gen;          /* under s_lock: +1 per change that needs a write */
+static uint32_t s_done_gen;         /* under s_lock: s_req_gen the writer has caught up with */
+static esp_err_t s_last_err = ESP_OK;   /* under s_lock: result of the writer's last pass */
+static uint32_t s_hist_rev;         /* under s_lock: +1 per history change (dir_history_rev) */
+static dir_contact_t *s_snap;       /* writer only: copy of the contacts (PSRAM if present) */
 #define WRITER_COALESCE_MS  200     /* several changes in a row (mark seen + clear...) = one write */
 
 esp_err_t dir_console_register(void);    /* dir_console.c */
@@ -121,16 +130,6 @@ static int write_speed(const void *obj, FILE *f)
     return dir_speed_write(obj, f);
 }
 
-static esp_err_t save_contacts(void)
-{
-    return save_text(F_CONTACTS, F_CONTACTS_T, write_contacts, &s_contacts);
-}
-
-static esp_err_t save_speed(void)
-{
-    return save_text(F_SPEED, F_SPEED_T, write_speed, &s_speed);
-}
-
 /* Caller holds s_lock: serialise the history into a new buffer (PSRAM if possible). */
 static uint8_t *history_snapshot_locked(size_t *len)
 {
@@ -166,33 +165,102 @@ static esp_err_t write_history(const uint8_t *buf, size_t len)
 static void writer_task(void *arg)
 {
     (void)arg;
+    static dir_speed_tab_t speed;   /* writer only */
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         vTaskDelay(pdMS_TO_TICKS(WRITER_COALESCE_MS));
         uint8_t *buf = NULL;
         size_t len = 0;
+        dir_ctab_t contacts = { .v = s_snap, .n = 0, .cap = DIR_CONTACTS_MAX };
         xSemaphoreTake(s_lock, portMAX_DELAY);
-        if (s_hist_dirty) {
+        uint32_t gen = s_req_gen;
+        bool hist = s_hist_dirty, con = s_contacts_dirty, spd = s_speed_dirty;
+        if (hist) {
             buf = history_snapshot_locked(&len);
             s_hist_dirty = buf == NULL;     /* out of memory: retry on the next change */
         }
+        if (con) {
+            memcpy(s_snap, s_contacts.v, s_contacts.n * sizeof(dir_contact_t));
+            contacts.n = s_contacts.n;
+            s_contacts_dirty = false;
+        }
+        if (spd) {
+            speed = s_speed;
+            s_speed_dirty = false;
+        }
         xSemaphoreGive(s_lock);
-        if (buf != NULL) {
-            write_history(buf, len);
+
+        esp_err_t err = ESP_OK;
+        if (hist) {
+            err = buf != NULL ? write_history(buf, len) : ESP_ERR_NO_MEM;
             free(buf);
         }
+        if (con) {
+            esp_err_t e = save_text(F_CONTACTS, F_CONTACTS_T, write_contacts, &contacts);
+            err = err == ESP_OK ? e : err;
+        }
+        if (spd) {
+            esp_err_t e = save_text(F_SPEED, F_SPEED_T, write_speed, &speed);
+            err = err == ESP_OK ? e : err;
+        }
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        s_done_gen = gen;
+        s_last_err = err;
+        xSemaphoreGive(s_lock);
     }
 }
 
-/* Caller holds s_lock. */
-static esp_err_t save_history(void)
+/* Caller holds s_lock: set `*dirty` and wake the writer. */
+static esp_err_t request_save(bool *dirty)
 {
     if (!s_mounted || s_writer == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-    s_hist_dirty = true;
+    *dirty = true;
+    s_req_gen++;
     xTaskNotifyGive(s_writer);
     return ESP_OK;
+}
+
+/* Caller holds s_lock (all three). */
+static esp_err_t save_history(void)
+{
+    s_hist_rev++;
+    return request_save(&s_hist_dirty);
+}
+
+static esp_err_t save_contacts(void)
+{
+    return request_save(&s_contacts_dirty);
+}
+
+static esp_err_t save_speed(void)
+{
+    return request_save(&s_speed_dirty);
+}
+
+esp_err_t dir_flush(uint32_t timeout_ms)
+{
+    ESP_RETURN_ON_FALSE(s_lock, ESP_ERR_INVALID_STATE, TAG, "not initialised");
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    uint32_t want = s_req_gen;
+    xSemaphoreGive(s_lock);
+    for (uint32_t waited = 0;; waited += 10) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        bool done = (int32_t)(s_done_gen - want) >= 0;
+        esp_err_t err = s_last_err;
+        xSemaphoreGive(s_lock);
+        if (done) {
+            return err;
+        }
+        if (!s_mounted || s_writer == NULL) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        if (waited >= timeout_ms) {
+            return ESP_ERR_TIMEOUT;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
 
 static void load_contacts(void)
@@ -265,7 +333,8 @@ esp_err_t dir_init(void)
     s_lock = xSemaphoreCreateMutex();
     s_contacts = (dir_ctab_t){ .v = big_calloc(DIR_CONTACTS_MAX, sizeof(dir_contact_t)), .cap = DIR_CONTACTS_MAX };
     s_hist = (dir_hist_t){ .e = big_calloc(DIR_HISTORY_MAX, sizeof(dir_call_t)), .cap = DIR_HISTORY_MAX };
-    ESP_RETURN_ON_FALSE(s_lock && s_contacts.v && s_hist.e, ESP_ERR_NO_MEM, TAG, "no memory");
+    s_snap = big_calloc(DIR_CONTACTS_MAX, sizeof(dir_contact_t));
+    ESP_RETURN_ON_FALSE(s_lock && s_contacts.v && s_hist.e && s_snap, ESP_ERR_NO_MEM, TAG, "no memory");
 
     /* 4 KB sectors (CONFIG_WL_SECTOR_SIZE); a failed first mount formats the partition. */
     const esp_vfs_fat_mount_config_t mc = {
@@ -287,7 +356,7 @@ esp_err_t dir_init(void)
         load_history();
         /* internal-RAM stack: it runs FATFS / flash writes */
         if (xTaskCreate(writer_task, "dir_save", 4096, NULL, 2, &s_writer) != pdPASS) {
-            ESP_LOGE(TAG, "no memory for the writer task - history is not saved");
+            ESP_LOGE(TAG, "no memory for the writer task - the directory is not saved");
         }
     }
     dir_console_register();
@@ -490,6 +559,31 @@ unsigned dir_history_unseen_missed(void)
     unsigned n = dir_hist_unseen_missed(&s_hist);
     xSemaphoreGive(s_lock);
     return n;
+}
+
+uint32_t dir_history_rev(void)
+{
+    if (s_lock == NULL) {
+        return 0;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    uint32_t r = s_hist_rev;
+    xSemaphoreGive(s_lock);
+    return r;
+}
+
+bool dir_history_last_unseen_missed(dir_call_t *out)
+{
+    if (s_lock == NULL || out == NULL) {
+        return false;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    const dir_call_t *c = dir_hist_last_unseen_missed(&s_hist);
+    if (c) {
+        *out = *c;
+    }
+    xSemaphoreGive(s_lock);
+    return c != NULL;
 }
 
 esp_err_t dir_history_mark_seen(void)

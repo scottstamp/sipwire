@@ -43,6 +43,10 @@ typedef struct {
     uint8_t ringtone_count;
     uint8_t ring_tone, ring_volume, call_volume, speaker_volume;
     bool call_waiting, auto_answer;
+    /* last CALL_EVENT_MISSED (call refused without ringing) */
+    uint16_t missed_seq;            /* +1 per event */
+    bool missed_dnd;
+    char missed_from[64];           /* name, else number */
 } ui_bridge_local_t;
 
 /** Fill the time/update settings of `loc` (Settings > Time and > Update prefill).

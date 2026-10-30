@@ -1,6 +1,13 @@
 /* Call history: newest first, one 50 px row per call (direction/result icon, name or number,
  * what happened, time, talk time). Tap = call back. "Clear" asks first. Opening the screen
- * marks the missed calls seen (after the list was fetched, so they still show as new). */
+ * marks the missed calls seen (after the list was fetched; they keep showing as new while the
+ * screen is open).
+ *
+ * The list follows the history live: when the model's history_rev changes it is refetched in
+ * place (no new widgets: the virtual list rebinds its visible rows). Calls added in front push
+ * the list down by that many rows when it is scrolled, so the rows in view stay put; at the
+ * top the new calls scroll into view. A new missed call shows as new, but is not marked seen
+ * (nobody may be looking): the home badge keeps counting it. */
 
 #include "ui_priv.h"
 
@@ -21,6 +28,9 @@ typedef struct {
     lv_obj_t *confirm;  /* modal overlay, NULL when closed */
     ui_call_t *items;
     int32_t n;
+    bool fresh[UI_HISTORY_MAX];     /* row shown as a new missed call */
+    uint32_t rev;                   /* model history_rev the list was fetched at */
+    int64_t now;                    /* model now the times were formatted at */
 } hist_t;
 
 static hist_t *s_h;
@@ -92,7 +102,7 @@ static void bind_row(lv_obj_t *row, int32_t idx, void *user)
     const ui_call_t *c = &h->items[idx];
     lv_color_t col;
     const char *icon = icon_for(c, &col);
-    bool fresh = c->result == UI_CALLRES_MISSED && c->direction == UI_CALLDIR_IN && !c->seen;
+    bool fresh = h->fresh[idx];
 
     lv_obj_t *ic = lv_obj_get_child(row, C_ICON);
     lv_label_set_text(ic, icon);
@@ -165,15 +175,36 @@ static void on_cancel(lv_event_t *e)
     confirm_close(lv_event_get_user_data(e));
 }
 
+/* (Re)fetch the list. Keeps the rows in view when calls were added in front of them. */
+static void reload(hist_t *h)
+{
+    ui_call_t old_first;
+    int32_t old_n = h->n;
+    if (old_n > 0) {
+        old_first = h->items[0];
+    }
+    int32_t sy = lv_obj_get_scroll_y(h->list);
+    h->n = (int32_t)ui_act_history_list(h->items, UI_HISTORY_MAX);
+    int32_t shift = old_n > 0 ? ui_hist_shift(&old_first, h->items, h->n) : -1;
+    ui_hist_carry_fresh(h->fresh, old_n, shift, h->items, h->n);
+    ui_vlist_set_count(h->list, h->n);
+    if (shift > 0 && sy > 0) {
+        lv_obj_scroll_to_y(h->list, sy + shift * ROW_H, LV_ANIM_OFF);
+        ui_vlist_refresh(h->list);
+    }
+    lv_obj_set_hidden(h->empty, h->n != 0);
+    lv_obj_set_hidden(h->clear, h->n == 0);
+    if (h->n == 0) {
+        confirm_close(h);
+    }
+}
+
 static void on_confirm_clear(lv_event_t *e)
 {
     hist_t *h = lv_event_get_user_data(e);
     ui_act_history_clear();
-    h->n = 0;
-    ui_vlist_set_count(h->list, 0);
-    lv_obj_set_hidden(h->empty, false);
-    lv_obj_set_hidden(h->clear, true);
-    confirm_close(h);
+    reload(h);
+    confirm_close(h);   /* last: deletes this button */
 }
 
 static void on_clear(lv_event_t *e)
@@ -233,26 +264,33 @@ static lv_obj_t *history_create(const char *arg)
     ui_statusbar_create(scr);
 
     s_h = h;
-    h->n = (int32_t)ui_act_history_list(h->items, UI_HISTORY_MAX);
+    h->rev = ui_model()->history_rev;
+    h->now = ui_model()->now;
+    reload(h);
     bool unseen = false;
     for (int32_t i = 0; i < h->n; i++) {
-        if (h->items[i].result == UI_CALLRES_MISSED && h->items[i].direction == UI_CALLDIR_IN &&
-            !h->items[i].seen) {
-            unseen = true;
-        }
+        unseen = unseen || h->fresh[i];
     }
-    ui_vlist_set_count(h->list, h->n);
-    lv_obj_set_hidden(h->empty, h->n != 0);
-    lv_obj_set_hidden(h->clear, h->n == 0);
     if (unseen) {
-        ui_act_history_mark_seen();
+        ui_act_history_mark_seen();     /* the model's history_rev follows: reload keeps the flags */
     }
     return scr;
 }
 
 static void history_update(const ui_model_t *m)
 {
-    (void)m;   /* the list is a snapshot from when the screen opened */
+    hist_t *h = s_h;
+    if (!h) {
+        return;
+    }
+    if (m->history_rev != h->rev) {
+        h->rev = m->history_rev;
+        h->now = m->now;
+        reload(h);
+    } else if (m->now != h->now) {
+        h->now = m->now;                /* "14:03" -> "Yesterday"...: rebind the visible rows */
+        ui_vlist_refresh(h->list);
+    }
 }
 
 static void history_key(char key, ui_key_action_t action)

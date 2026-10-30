@@ -280,12 +280,21 @@ static void test_history_ring(void)
     TEST_ASSERT_EQUAL_STRING("3", dir_hist_get(&h, 4)->number);     /* 1, 2 dropped */
     TEST_ASSERT_NULL(dir_hist_get(&h, 5));
     TEST_ASSERT_EQUAL(3, dir_hist_unseen_missed(&h));               /* 3, 5, 7 */
+    TEST_ASSERT_NOT_NULL(dir_hist_last_unseen_missed(&h));
+    TEST_ASSERT_EQUAL_STRING("7", dir_hist_last_unseen_missed(&h)->number);
     TEST_ASSERT_TRUE(dir_hist_mark_seen(&h));
     TEST_ASSERT_EQUAL(0, dir_hist_unseen_missed(&h));
+    TEST_ASSERT_NULL(dir_hist_last_unseen_missed(&h));
     TEST_ASSERT_FALSE(dir_hist_mark_seen(&h));
     dir_call_t out = call(DIR_CALL_OUT, DIR_RES_MISSED, "9", 0);    /* outgoing "missed" is never unseen */
     dir_hist_add(&h, &out);
     TEST_ASSERT_EQUAL(0, dir_hist_unseen_missed(&h));
+    TEST_ASSERT_NULL(dir_hist_last_unseen_missed(&h));
+    dir_call_t in = call(DIR_CALL_IN, DIR_RES_MISSED, "11", 0);      /* a new one behind an answered call */
+    dir_hist_add(&h, &in);
+    dir_call_t ans = call(DIR_CALL_IN, DIR_RES_ANSWERED, "12", 0);
+    dir_hist_add(&h, &ans);
+    TEST_ASSERT_EQUAL_STRING("11", dir_hist_last_unseen_missed(&h)->number);
 }
 
 static void test_history_serialize(void)

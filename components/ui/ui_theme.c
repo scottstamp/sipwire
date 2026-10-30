@@ -116,6 +116,7 @@ void ui_theme_init(void)
     lv_style_set_pad_ver(&s_st_toast, 8);
     lv_style_set_text_color(&s_st_toast, UI_COL_TEXT);
     lv_style_set_text_font(&s_st_toast, &lv_font_montserrat_14);
+    lv_style_set_text_align(&s_st_toast, LV_TEXT_ALIGN_CENTER);
 }
 
 /* ---- basic building blocks ------------------------------------------------ */
@@ -454,6 +455,11 @@ static void toast_deleted(lv_event_t *e)
 
 void ui_toast(const char *text)
 {
+    ui_toast_for(text, 1800);
+}
+
+void ui_toast_for(const char *text, uint32_t ms)
+{
     if (s_toast) {
         lv_obj_delete(s_toast);
         s_toast = NULL;
@@ -461,9 +467,15 @@ void ui_toast(const char *text)
     lv_obj_t *t = lv_label_create(lv_layer_top());
     lv_obj_add_style(t, &s_st_toast, 0);
     lv_label_set_text(t, text);
+    /* A long text wraps at a fixed width (a content-sized label with max_width would size its
+     * height for the unwrapped text and clip the last line). */
+    lv_obj_update_layout(t);
+    if (lv_obj_get_width(t) > UI_W - 16) {
+        lv_obj_set_width(t, UI_W - 16);
+    }
     lv_obj_align(t, LV_ALIGN_BOTTOM_MID, 0, -12);
     lv_obj_set_clickable(t, false);
     lv_obj_add_event_cb(t, toast_deleted, LV_EVENT_DELETE, NULL);
-    lv_obj_delete_delayed(t, 1800);
+    lv_obj_delete_delayed(t, ms);
     s_toast = t;
 }
