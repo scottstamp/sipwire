@@ -150,6 +150,11 @@ Not thread-safe: use one task.
   180. A second outgoing call is allowed next to one established call
   (consultation). A hung-up call may linger internally (CANCEL / 487 /
   200-race → ACK + BYE) without blocking a new call (4 slots).
+* Outgoing INVITE: after a provisional, timer C (180 s, restarted by each
+  1xx) bounds the wait for a final response: on expiry the call ends with
+  408 (`SIP_END_TIMEOUT`) and a CANCEL goes out. Once CANCELled, the INVITE
+  transaction gives up 64*T1 later if no 487 arrives (§9.1), so a PBX that
+  vanishes mid-ring cannot pin transactions.
 * Hold: `sip_call_hold` records the wanted state; the re-INVITE goes out when
   no INVITE transaction of the call is in flight. 491 → retried after the
   §14.1 delay (2.1-4 s if we placed the call / own the Call-ID, else 0-2 s);
@@ -277,7 +282,8 @@ Host (`tools/ci.sh host-test`, needs `IDF_PATH` for Unity), under ASan/UBSan:
   answer/reject/remote CANCEL/busy/488, BYE both ways, retransmissions,
   re-INVITE hold (remote and local), delayed offer, G.722 offer/answer and
   codec preference config, callback re-entrancy, pool slots of requests that
-  cannot be answered, 200 too big → 500, unanswered call → 480.
+  cannot be answered, 200 too big → 500, unanswered call → 480, timer C,
+  unanswered CANCEL.
 * `test_sip_sub` — SUBSCRIBE/401/200/NOTIFY, NOTIFY before the 2xx, refresh
   timing (granted / shortened expires), terminated + noresource / probation +
   retry-after / deactivated, 404 backoff to 5 min, 503 Retry-After, 481 to a

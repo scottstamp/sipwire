@@ -1125,6 +1125,7 @@ static void send_cancel(sip_ua_t *ua, call_t *c)
     sipua_log_msg(ua, "send", ua->tx, (size_t)n, &ua->server);
     t->owner = OWN_CANCEL;
     t->owner_ref = c->handle;
+    sip_txn_cancel_sent(it, ua->now); /* gives up on the INVITE after 64*T1 */
     c->cancel_sent = true;
     c->cancel_pending = false;
     LOGI("call %d: CANCEL sent", c->handle);
@@ -1382,6 +1383,13 @@ static void tu_on_timeout(void *ctx, sip_txn_t *t)
             if (c->st == CS_ENDING) {
                 call_free(c);
             } else {
+                if (t->state == SIP_TS_PROCEEDING && !c->cancel_sent) {
+                    /* timer C: stop the far end ringing; the CANCEL keeps
+                     * t alive (64*T1) to ACK the 487 */
+                    LOGW("call %d: no final response in %u s, cancelling", c->handle,
+                         (unsigned)(SIP_TIMER_C_MS / 1000));
+                    send_cancel(ua, c);
+                }
                 end_call(ua, c, SIP_END_TIMEOUT, 408, true);
             }
         }
@@ -2081,6 +2089,11 @@ void sip_ua_tick(sip_ua_t *ua, uint64_t now_ms)
         if (c->st == CS_ENDING && ua->now >= c->deadline) {
             if (c->bye_pending && c->dlg_valid) {
                 send_bye(ua, c);
+            }
+            sip_txn_t *it = sip_txn_find(&ua->txl, c->inv_txn);
+            if (it && it->kind == SIP_TXN_CLIENT_INVITE &&
+                (it->state == SIP_TS_CALLING || it->state == SIP_TS_PROCEEDING)) {
+                sip_txn_terminate(it); /* no final response: nobody needs it any more */
             }
             call_free(c);
         } else if (c->st == CS_CONFIRMED) {

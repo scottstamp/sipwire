@@ -219,6 +219,15 @@ int sip_txn_build_cancel(const sip_txn_t *t, char *out, size_t cap)
     return build_from_invite(t->buf, t->len, "CANCEL", t->cseq, SIP_STR_NULL, out, cap);
 }
 
+void sip_txn_cancel_sent(sip_txn_t *t, uint64_t now)
+{
+    /* only Proceeding: no CANCEL before a provisional (§9.1) */
+    if (t->kind == SIP_TXN_CLIENT_INVITE && !t->cancelled && t->state == SIP_TS_PROCEEDING) {
+        t->cancelled = true;
+        t->t_end = now + 64u * SIP_T1_MS; /* replaces timer C, not restarted by 1xx */
+    }
+}
+
 static sip_txn_t *client_match(sip_txn_layer_t *l, const sip_msg_t *m)
 {
     const sip_str_t br = m->via[0].branch;
@@ -249,8 +258,12 @@ bool sip_txn_on_response(sip_txn_layer_t *l, uint64_t now, const sip_msg_t *m)
             t->last_status = code;
             if (code < 200) {
                 t->state = SIP_TS_PROCEEDING;
-                t->t_retx = 0;  /* stop timer A */
-                t->t_end = 0;   /* and B */
+                t->t_retx = 0; /* stop timer A */
+                if (!t->cancelled) {
+                    /* B → timer C (restarted by every 1xx): never wait for
+                     * a final response forever (a PBX restart mid-ring) */
+                    t->t_end = now + SIP_TIMER_C_MS;
+                }
             } else if (code < 300) {
                 t->state = SIP_TS_ACCEPTED;
                 t->t_retx = 0;
@@ -473,7 +486,8 @@ void sip_txn_tick(sip_txn_layer_t *l, uint64_t now)
             bool notify = false;
             switch (t->kind) {
             case SIP_TXN_CLIENT_INVITE:
-                notify = t->state == SIP_TS_CALLING;          /* timer B */
+                /* timer B; timer C or the CANCEL bound */
+                notify = t->state == SIP_TS_CALLING || t->state == SIP_TS_PROCEEDING;
                 break;
             case SIP_TXN_CLIENT_NONINVITE:
                 notify = t->state == SIP_TS_TRYING || t->state == SIP_TS_PROCEEDING; /* F */

@@ -1665,6 +1665,78 @@ static void test_incoming_unanswered_480(void)
     TEST_ASSERT_EQUAL(0, sip_ua_debug_txn_count(f->ua));
 }
 
+/* 180, then the PBX goes away: the user hangs up, the CANCEL is never
+ * answered and no 487 comes. The INVITE transaction used to stay in
+ * Proceeding forever (16 such calls exhausted the pool). */
+static void test_cancel_unanswered_frees_invite_txn(void)
+{
+    fx_init(f, NULL);
+    for (int i = 0; i < SIP_MAX_TXN + 2; i++) {
+        sip_call_handle_t h;
+        fx_clear_sent(f);
+        TEST_ASSERT_EQUAL(SIP_OK, sip_call_dial(f->ua, "600", &h));
+        int inv = fx_find(f, "INVITE", 0);
+        TEST_ASSERT_TRUE(inv >= 0);
+        fx_reply(f, inv, 180, "gone", NULL, NULL);
+        TEST_ASSERT_EQUAL(SIP_OK, sip_call_hangup(f->ua, h));
+        TEST_ASSERT_EQUAL(1, fx_count(f, "CANCEL"));
+        fx_advance(f, 64 * 500 + 100);
+        TEST_ASSERT_EQUAL(0, sip_ua_debug_txn_count(f->ua));
+        TEST_ASSERT_EQUAL(0, sip_ua_debug_call_slots(f->ua));
+    }
+}
+
+/* Only 100 Trying, never a final response: timer C ends the call (408)
+ * instead of DIALING forever, CANCELs the INVITE and still ACKs the 487. */
+static void test_outgoing_timer_c(void)
+{
+    fx_init(f, NULL);
+    sip_call_handle_t h;
+    sip_call_dial(f->ua, "600", &h);
+    int inv = fx_find(f, "INVITE", 0);
+    fx_reply(f, inv, 100, NULL, NULL, NULL);
+    fx_advance(f, 179990);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_DIALING, sip_call_state(f->ua, h));
+    TEST_ASSERT_EQUAL(0, fx_count(f, "CANCEL"));
+    TEST_ASSERT_EQUAL(1, fx_count(f, "INVITE")); /* timer A stopped by the 100 */
+    fx_advance(f, 20);
+    const fx_ev_t *e = last_call_ev();
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_ENDED, e->state);
+    TEST_ASSERT_EQUAL(SIP_END_TIMEOUT, e->reason);
+    TEST_ASSERT_EQUAL(408, e->code);
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_call_slots(f->ua));
+    int can = fx_find(f, "CANCEL", 0);
+    TEST_ASSERT_TRUE(can >= 0);
+    int nev = f->n_ev;
+    fx_reply(f, can, 200, "late", NULL, NULL);
+    fx_reply(f, inv, 487, "late", NULL, NULL);
+    TEST_ASSERT_EQUAL(1, fx_count(f, "ACK"));
+    TEST_ASSERT_EQUAL(nev, f->n_ev);
+    fx_advance(f, 33000); /* timer D */
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_txn_count(f->ua));
+}
+
+/* Timer C restarts with every provisional: a long ring with 18x refreshes
+ * keeps going. */
+static void test_timer_c_restarted_by_1xx(void)
+{
+    fx_init(f, NULL);
+    sip_call_handle_t h;
+    sip_call_dial(f->ua, "600", &h);
+    int inv = fx_find(f, "INVITE", 0);
+    fx_reply(f, inv, 180, "c1", NULL, NULL);
+    fx_advance(f, 120000);
+    fx_reply(f, inv, 180, "c1", NULL, NULL);
+    fx_advance(f, 120000);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_RINGING_OUT, sip_call_state(f->ua, h));
+    fx_advance(f, 60010);
+    TEST_ASSERT_EQUAL(SIP_UA_CALL_ENDED, last_call_ev()->state);
+    TEST_ASSERT_EQUAL(408, last_call_ev()->code);
+    TEST_ASSERT_EQUAL(1, fx_count(f, "CANCEL"));
+    fx_advance(f, 33000); /* CANCEL unanswered too */
+    TEST_ASSERT_EQUAL(0, sip_ua_debug_txn_count(f->ua));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1723,5 +1795,8 @@ int main(void)
     RUN_TEST(test_unanswerable_requests_free_txn);
     RUN_TEST(test_answer_too_big_sends_500);
     RUN_TEST(test_incoming_unanswered_480);
+    RUN_TEST(test_cancel_unanswered_frees_invite_txn);
+    RUN_TEST(test_outgoing_timer_c);
+    RUN_TEST(test_timer_c_restarted_by_1xx);
     return UNITY_END();
 }
