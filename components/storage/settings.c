@@ -1,8 +1,11 @@
 #include "settings.h"
 
+#include <assert.h>
+#include <stdlib.h>
 #include <string.h>
 #include "esp_check.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -67,35 +70,49 @@ static const char *TAG = "storage";
 #define K_TC_Y_MIN    "tc_y_min"
 #define K_TC_Y_MAX    "tc_y_max"
 
+/* Defaults (flash); also what settings_get() returns before settings_init(). */
+static const settings_t s_defaults = {
+    .sip_port = 5060,
+    .sip_transport = SIP_TRANSPORT_UDP,
+    .sip_reg_expires = 300,
+    .codec_pref = CODEC_PREF_DEFAULT,
+    .vm_number = VM_NUMBER_DEFAULT,
+    /* call features */
+    .call_waiting = true,
+    .dnd = false,
+    .auto_answer = true,
+    .ring_volume = 70,
+    .call_volume = 60,
+    .mic_gain = 50,
+    .aec = false,               /* until verified on the hardware */
+    .aec_suppress = 40,         /* SpeexDSP's defaults */
+    .aec_suppress_act = 15,
+    .backlight = 80,
+    .backlight_timeout_s = 30,
+    .ntp_server = CONFIG_SIPWIRE_NTP_SERVER,
+    .tz = CONFIG_SIPWIRE_TZ,
+    .clock_24h = false,
+    .ring_tone = 0,
+    .speaker_volume = 90,
+    .ota_url = CONFIG_SIPWIRE_OTA_URL,
+};
+
 static SemaphoreHandle_t s_lock;
-static settings_t s_cur;
+/* The current settings, under s_lock. Never touched from an ISR or with the cache disabled
+ * (esp_flash copies NVS data to/from PSRAM through an internal bounce buffer), so it lives in
+ * PSRAM when there is some: internal RAM is the scarce resource. */
+static settings_t *s_cur;
 
 static void settings_defaults(settings_t *s)
 {
-    memset(s, 0, sizeof(*s));
-    s->sip_port = 5060;
-    s->sip_transport = SIP_TRANSPORT_UDP;
-    s->sip_reg_expires = 300;
-    strcpy(s->codec_pref, CODEC_PREF_DEFAULT);
-    strcpy(s->vm_number, VM_NUMBER_DEFAULT);
-    /* call features */
-    s->call_waiting = true;
-    s->dnd = false;
-    s->auto_answer = true;
-    s->ring_volume = 70;
-    s->call_volume = 60;
-    s->mic_gain = 50;
-    s->aec = false;             /* until verified on the hardware */
-    s->aec_suppress = 40;       /* SpeexDSP's defaults */
-    s->aec_suppress_act = 15;
-    s->backlight = 80;
-    s->backlight_timeout_s = 30;
-    strcpy(s->ntp_server, CONFIG_SIPWIRE_NTP_SERVER);
-    strcpy(s->tz, CONFIG_SIPWIRE_TZ);
-    s->clock_24h = false;
-    s->ring_tone = 0;
-    s->speaker_volume = 90;
-    strcpy(s->ota_url, CONFIG_SIPWIRE_OTA_URL);
+    memcpy(s, &s_defaults, sizeof(*s));
+}
+
+/* Cold settings_t-sized buffers: PSRAM first (under the 16 KB SPIRAM_MALLOC_ALWAYSINTERNAL
+ * threshold plain malloc would take internal RAM). */
+static settings_t *alloc_settings(void)
+{
+    return heap_caps_malloc_prefer(sizeof(settings_t), 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, MALLOC_CAP_8BIT);
 }
 
 /* ---- NVS load: a missing (or unusable) key leaves the default in place ---- */
@@ -246,14 +263,14 @@ static esp_err_t validate(const settings_t *s)
 
 #define STORE_STR(key, field)                                                      \
     do {                                                                           \
-        if (strcmp(in->field, s_cur.field) != 0) {                                 \
+        if (strcmp(in->field, s_cur->field) != 0) {                                \
             ESP_RETURN_ON_ERROR(nvs_set_str(h, key, in->field), TAG, key);         \
         }                                                                          \
     } while (0)
 
 #define STORE_NUM(fn, key, field)                                                  \
     do {                                                                           \
-        if (in->field != s_cur.field) {                                            \
+        if (in->field != s_cur->field) {                                           \
             ESP_RETURN_ON_ERROR(fn(h, key, in->field), TAG, key);                  \
         }                                                                          \
     } while (0)
@@ -273,22 +290,22 @@ static esp_err_t store_changed(nvs_handle_t h, const settings_t *in)
     STORE_STR(K_NTP_SERVER, ntp_server);
     STORE_STR(K_TZ, tz);
     STORE_STR(K_OTA_URL, ota_url);
-    if (in->clock_24h != s_cur.clock_24h) {
+    if (in->clock_24h != s_cur->clock_24h) {
         ESP_RETURN_ON_ERROR(nvs_set_u8(h, K_CLOCK_24H, in->clock_24h ? 1 : 0), TAG, K_CLOCK_24H);
     }
     /* call features */
-    if (in->call_waiting != s_cur.call_waiting) {
+    if (in->call_waiting != s_cur->call_waiting) {
         ESP_RETURN_ON_ERROR(nvs_set_u8(h, K_CALL_WAIT, in->call_waiting ? 1 : 0), TAG, K_CALL_WAIT);
     }
-    if (in->dnd != s_cur.dnd) {
+    if (in->dnd != s_cur->dnd) {
         ESP_RETURN_ON_ERROR(nvs_set_u8(h, K_DND, in->dnd ? 1 : 0), TAG, K_DND);
     }
-    if (in->auto_answer != s_cur.auto_answer) {
+    if (in->auto_answer != s_cur->auto_answer) {
         ESP_RETURN_ON_ERROR(nvs_set_u8(h, K_AUTO_ANSWER, in->auto_answer ? 1 : 0), TAG, K_AUTO_ANSWER);
     }
 
     STORE_NUM(nvs_set_u16, K_SIP_PORT, sip_port);
-    if (in->sip_transport != s_cur.sip_transport) {
+    if (in->sip_transport != s_cur->sip_transport) {
         ESP_RETURN_ON_ERROR(nvs_set_u8(h, K_SIP_TRANS, (uint8_t)in->sip_transport), TAG, K_SIP_TRANS);
     }
     STORE_NUM(nvs_set_u32, K_SIP_EXPIRES, sip_reg_expires);
@@ -297,14 +314,14 @@ static esp_err_t store_changed(nvs_handle_t h, const settings_t *in)
     STORE_NUM(nvs_set_u8, K_MIC_GAIN, mic_gain);
     STORE_NUM(nvs_set_u8, K_SPK_VOL, speaker_volume);
     STORE_NUM(nvs_set_u8, K_RING_TONE, ring_tone);
-    if (in->aec != s_cur.aec) {
+    if (in->aec != s_cur->aec) {
         ESP_RETURN_ON_ERROR(nvs_set_u8(h, K_AEC, in->aec ? 1 : 0), TAG, K_AEC);
     }
     STORE_NUM(nvs_set_u8, K_AEC_SUPP, aec_suppress);
     STORE_NUM(nvs_set_u8, K_AEC_SUPP_A, aec_suppress_act);
     STORE_NUM(nvs_set_u8, K_BACKLIGHT, backlight);
     STORE_NUM(nvs_set_u16, K_BL_TIMEOUT, backlight_timeout_s);
-    if (in->touch_cal.valid != s_cur.touch_cal.valid) {
+    if (in->touch_cal.valid != s_cur->touch_cal.valid) {
         ESP_RETURN_ON_ERROR(nvs_set_u8(h, K_TC_VALID, in->touch_cal.valid), TAG, K_TC_VALID);
     }
     STORE_NUM(nvs_set_i16, K_TC_X_MIN, touch_cal.x_min);
@@ -327,50 +344,63 @@ static void post_changed(void)
 esp_err_t settings_init(void)
 {
     ESP_RETURN_ON_FALSE(s_lock == NULL, ESP_ERR_INVALID_STATE, TAG, "already initialized");
+    settings_t *cur = alloc_settings();
     SemaphoreHandle_t lock = xSemaphoreCreateMutex();
-    ESP_RETURN_ON_FALSE(lock != NULL, ESP_ERR_NO_MEM, TAG, "no mem for mutex");
+    if (cur == NULL || lock == NULL) {
+        free(cur);
+        if (lock) {
+            vSemaphoreDelete(lock);
+        }
+        ESP_LOGE(TAG, "no mem for settings");
+        return ESP_ERR_NO_MEM;
+    }
 
-    settings_defaults(&s_cur);
+    settings_defaults(cur);
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
     if (err == ESP_OK) {
-        load_all(h, &s_cur);
+        load_all(h, cur);
         nvs_close(h);
     } else if (err == ESP_ERR_NVS_NOT_FOUND) {
         ESP_LOGI(TAG, "no stored settings, using defaults");
     } else {
+        free(cur);
         vSemaphoreDelete(lock);
         ESP_RETURN_ON_ERROR(err, TAG, "nvs_open");
     }
+    s_cur = cur;
     s_lock = lock;
 
     /* Never log passwords. */
-    ESP_LOGI(TAG, "loaded: ssid='%s' sip=%s@%s:%u", s_cur.wifi_ssid, s_cur.sip_user, s_cur.sip_server,
-             s_cur.sip_port);
+    ESP_LOGI(TAG, "loaded: ssid='%s' sip=%s@%s:%u", s_cur->wifi_ssid, s_cur->sip_user, s_cur->sip_server,
+             s_cur->sip_port);
     return ESP_OK;
 }
 
 void settings_get(settings_t *out)
 {
+    settings_get_field(0, out, sizeof(*out));
+}
+
+void settings_get_field(size_t off, void *dst, size_t len)
+{
+    assert(off <= sizeof(settings_t) && len <= sizeof(settings_t) - off);
     if (s_lock == NULL) {
-        settings_defaults(out);
+        memcpy(dst, (const char *)&s_defaults + off, len);
         return;
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    *out = s_cur;
+    memcpy(dst, (const char *)s_cur + off, len);
     xSemaphoreGive(s_lock);
 }
 
-esp_err_t settings_set(const settings_t *in)
+/* Validate and persist `in` as the new settings; caller holds s_lock. *changed: it differed. */
+static esp_err_t set_locked(const settings_t *in, bool *changed)
 {
-    ESP_RETURN_ON_FALSE(in != NULL, ESP_ERR_INVALID_ARG, TAG, "null settings");
-    ESP_RETURN_ON_FALSE(s_lock != NULL, ESP_ERR_INVALID_STATE, TAG, "not initialized");
     ESP_RETURN_ON_ERROR(validate(in), TAG, "invalid settings");
-
-    xSemaphoreTake(s_lock, portMAX_DELAY);
     esp_err_t err = ESP_OK;
-    bool changed = memcmp(in, &s_cur, sizeof(*in)) != 0;
-    if (changed) {
+    *changed = memcmp(in, s_cur, sizeof(*in)) != 0;
+    if (*changed) {
         nvs_handle_t h;
         err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
         if (err == ESP_OK) {
@@ -379,21 +409,54 @@ esp_err_t settings_set(const settings_t *in)
                 err = nvs_commit(h);
             }
             if (err == ESP_OK) {
-                s_cur = *in;
+                memcpy(s_cur, in, sizeof(*s_cur));
             } else {
                 /* Some keys may already be written: resync RAM with what NVS holds. */
-                load_all(h, &s_cur);
+                load_all(h, s_cur);
             }
             nvs_close(h);
         }
     }
+    ESP_RETURN_ON_ERROR(err, TAG, "persist failed");
+    return ESP_OK;
+}
+
+esp_err_t settings_set(const settings_t *in)
+{
+    ESP_RETURN_ON_FALSE(in != NULL, ESP_ERR_INVALID_ARG, TAG, "null settings");
+    ESP_RETURN_ON_FALSE(s_lock != NULL, ESP_ERR_INVALID_STATE, TAG, "not initialized");
+
+    bool changed = false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    esp_err_t err = set_locked(in, &changed);
     xSemaphoreGive(s_lock);
 
-    ESP_RETURN_ON_ERROR(err, TAG, "persist failed");
-    if (changed) {
+    if (err == ESP_OK && changed) {
         post_changed();
     }
-    return ESP_OK;
+    return err;
+}
+
+esp_err_t settings_set_field(size_t off, const void *src, size_t len)
+{
+    ESP_RETURN_ON_FALSE(src != NULL && off <= sizeof(settings_t) && len <= sizeof(settings_t) - off,
+                        ESP_ERR_INVALID_ARG, TAG, "bad field");
+    ESP_RETURN_ON_FALSE(s_lock != NULL, ESP_ERR_INVALID_STATE, TAG, "not initialized");
+    settings_t *next = alloc_settings();
+    ESP_RETURN_ON_FALSE(next != NULL, ESP_ERR_NO_MEM, TAG, "no mem");
+
+    bool changed = false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    memcpy(next, s_cur, sizeof(*next));
+    memcpy((char *)next + off, src, len);
+    esp_err_t err = set_locked(next, &changed);
+    xSemaphoreGive(s_lock);
+    free(next);
+
+    if (err == ESP_OK && changed) {
+        post_changed();
+    }
+    return err;
 }
 
 esp_err_t settings_reset(void)
@@ -412,7 +475,7 @@ esp_err_t settings_reset(void)
         nvs_close(h);
     }
     if (err == ESP_OK) {
-        settings_defaults(&s_cur);
+        settings_defaults(s_cur);
     }
     xSemaphoreGive(s_lock);
 

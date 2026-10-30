@@ -436,21 +436,25 @@ static void refr_ready_cb(lv_event_t *e)
 
 static void apply_settings(void)
 {
-    settings_t cfg;
-    settings_get(&cfg);
+    settings_touch_cal_t cal;
+    uint8_t backlight;
+    uint16_t timeout_s;
+    SETTINGS_GET(touch_cal, &cal);
+    SETTINGS_GET(backlight, &backlight);
+    SETTINGS_GET(backlight_timeout_s, &timeout_s);
 
     portENTER_CRITICAL(&s.cal_lock);
-    s.cal.valid = cfg.touch_cal.valid;
-    s.cal.x_min = cfg.touch_cal.x_min;
-    s.cal.x_max = cfg.touch_cal.x_max;
-    s.cal.y_min = cfg.touch_cal.y_min;
-    s.cal.y_max = cfg.touch_cal.y_max;
+    s.cal.valid = cal.valid;
+    s.cal.x_min = cal.x_min;
+    s.cal.x_max = cal.x_max;
+    s.cal.y_min = cal.y_min;
+    s.cal.y_max = cal.y_max;
     portEXIT_CRITICAL(&s.cal_lock);
 
     bool lvgl_held = bl_take();
-    s.bl_pct = cfg.backlight > 100 ? 100 : cfg.backlight;
-    s.bl_timeout_s = cfg.backlight_timeout_s;
-    if (cfg.backlight_timeout_s == 0 && (s.bl_state == BL_DIM || s.bl_state == BL_OFF)) {
+    s.bl_pct = backlight > 100 ? 100 : backlight;
+    s.bl_timeout_s = timeout_s;
+    if (timeout_s == 0 && (s.bl_state == BL_DIM || s.bl_state == BL_OFF)) {
         s.bl_state = BL_ON;         /* timeout disabled: leave dim/off */
     }
     bl_update_locked(lvgl_held);

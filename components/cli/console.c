@@ -190,14 +190,19 @@ static bool field_parse(const field_t *f, settings_t *s, const char *val)
     return true;
 }
 
-static int cmd_cfg(int argc, char **argv)
+/* A settings_t (~1.3 KB) for a command: off the console stack, in PSRAM when there is some
+ * (under the 16 KB SPIRAM_MALLOC_ALWAYSINTERNAL threshold plain malloc would take internal RAM). */
+static settings_t *alloc_settings(void)
 {
-    settings_t s;
+    return heap_caps_malloc_prefer(sizeof(settings_t), 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, MALLOC_CAP_8BIT);
+}
 
+static int cfg_run(settings_t *s, int argc, char **argv)
+{
     if (argc == 2 && strcmp(argv[1], "show") == 0) {
-        settings_get(&s);
+        settings_get(s);
         for (size_t i = 0; i < NUM_FIELDS; i++) {
-            field_print(&s_fields[i], &s);
+            field_print(&s_fields[i], s);
         }
         return 0;
     }
@@ -222,21 +227,34 @@ static int cmd_cfg(int argc, char **argv)
             printf("unknown key '%s' (see `cfg show`)\n", argv[2]);
             return 1;
         }
-        settings_get(&s);
-        if (!field_parse(f, &s, argc == 4 ? argv[3] : "")) {
+        settings_get(s);
+        if (!field_parse(f, s, argc == 4 ? argv[3] : "")) {
             return 1;
         }
-        esp_err_t err = settings_set(&s);
+        esp_err_t err = settings_set(s);
         if (err != ESP_OK) {
             printf("rejected: %s\n", esp_err_to_name(err));
             return 1;
         }
-        settings_get(&s);
-        field_print(f, &s);
+        settings_get(s);
+        field_print(f, s);
         return 0;
     }
     printf("usage: cfg show | cfg set <key> [value] | cfg reset\n");
     return 1;
+}
+
+static int cmd_cfg(int argc, char **argv)
+{
+    settings_t *s = alloc_settings();
+    if (s == NULL) {
+        printf("out of memory\n");
+        return 1;
+    }
+    int ret = cfg_run(s, argc, argv);
+    memset(s, 0, sizeof(*s));       /* passwords */
+    free(s);
+    return ret;
 }
 
 /* ---- other built-ins ---- */
@@ -247,21 +265,29 @@ static int cmd_wifi(int argc, char **argv)
         printf("usage: wifi <ssid> [pass]\n");
         return 1;
     }
-    settings_t s;
-    settings_get(&s);
-    if (strlen(argv[1]) >= sizeof(s.wifi_ssid) || (argc == 3 && strlen(argv[2]) >= sizeof(s.wifi_pass))) {
-        printf("ssid max %u chars, password max %u chars\n", (unsigned)sizeof(s.wifi_ssid) - 1,
-               (unsigned)sizeof(s.wifi_pass) - 1);
+    if (strlen(argv[1]) >= SETTINGS_FIELD_SIZE(wifi_ssid) ||
+        (argc == 3 && strlen(argv[2]) >= SETTINGS_FIELD_SIZE(wifi_pass))) {
+        printf("ssid max %u chars, password max %u chars\n", (unsigned)SETTINGS_FIELD_SIZE(wifi_ssid) - 1,
+               (unsigned)SETTINGS_FIELD_SIZE(wifi_pass) - 1);
         return 1;
     }
-    strcpy(s.wifi_ssid, argv[1]);
-    strcpy(s.wifi_pass, argc == 3 ? argv[2] : "");
-    esp_err_t err = settings_set(&s);
+    /* ssid and password in one settings_set(): net applies them together */
+    settings_t *s = alloc_settings();
+    if (s == NULL) {
+        printf("out of memory\n");
+        return 1;
+    }
+    settings_get(s);
+    strcpy(s->wifi_ssid, argv[1]);
+    strcpy(s->wifi_pass, argc == 3 ? argv[2] : "");
+    esp_err_t err = settings_set(s);
+    memset(s, 0, sizeof(*s));       /* passwords */
+    free(s);
     if (err != ESP_OK) {
         printf("rejected: %s\n", esp_err_to_name(err));
         return 1;
     }
-    printf("saved ssid '%s'%s, connecting\n", s.wifi_ssid, argc == 3 ? "" : " (open network)");
+    printf("saved ssid '%s'%s, connecting\n", argv[1], argc == 3 ? "" : " (open network)");
     return 0;
 }
 
@@ -318,9 +344,11 @@ static int cmd_tasks(int argc, char **argv)
 #if CONFIG_FREERTOS_USE_TRACE_FACILITY && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
 #define CPU_MAX_TASKS 40
 
+/* Two of these (~1.6 KB each) are held for the whole sampling window: PSRAM when there is some. */
 static TaskStatus_t *cpu_snapshot(UBaseType_t *n, configRUN_TIME_COUNTER_TYPE *total)
 {
-    TaskStatus_t *st = calloc(CPU_MAX_TASKS, sizeof(*st));
+    TaskStatus_t *st = heap_caps_calloc_prefer(CPU_MAX_TASKS, sizeof(*st), 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                               MALLOC_CAP_8BIT);
     if (st != NULL) {
         *n = uxTaskGetSystemState(st, CPU_MAX_TASKS, total);
     }
@@ -520,7 +548,7 @@ esp_err_t console_start(void)
     esp_console_repl_t *repl = NULL;
     esp_console_repl_config_t repl_cfg = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
     repl_cfg.prompt = PROMPT;
-    repl_cfg.task_stack_size = 6144;    /* cfg show keeps a settings_t on the stack */
+    repl_cfg.task_stack_size = 6144;    /* commands keep a phone_status_t (~1 KB) on the stack */
 
     /* Picks whichever console is configured (UART, USB-serial-JTAG, USB CDC). */
     ESP_RETURN_ON_ERROR(esp_console_new_repl_stdio(&repl_cfg, &repl), TAG, "create repl");

@@ -85,6 +85,15 @@ static struct {
     bool feat_cw, feat_aa, feat_dnd;
 } b;
 
+/* Scratch the bridge needs now and then (~6 KB): in PSRAM when there is some, as internal RAM is
+ * the scarce resource. Nothing here is touched per audio or LVGL frame (refresh runs once a
+ * second and on events). */
+static struct {
+    settings_t fill;                /* update_settings_locked(): callers hold b.mtx */
+    settings_t save;                /* do_saves(): bridge task only */
+    ui_model_t last, model;         /* refresh(): bridge task only */
+} *s_cold;
+
 /* What SNTP and the C library are using right now. The NTP buffer must stay valid
  * for as long as SNTP runs: lwIP keeps the server name pointer. */
 static char s_ntp[sizeof(((settings_t *)0)->ntp_server)];
@@ -99,17 +108,17 @@ static void kick(void)
 /* Account string + the non-secret fields that prefill the Settings forms. */
 static void update_settings_locked(void)
 {
-    static settings_t st;           /* callers hold b.mtx */
-    settings_get(&st);
-    ui_bridge_fill_settings(&b.loc, st.wifi_ssid, st.wifi_pass, st.sip_server, st.sip_port, st.sip_user,
-                            st.sip_password, st.sip_display_name);
-    ui_bridge_fill_time_ota(&b.loc, st.ntp_server, st.tz, st.clock_24h, st.ota_url);
-    ui_bridge_fill_vm(&b.loc, st.vm_number);
-    ui_bridge_fill_dnd(&b.loc, st.dnd);
-    ui_bridge_fill_sounds(&b.loc, audio_ringtone_count(), st.ring_tone, st.ring_volume, st.call_volume,
-                          st.speaker_volume, st.call_waiting, st.auto_answer, st.dnd);
-    memset(st.wifi_pass, 0, sizeof(st.wifi_pass));
-    memset(st.sip_password, 0, sizeof(st.sip_password));
+    settings_t *st = &s_cold->fill;
+    settings_get(st);
+    ui_bridge_fill_settings(&b.loc, st->wifi_ssid, st->wifi_pass, st->sip_server, st->sip_port, st->sip_user,
+                            st->sip_password, st->sip_display_name);
+    ui_bridge_fill_time_ota(&b.loc, st->ntp_server, st->tz, st->clock_24h, st->ota_url);
+    ui_bridge_fill_vm(&b.loc, st->vm_number);
+    ui_bridge_fill_dnd(&b.loc, st->dnd);
+    ui_bridge_fill_sounds(&b.loc, audio_ringtone_count(), st->ring_tone, st->ring_volume, st->call_volume,
+                          st->speaker_volume, st->call_waiting, st->auto_answer, st->dnd);
+    memset(st->wifi_pass, 0, sizeof(st->wifi_pass));
+    memset(st->sip_password, 0, sizeof(st->sip_password));
 }
 
 /* ------------------------------------------------------------------ */
@@ -637,11 +646,10 @@ static void apply_time_cfg(const char *ntp, const char *tz)
 
 static void apply_time_from_settings(void)
 {
-    static settings_t st;           /* default loop task (and init, before the handlers exist) */
-    settings_get(&st);
-    apply_time_cfg(st.ntp_server, st.tz);
-    memset(st.wifi_pass, 0, sizeof(st.wifi_pass));
-    memset(st.sip_password, 0, sizeof(st.sip_password));
+    char ntp[sizeof(s_ntp)], tz[sizeof(s_tz)];
+    SETTINGS_GET(ntp_server, &ntp);
+    SETTINGS_GET(tz, &tz);
+    apply_time_cfg(ntp, tz);
 }
 
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -744,7 +752,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 
 static void do_saves(void)
 {
-    static settings_t st;           /* bridge task only */
+    settings_t *st = &s_cold->save;
     static char ota_url[sizeof(b.ota_url)];
     bool wifi, acc, cal, tm, ota, blf, vm, snd, feat;
 
@@ -771,54 +779,54 @@ static void do_saves(void)
         xSemaphoreGive(b.mtx);
         return;
     }
-    settings_get(&st);
+    settings_get(st);
     if (wifi) {
-        strlcpy(st.wifi_ssid, b.ssid, sizeof(st.wifi_ssid));
+        strlcpy(st->wifi_ssid, b.ssid, sizeof(st->wifi_ssid));
         if (b.wpass[0]) {
-            strlcpy(st.wifi_pass, b.wpass, sizeof(st.wifi_pass));
+            strlcpy(st->wifi_pass, b.wpass, sizeof(st->wifi_pass));
         }
     }
     if (acc) {
-        strlcpy(st.sip_server, b.server, sizeof(st.sip_server));
-        st.sip_port = b.port;
-        strlcpy(st.sip_user, b.user, sizeof(st.sip_user));
+        strlcpy(st->sip_server, b.server, sizeof(st->sip_server));
+        st->sip_port = b.port;
+        strlcpy(st->sip_user, b.user, sizeof(st->sip_user));
         if (b.apass[0]) {
-            strlcpy(st.sip_password, b.apass, sizeof(st.sip_password));
+            strlcpy(st->sip_password, b.apass, sizeof(st->sip_password));
         }
-        strlcpy(st.sip_display_name, b.dname, sizeof(st.sip_display_name));
+        strlcpy(st->sip_display_name, b.dname, sizeof(st->sip_display_name));
     }
     if (cal) {
-        st.touch_cal.valid = true;
-        st.touch_cal.x_min = b.cal.x_min;
-        st.touch_cal.x_max = b.cal.x_max;
-        st.touch_cal.y_min = b.cal.y_min;
-        st.touch_cal.y_max = b.cal.y_max;
+        st->touch_cal.valid = true;
+        st->touch_cal.x_min = b.cal.x_min;
+        st->touch_cal.x_max = b.cal.x_max;
+        st->touch_cal.y_min = b.cal.y_min;
+        st->touch_cal.y_max = b.cal.y_max;
     }
     if (tm) {
-        strlcpy(st.ntp_server, b.ntp, sizeof(st.ntp_server));
-        strlcpy(st.tz, b.tz, sizeof(st.tz));
-        st.clock_24h = b.clock_24h;
+        strlcpy(st->ntp_server, b.ntp, sizeof(st->ntp_server));
+        strlcpy(st->tz, b.tz, sizeof(st->tz));
+        st->clock_24h = b.clock_24h;
     }
     if (blf) {
-        strlcpy(st.blf, b.blf, sizeof(st.blf));
+        strlcpy(st->blf, b.blf, sizeof(st->blf));
     }
     if (vm) {
-        strlcpy(st.vm_number, b.vm_number, sizeof(st.vm_number));
+        strlcpy(st->vm_number, b.vm_number, sizeof(st->vm_number));
     }
     if (snd) {
-        st.ring_tone = b.snd_tone;
-        st.ring_volume = b.snd_ring;
-        st.call_volume = b.snd_call;
-        st.speaker_volume = b.snd_spk;
+        st->ring_tone = b.snd_tone;
+        st->ring_volume = b.snd_ring;
+        st->call_volume = b.snd_call;
+        st->speaker_volume = b.snd_spk;
     }
     if (feat) {
-        st.call_waiting = b.feat_cw;
-        st.auto_answer = b.feat_aa;
-        st.dnd = b.feat_dnd;
+        st->call_waiting = b.feat_cw;
+        st->auto_answer = b.feat_aa;
+        st->dnd = b.feat_dnd;
     }
     if (ota) {
         strlcpy(ota_url, b.ota_url, sizeof(ota_url));
-        strlcpy(st.ota_url, ota_url, sizeof(st.ota_url));   /* remember what was installed from */
+        strlcpy(st->ota_url, ota_url, sizeof(st->ota_url));   /* remember what was installed from */
     }
     b.wifi_pending = false;
     b.acc_pending = false;
@@ -833,9 +841,9 @@ static void do_saves(void)
     memset(b.apass, 0, sizeof(b.apass));
     xSemaphoreGive(b.mtx);
 
-    esp_err_t err = settings_set(&st);   /* no-op when nothing changed */
-    memset(st.wifi_pass, 0, sizeof(st.wifi_pass));
-    memset(st.sip_password, 0, sizeof(st.sip_password));
+    esp_err_t err = settings_set(st);   /* no-op when nothing changed */
+    memset(st->wifi_pass, 0, sizeof(st->wifi_pass));
+    memset(st->sip_password, 0, sizeof(st->sip_password));
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "saving settings: %s", esp_err_to_name(err));
     } else if (wifi || acc || cal || tm || blf || vm || snd || feat) {
@@ -852,7 +860,7 @@ static void do_saves(void)
 
 static void refresh(void)
 {
-    static ui_model_t last, model;  /* bridge task only */
+    ui_model_t *last = &s_cold->last, *model = &s_cold->model;
     static bool have_last;
     ui_bridge_local_t loc;
     phone_status_t ph;
@@ -874,7 +882,7 @@ static void refresh(void)
     ui_bridge_fill_ota(&loc, &os);
 
     phone_get_status(&ph);
-    ui_bridge_build_model(&loc, &ph, esp_timer_get_time(), &model);
+    ui_bridge_build_model(&loc, &ph, esp_timer_get_time(), model);
     /* history: the rev tells an open History screen to refetch; the newest unseen missed call
      * names the home screen's notice (looked up only when the history changed) */
     static uint32_t hist_rev;
@@ -892,22 +900,22 @@ static void refresh(void)
         hist_rev = rev;
         have_rev = true;
     }
-    model.history_rev = rev;
-    model.missed_unseen = (uint8_t)(missed > 99 ? 99 : missed);
-    strlcpy(model.missed_last, missed_last, sizeof(model.missed_last));
-    model.now = loc.time_valid ? (int64_t)(now / 60) * 60 : 0;
-    if (model.call != UI_CALL_IDLE && !model.remote_name[0] && model.remote_number[0]) {
+    model->history_rev = rev;
+    model->missed_unseen = (uint8_t)(missed > 99 ? 99 : missed);
+    strlcpy(model->missed_last, missed_last, sizeof(model->missed_last));
+    model->now = loc.time_valid ? (int64_t)(now / 60) * 60 : 0;
+    if (model->call != UI_CALL_IDLE && !model->remote_name[0] && model->remote_number[0]) {
         /* caller ID from the contacts when the far end sent no display name (and for outgoing
          * calls to a contact) */
-        dir_contact_lookup(model.remote_number, model.remote_name, sizeof(model.remote_name));
+        dir_contact_lookup(model->remote_number, model->remote_name, sizeof(model->remote_name));
     }
-    if (have_last && memcmp(&model, &last, sizeof(model)) == 0) {
+    if (have_last && memcmp(model, last, sizeof(*model)) == 0) {
         return;
     }
     lvgl_port_lock(0);
-    ui_update(&model);
+    ui_update(model);
     lvgl_port_unlock();
-    last = model;
+    *last = *model;
     have_last = true;
 }
 
@@ -955,7 +963,8 @@ esp_err_t ui_bridge_init(lv_display_t *disp)
     ESP_RETURN_ON_FALSE(b.q == NULL, ESP_ERR_INVALID_STATE, TAG, "already initialised");
     b.q = xQueueCreate(QUEUE_LEN, sizeof(bridge_msg_t));
     b.mtx = xSemaphoreCreateMutex();
-    ESP_RETURN_ON_FALSE(b.q && b.mtx, ESP_ERR_NO_MEM, TAG, "no memory");
+    s_cold = heap_caps_calloc_prefer(1, sizeof(*s_cold), 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, MALLOC_CAP_8BIT);
+    ESP_RETURN_ON_FALSE(b.q && b.mtx && s_cold, ESP_ERR_NO_MEM, TAG, "no memory");
 
     b.time_mtx = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(b.time_mtx != NULL, ESP_ERR_NO_MEM, TAG, "no memory");

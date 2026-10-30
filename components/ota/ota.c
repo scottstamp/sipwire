@@ -351,9 +351,9 @@ static int cmd_ota(int argc, char **argv)
         printf("usage: ota [url] | ota status\n");
         return 1;
     }
-    static settings_t s;                /* console task only; keeps the stack small */
-    settings_get(&s);
-    const char *url = argc == 2 ? argv[1] : s.ota_url;
+    char ota_url[SETTINGS_FIELD_SIZE(ota_url)];
+    SETTINGS_GET(ota_url, &ota_url);
+    const char *url = argc == 2 ? argv[1] : ota_url;
     if (url[0] == '\0') {
         printf("no URL: `ota <url>` or `cfg set ota_url <url>`\n");
         return 1;

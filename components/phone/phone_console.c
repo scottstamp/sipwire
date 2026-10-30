@@ -8,6 +8,7 @@
 #include "audio.h"
 #include "console.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "phone.h"
 #include "phone_priv.h"
@@ -17,6 +18,10 @@
  * reply, not a log), as in components/cli. */
 
 static const char *TAG = "phone";
+
+/* Status snapshot for the commands that print most of it (~1 KB): console task only, in PSRAM
+ * when there is some, so neither internal .bss nor the console stack holds it. */
+static phone_status_t *s_st;
 
 static const char *reg_name(sip_reg_state_t st)
 {
@@ -111,26 +116,26 @@ static int cmd_mute(int argc, char **argv)
 
 static int cmd_vol(int argc, char **argv)
 {
-    phone_status_t st;
     if (argc == 1) {
+        phone_status_t st;
         phone_get_status(&st);
-        settings_t cfg;
-        settings_get(&cfg);
+        uint8_t ring, call, spk;
+        SETTINGS_GET(ring_volume, &ring);
+        SETTINGS_GET(call_volume, &call);
+        SETTINGS_GET(speaker_volume, &spk);
         printf("volume %u%s (saved: ring %u, call %u, speaker %u)\n", st.volume, st.speaker ? " (speaker)" : "",
-               cfg.ring_volume, cfg.call_volume, cfg.speaker_volume);
+               ring, call, spk);
         return 0;
     }
     /* vol ring|call|spk <0-100>: set one stored volume directly (persisted at once; the phone
      * picks it up from the settings event) */
-    uint8_t *field = NULL;
-    settings_t cfg;
-    settings_get(&cfg);
+    size_t field = 0;               /* offset in settings_t (no volume is at 0) */
     if (argc == 3 && strcmp(argv[1], "ring") == 0) {
-        field = &cfg.ring_volume;
+        field = offsetof(settings_t, ring_volume);
     } else if (argc == 3 && strcmp(argv[1], "call") == 0) {
-        field = &cfg.call_volume;
+        field = offsetof(settings_t, call_volume);
     } else if (argc == 3 && (strcmp(argv[1], "spk") == 0 || strcmp(argv[1], "speaker") == 0)) {
-        field = &cfg.speaker_volume;
+        field = offsetof(settings_t, speaker_volume);
     }
     const char *num = field ? argv[2] : argv[1];
     char *end = NULL;
@@ -140,8 +145,8 @@ static int cmd_vol(int argc, char **argv)
         return 1;
     }
     if (field) {
-        *field = (uint8_t)v;
-        esp_err_t err = settings_set(&cfg);
+        uint8_t v8 = (uint8_t)v;
+        esp_err_t err = settings_set_field(field, &v8, sizeof(v8));
         if (err != ESP_OK) {
             printf("save failed: %s\n", esp_err_to_name(err));
             return 1;
@@ -155,13 +160,14 @@ static int cmd_vol(int argc, char **argv)
 static int cmd_ring(int argc, char **argv)
 {
     int n = audio_ringtone_count();
-    settings_t cfg;
-    settings_get(&cfg);
     if (argc == 1 || strcmp(argv[1], "list") == 0) {
+        uint8_t tone, vol;
+        SETTINGS_GET(ring_tone, &tone);
+        SETTINGS_GET(ring_volume, &vol);
         for (int i = 0; i < n; i++) {
-            printf("%d %s%s\n", i, audio_ringtone_name(i), i == cfg.ring_tone ? " *" : "");
+            printf("%d %s%s\n", i, audio_ringtone_name(i), i == tone ? " *" : "");
         }
-        printf("ring volume %u\n", cfg.ring_volume);
+        printf("ring volume %u\n", vol);
         return 0;
     }
     if (strcmp(argv[1], "stop") == 0) {
@@ -174,8 +180,8 @@ static int cmd_ring(int argc, char **argv)
         printf("usage: ring [list] | ring <0-%d> | ring stop\n", n - 1);
         return 1;
     }
-    cfg.ring_tone = (uint8_t)v;
-    esp_err_t err = settings_set(&cfg);
+    uint8_t tone = (uint8_t)v;
+    esp_err_t err = SETTINGS_SET(ring_tone, &tone);
     if (err != ESP_OK) {
         printf("save failed: %s\n", esp_err_to_name(err));
         return 1;
@@ -207,39 +213,39 @@ static int cmd_sip(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    static phone_status_t st;           /* console task only */
-    phone_get_status(&st);
-    printf("registration: %s (last code %d)\n", reg_name(st.reg), st.reg_code);
-    printf("server:       %s\n", st.server[0] ? st.server : "(none)");
-    printf("local:        %s\n", st.local_addr[0] ? st.local_addr : "(none)");
-    printf("call:         %s", call_name(st.call));
-    if (st.call != CALL_IDLE) {
-        printf(" %s %s%s%s", st.outgoing ? "to" : "from", st.number, st.name[0] ? " " : "", st.name);
+    phone_status_t *st = s_st;
+    phone_get_status(st);
+    printf("registration: %s (last code %d)\n", reg_name(st->reg), st->reg_code);
+    printf("server:       %s\n", st->server[0] ? st->server : "(none)");
+    printf("local:        %s\n", st->local_addr[0] ? st->local_addr : "(none)");
+    printf("call:         %s", call_name(st->call));
+    if (st->call != CALL_IDLE) {
+        printf(" %s %s%s%s", st->outgoing ? "to" : "from", st->number, st->name[0] ? " " : "", st->name);
     }
-    if (st.call == CALL_ENDED) {
-        printf(" (code %d)", st.end_code);
+    if (st->call == CALL_ENDED) {
+        printf(" (code %d)", st->end_code);
     }
-    if ((st.call == CALL_ACTIVE || st.call == CALL_HELD) && st.call_start_us) {
-        printf(" %" PRId64 " s", (esp_timer_get_time() - st.call_start_us) / 1000000);
+    if ((st->call == CALL_ACTIVE || st->call == CALL_HELD) && st->call_start_us) {
+        printf(" %" PRId64 " s", (esp_timer_get_time() - st->call_start_us) / 1000000);
     }
-    if (st.line) {
-        printf(" [line %u%s]", st.line, st.auto_answered ? ", auto answered" : "");
+    if (st->line) {
+        printf(" [line %u%s]", st->line, st->auto_answered ? ", auto answered" : "");
     }
     printf("\n");
-    if (st.second.call != CALL_IDLE) {
+    if (st->second.call != CALL_IDLE) {
         printf("second call:  %s %s %s%s%s [line %u]\n",
-               st.second.call == CALL_RINGING_IN ? "waiting" : call_name(st.second.call),
-               st.second.outgoing ? "to" : "from", st.second.number, st.second.name[0] ? " " : "",
-               st.second.name, st.second.line);
+               st->second.call == CALL_RINGING_IN ? "waiting" : call_name(st->second.call),
+               st->second.outgoing ? "to" : "from", st->second.number, st->second.name[0] ? " " : "",
+               st->second.name, st->second.line);
     }
-    if (st.xfer.state != XFER_IDLE) {
-        printf("transfer:     %s%s to %s (code %d)\n", st.xfer.attended ? "attended, " : "", xfer_name(st.xfer.state),
-               st.xfer.target, st.xfer.code);
+    if (st->xfer.state != XFER_IDLE) {
+        printf("transfer:     %s%s to %s (code %d)\n", st->xfer.attended ? "attended, " : "",
+               xfer_name(st->xfer.state), st->xfer.target, st->xfer.code);
     }
-    printf("audio:        volume %u, %s, %s\n", st.volume, st.speaker ? "speaker" : "handset",
-           st.muted ? "muted" : "mic on");
-    printf("features:     dnd %s, call waiting %s, auto answer %s\n", st.dnd ? "on" : "off",
-           st.call_waiting ? "on" : "off", st.auto_answer ? "on" : "off");
+    printf("audio:        volume %u, %s, %s\n", st->volume, st->speaker ? "speaker" : "handset",
+           st->muted ? "muted" : "mic on");
+    printf("features:     dnd %s, call waiting %s, auto answer %s\n", st->dnd ? "on" : "off",
+           st->call_waiting ? "on" : "off", st->auto_answer ? "on" : "off");
     return 0;
 }
 
@@ -302,9 +308,9 @@ static int cmd_dnd(int argc, char **argv)
         printf("usage: dnd [on|off]\n");
         return 1;
     }
-    static phone_status_t st;           /* console task only */
-    phone_get_status(&st);
-    printf("do not disturb %s\n", st.dnd ? "on" : "off");
+    phone_status_t *st = s_st;
+    phone_get_status(st);
+    printf("do not disturb %s\n", st->dnd ? "on" : "off");
     return 0;
 }
 
@@ -328,15 +334,15 @@ static int cmd_blf(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    static phone_status_t st;           /* console task only; keeps the stack small */
-    phone_get_status(&st);
-    if (st.blf_count == 0) {
+    phone_status_t *st = s_st;
+    phone_get_status(st);
+    if (st->blf_count == 0) {
         printf("no BLF keys (cfg set blf \"1002:Bob,1003\")\n");
         return 0;
     }
-    for (int i = 0; i < st.blf_count; i++) {
-        printf("blf %d: %-8s %-12s %s\n", i + 1, st.blf[i].ext, st.blf[i].label[0] ? st.blf[i].label : "-",
-               phone_blf_state_name(st.blf[i].state));
+    for (int i = 0; i < st->blf_count; i++) {
+        printf("blf %d: %-8s %-12s %s\n", i + 1, st->blf[i].ext, st->blf[i].label[0] ? st->blf[i].label : "-",
+               phone_blf_state_name(st->blf[i].state));
     }
     return 0;
 }
@@ -345,13 +351,13 @@ static int cmd_mwi(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    static phone_status_t st;           /* console task only */
-    phone_get_status(&st);
-    if (!st.mwi.known) {
+    phone_status_t *st = s_st;
+    phone_get_status(st);
+    if (!st->mwi.known) {
         printf("mwi: unknown\n");
     } else {
-        printf("mwi: %s, %u new, %u old\n", st.mwi.waiting ? "waiting" : "none", (unsigned)st.mwi.new_msgs,
-               (unsigned)st.mwi.old_msgs);
+        printf("mwi: %s, %u new, %u old\n", st->mwi.waiting ? "waiting" : "none", (unsigned)st->mwi.new_msgs,
+               (unsigned)st->mwi.old_msgs);
     }
     return 0;
 }
@@ -438,6 +444,10 @@ esp_err_t phone_console_register(void)
         { .command = "dnd", .help = "Do not disturb: refuse incoming calls with 486 (setting dnd)",
           .hint = "[on|off]", .func = cmd_dnd },
     };
+    if (s_st == NULL) {
+        s_st = heap_caps_malloc_prefer(sizeof(*s_st), 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, MALLOC_CAP_8BIT);
+        ESP_RETURN_ON_FALSE(s_st != NULL, ESP_ERR_NO_MEM, TAG, "no memory");
+    }
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         ESP_RETURN_ON_ERROR(console_register_command(&cmds[i]), TAG, "register %s", cmds[i].command);
     }
