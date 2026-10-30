@@ -246,6 +246,7 @@ void sipua_leave(sip_ua_t *ua)
                         .number = e.number,
                         .display_name = e.display,
                         .answer_after = e.answer_after,
+                        .alert_match = e.alert_match,
                     };
                     cb->call_state(cb->ctx, e.call, &info);
                 }
@@ -380,6 +381,7 @@ static void emit_call(sip_ua_t *ua, call_t *c, sip_ua_call_state_t st, sip_ua_en
     e->code = code;
     e->outgoing = c->outgoing;
     e->answer_after = c->answer_after;
+    e->alert_match = c->alert_match;
     strcpy(e->number, c->number);
     strcpy(e->display, c->display);
 }
@@ -1472,17 +1474,63 @@ static void caller_identity(char number[STR_MAX], char display[STR_MAX], const s
     copy_display(display, STR_MAX, from->display);
 }
 
-/* Refuse a new INVITE with `code` and tell the app (missed call). */
-static void refuse_invite(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const sip_addr_t *from, int code,
-                          const char *why)
+/* Refuse a new INVITE with `code` and tell the app (missed call). extra: more
+ * header lines (Contact of a 302), may be NULL. */
+static void refuse_invite_x(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const sip_addr_t *from, int code,
+                            const char *extra, const char *why)
 {
-    sipua_respond_msg(ua, t, m, from, code, 0, NULL);
+    sipua_respond_msg(ua, t, m, from, code, 0, extra);
     ev_t *e = sipua_ev_push(ua, EV_REJECTED, 0);
     if (e) {
         caller_identity(e->number, e->display, &m->from);
         e->code = code;
         LOGI("%s: rejected incoming INVITE from %s with %d", why, e->number, code);
     }
+}
+
+static void refuse_invite(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const sip_addr_t *from, int code,
+                          const char *why)
+{
+    refuse_invite_x(ua, t, m, from, code, NULL, why);
+}
+
+/* "Contact: <uri>\r\n" for a 302 to `target` (number or sip: URI), written to `out`
+ * (ua->sdp: free while no SDP is being built). -1 if the target is empty, undialable or
+ * does not fit. */
+static int redirect_contact(sip_ua_t *ua, const char *target, char *out, size_t cap)
+{
+    static const char pre[] = "Contact: <";
+    const size_t pl = sizeof(pre) - 1;
+    if (!target || !target[0] || strlen(target) >= SIP_UA_TARGET_MAX || cap < pl + 3 + SIP_URI_MAX ||
+        sipua_build_ruri(ua, target, out + pl, SIP_URI_MAX) != 0 || strchr(out + pl, '>') ||
+        strpbrk(out + pl, "\r\n")) {
+        return -1;
+    }
+    memcpy(out, pre, pl);
+    strcat(out, ">\r\n");
+    return 0;
+}
+
+/* Let the application screen a new INVITE (cb.screen). */
+static void screen_invite(sip_ua_t *ua, const sip_msg_t *m, int answer_after, bool alert_match, bool busy,
+                          sip_screen_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->action = SIP_SCREEN_DEFAULT;
+    if (!ua->cb.screen) {
+        return;
+    }
+    char number[STR_MAX], display[STR_MAX];
+    caller_identity(number, display, &m->from);
+    const sip_screen_info_t in = {
+        .number = number,
+        .display_name = display,
+        .answer_after = answer_after,
+        .alert_match = alert_match,
+        .busy = busy,
+    };
+    ua->cb.screen(ua->cb.ctx, &in, out);
+    out->target[sizeof(out->target) - 1] = '\0';
 }
 
 static void on_invite_new(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const sip_addr_t *from)
@@ -1494,13 +1542,31 @@ static void on_invite_new(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const 
         sipua_respond_msg(ua, t, m, from, 415, 0, "Accept: application/sdp\r\n");
         return;
     }
-    if (ua->dnd) {
+    call_t *other;
+    int n = visible_calls(ua, &other);
+    bool busy = n >= MAX_VISIBLE || (n == 1 && (!ua->call_waiting || other->st != CS_CONFIRMED));
+    int answer_after = sipua_answer_after(m);
+    bool alert_match = sipua_alert_match(m, ua->alert_marker);
+    sip_screen_t scr;
+    screen_invite(ua, m, answer_after, alert_match, busy, &scr);
+    if (scr.action == SIP_SCREEN_REJECT) {
+        refuse_invite(ua, t, m, from, scr.code >= 400 && scr.code <= 699 ? scr.code : 486, "screened");
+        return;
+    }
+    if (scr.action == SIP_SCREEN_REDIRECT) {
+        if (redirect_contact(ua, scr.target, ua->sdp, sizeof(ua->sdp)) != 0) {
+            LOGW("redirect target \"%s\" unusable, refusing with 486", scr.target);
+            refuse_invite(ua, t, m, from, 486, "bad redirect");
+        } else {
+            refuse_invite_x(ua, t, m, from, 302, ua->sdp, "redirected");
+        }
+        return;
+    }
+    if (ua->dnd && scr.action != SIP_SCREEN_RING) {
         refuse_invite(ua, t, m, from, 486, "do not disturb");
         return;
     }
-    call_t *other;
-    int n = visible_calls(ua, &other);
-    if (n >= MAX_VISIBLE || (n == 1 && (!ua->call_waiting || other->st != CS_CONFIRMED))) {
+    if (busy) {
         refuse_invite(ua, t, m, from, 486, "busy");
         return;
     }
@@ -1523,7 +1589,8 @@ static void on_invite_new(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const 
     t->owner = OWN_SERVER_INVITE;
     t->owner_ref = c->handle;
     caller_identity(c->number, c->display, &m->from);
-    c->answer_after = sipua_answer_after(m);
+    c->answer_after = answer_after;
+    c->alert_match = alert_match;
     if (is_sdp(m)) {
         sip_sdp_neg_t neg;
         if (sip_sdp_parse(&c->offer, m->body.p, m->body.len) != 0 ||
@@ -1541,8 +1608,8 @@ static void on_invite_new(sip_ua_t *ua, sip_txn_t *t, const sip_msg_t *m, const 
         return;
     }
     c->last_code = 180;
-    LOGI("incoming call %d from %s \"%s\"%s%s", c->handle, c->number, c->display, n ? " (waiting)" : "",
-         c->answer_after >= 0 ? " (auto answer)" : "");
+    LOGI("incoming call %d from %s \"%s\"%s%s%s", c->handle, c->number, c->display, n ? " (waiting)" : "",
+         c->answer_after >= 0 ? " (auto answer)" : "", c->alert_match ? " (alert marker)" : "");
     ev_t *e = sipua_ev_push(ua, EV_INCOMING, c->handle);
     if (e) {
         strcpy(e->number, c->number);
@@ -2415,6 +2482,28 @@ sip_err_t sip_call_reject(sip_ua_t *ua, sip_call_handle_t call, int code)
     return err;
 }
 
+sip_err_t sip_call_redirect(sip_ua_t *ua, sip_call_handle_t call, const char *target)
+{
+    if (redirect_contact(ua, target, ua->sdp, sizeof(ua->sdp)) != 0) {
+        return SIP_ERR_ARG;
+    }
+    sipua_enter(ua);
+    sip_err_t err = SIP_OK;
+    call_t *c = find_call(ua, call);
+    sip_txn_t *t = c ? sip_txn_find(&ua->txl, c->uas_inv_txn) : NULL;
+    if (!c) {
+        err = SIP_ERR_NOT_FOUND;
+    } else if (c->st != CS_IN_RINGING || !t) {
+        err = SIP_ERR_STATE;
+    } else {
+        LOGI("call %d: redirected to %s", c->handle, target);
+        sipua_respond_tpl(ua, t, &c->tpl, &t->peer, 302, c->dlg.local_tag, 0, ua->sdp, NULL, 0);
+        end_call(ua, c, SIP_END_LOCAL, 302, true);
+    }
+    sipua_leave(ua);
+    return err;
+}
+
 sip_err_t sip_call_hangup(sip_ua_t *ua, sip_call_handle_t call)
 {
     sipua_enter(ua);
@@ -2594,6 +2683,28 @@ void sip_ua_set_dnd(sip_ua_t *ua, bool on)
     ua->dnd = on;
 }
 
+static bool marker_ok(const char *s)
+{
+    for (; *s; s++) {
+        if (!sip_is_token_char(*s)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+sip_err_t sip_ua_set_alert_marker(sip_ua_t *ua, const char *marker)
+{
+    if (!marker) {
+        marker = "";
+    }
+    if (strlen(marker) >= sizeof(ua->alert_marker) || !marker_ok(marker)) {
+        return SIP_ERR_ARG;
+    }
+    strcpy(ua->alert_marker, marker);
+    return SIP_OK;
+}
+
 uint32_t sipua_glare_delay_ms(sip_ua_t *ua, bool own_call_id)
 {
     uint32_t r = ua->rand(ua->rand_ctx);
@@ -2703,6 +2814,37 @@ int sipua_answer_after(const sip_msg_t *m)
         }
     }
     return -1;
+}
+
+bool sipua_alert_match(const sip_msg_t *m, const char *marker)
+{
+    if (!marker || !marker[0]) {
+        return false;
+    }
+    for (int i = 0; i < m->n_alert_info; i++) {
+        sip_str_t rest = m->alert_info[i], item;
+        bool err = false;
+        while (sip_list_next(&rest, &item, &err)) {
+            sip_str_t v;
+            sip_str_t params = info_params(item);
+            if (params.p && sip_param_find(params, "info", &v) && sip_str_ieq_c(sip_str_trim(v), marker)) {
+                return true;
+            }
+            /* a bare token ("Alert-Info: find"): the item up to its parameters, no <URI> */
+            item = sip_str_trim(item);
+            if (item.len && item.p[0] != '<') {
+                const char *semi = memchr(item.p, ';', item.len);
+                sip_str_t word = sip_str_trim((sip_str_t){ item.p, semi ? (size_t)(semi - item.p) : item.len });
+                if (word.len > 5 && sip_str_ieq_c((sip_str_t){ word.p, 5 }, "info=")) {
+                    word = sip_str_trim((sip_str_t){ word.p + 5, word.len - 5 });     /* "info=find" */
+                }
+                if (sip_str_ieq_c(word, marker)) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 sip_ua_call_state_t sip_call_state(const sip_ua_t *ua, sip_call_handle_t call)

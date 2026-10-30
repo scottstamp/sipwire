@@ -34,6 +34,7 @@ typedef struct {
     int reason;
     int code;
     int answer_after;
+    bool alert_match;
     char number[64];
     char display[64];
     sip_media_info_t media;
@@ -52,6 +53,13 @@ typedef struct fx {
     bool hangup_in_callback;
     bool destroy_in_callback;
     bool auto_reg;          /* fx_advance answers new REGISTERs with 200 */
+    /* cb.screen: when screen_on, every new INVITE is answered with `screen` and
+     * what the UA passed is kept in screen_in / screen_number (n_screen calls) */
+    bool screen_on;
+    sip_screen_t screen;
+    sip_screen_info_t screen_in;
+    char screen_number[64];
+    int n_screen;
     int reg_scan;
     sip_addr_t server;
 } fx_t;

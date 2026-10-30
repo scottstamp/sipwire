@@ -125,6 +125,7 @@ typedef struct {
 
     /* auto answer requested by the caller (Call-Info / Alert-Info), -1 none */
     int answer_after;
+    bool alert_match;          /* Alert-Info carried the alert marker */
 
     /* our REFER (transfer) and its implicit subscription */
     uint32_t refer_txn;
@@ -223,6 +224,7 @@ typedef struct {
     int reason;                /* EV_MWI: new messages */
     int code;                  /* EV_MWI: old messages */
     int answer_after;          /* EV_CALL */
+    bool alert_match;          /* EV_CALL */
     bool outgoing;
     char number[STR_MAX];      /* EV_BLF: extension */
     char display[STR_MAX];
@@ -276,6 +278,7 @@ struct sip_ua {
     sip_call_handle_t next_handle;
     bool call_waiting;               /* offer a second incoming call */
     bool dnd;                        /* refuse every incoming call (486) */
+    char alert_marker[SIP_UA_MARKER_MAX];   /* "" = none */
     sub_t subs[SIP_UA_MAX_SUBS];
     sip_sub_handle_t next_sub;
     uint32_t sub_expires;
@@ -342,6 +345,9 @@ int sipua_refer_to_replaces(char *out, size_t cap, const char *uri, const char *
 /* Auto answer delay requested by an INVITE (Call-Info answer-after, Alert-Info
  * auto answer variants): seconds, or -1 for none. */
 int sipua_answer_after(const sip_msg_t *m);
+/* An Alert-Info item of m carries `marker` ("info=<marker>" parameter, or the
+ * item itself outside any <URI>), case-insensitive; false for an empty marker. */
+bool sipua_alert_match(const sip_msg_t *m, const char *marker);
 /* §14.1 retry delay after a 491 (ms): 2100-4000 if we own the Call-ID, else 0-2000. */
 uint32_t sipua_glare_delay_ms(sip_ua_t *ua, bool own_call_id);
 void sipua_enter(sip_ua_t *ua);
