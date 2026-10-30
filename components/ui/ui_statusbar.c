@@ -249,6 +249,14 @@ void ui_statusbar_update(const ui_model_t *m)
         if (x + tw > dnd_x - 6) {
             x = dnd_x - 6 - tw;
         }
+        /* A wide right side (battery % + charging + bell) pushes a 12 h clock into the SIP
+         * caption / envelope: they make way, as for the DND badge (the dot stays). */
+        bool squeezed = !m->dnd && left + tw > dnd_x - 4;
+        if (squeezed) {
+            left = 66;
+        }
+        lv_obj_set_hidden(sb->mwi, !m->mwi_waiting || m->dnd || squeezed);
+        lv_obj_set_hidden(sb->reg_lbl, m->mwi_waiting || m->dnd || squeezed);
         if (x < left) {
             x = left;
             if (x + tw > dnd_x - 4) { /* still too tight: drop the badge's padding gap, never overlap */
