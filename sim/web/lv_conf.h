@@ -40,4 +40,33 @@
 #define LV_SDL_FULLSCREEN 0
 #define LV_SDL_DIRECT_EXIT 0
 
+
+/* Same unused modules off as sdkconfig.defaults (the firmware); keep the two in sync. */
+#define LV_USE_ANIMIMG 0
+#define LV_USE_ARC 0
+#define LV_USE_ARCLABEL 0
+#define LV_USE_CALENDAR 0
+#define LV_USE_CANVAS 0
+#define LV_USE_CHART 0
+#define LV_USE_CHECKBOX 0
+#define LV_USE_IMAGEBUTTON 0
+#define LV_USE_LED 0
+#define LV_USE_LINE 0
+#define LV_USE_LIST 0
+#define LV_USE_MENU 0
+#define LV_USE_MSGBOX 0
+#define LV_USE_ROLLER 0
+#define LV_USE_SCALE 0
+#define LV_USE_SPAN 0
+#define LV_USE_SPINBOX 0
+#define LV_USE_SPINNER 0
+#define LV_USE_TABLE 0
+#define LV_USE_TABVIEW 0
+#define LV_USE_TILEVIEW 0
+#define LV_USE_WIN 0
+#define LV_USE_GRID 0
+#define LV_USE_OBSERVER 0
+#define LV_USE_THEME_MONO 0
+#define LV_USE_THEME_SIMPLE 0
+
 #endif /* LV_CONF_H */
