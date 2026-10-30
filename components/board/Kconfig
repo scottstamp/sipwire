@@ -99,6 +99,16 @@ menu "Sipwire board"
             int "Touch SPI clock (Hz)"
             depends on SIPWIRE_TOUCH_ENABLE
             default 2000000
+        config SIPWIRE_TOUCH_RELEASE_DEBOUNCE_MS
+            int "Touch release debounce (ms)"
+            depends on SIPWIRE_TOUCH_ENABLE
+            range 0 300
+            default 80
+            help
+                A finger counts as lifted only after the panel reported no touch for this long.
+                A resistive panel drops out for a read or two (~33 ms each) when a dragging finger
+                eases off; without this, that early release turns a scroll into a tap on the item
+                it started on. Taps are reported this much later. 0 = off.
     endmenu
 
     menu "Speaker (I2S DAC + amp)"

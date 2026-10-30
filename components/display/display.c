@@ -44,6 +44,11 @@ static const char *TAG = "display";
 #define SWALLOW_GAP_US      (250 * 1000)      /* touch "release" = no sample for this long */
 #define XPT2046_ADC_MAX     4096
 #define TOUCH_REARM_US      (30 * 1000)       /* finger still down but not reported: next look */
+#ifdef CONFIG_SIPWIRE_TOUCH_RELEASE_DEBOUNCE_MS
+#define TOUCH_RELEASE_DEBOUNCE_US (CONFIG_SIPWIRE_TOUCH_RELEASE_DEBOUNCE_MS * 1000)
+#else
+#define TOUCH_RELEASE_DEBOUNCE_US 0
+#endif
 /* LVGL task: longest sleep with no LVGL timer due. Anything that needs it sooner wakes it
  * (touch interrupt, lv_timer resume / display invalidation via the resume callback). */
 #define LVGL_MAX_SLEEP_MS   2000
@@ -110,6 +115,11 @@ static struct {
     gpio_num_t touch_irq;
     esp_timer_handle_t touch_rearm;
     bool touch_raw;                 /* last read saw the panel touched (before swallow / hook) */
+    /* release debounce, LVGL task only: LVGL was told "pressed" at (touch_x, touch_y); a read
+     * without a touch since touch_gap_us (0 = none) */
+    bool touch_down;
+    int32_t touch_x, touch_y;
+    int64_t touch_gap_us;
 
     /* raw touch hook (calibration); all of this is touched only with the LVGL lock held */
     esp_lcd_touch_handle_t tp;
@@ -612,6 +622,28 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         esp_lcd_touch_get_data(s.tp, pt, &cnt, 1) != ESP_OK) {
         cnt = 0;
     }
+    display_touch_raw_cb_t cb = s.raw_cb;
+
+    /* A resistive panel loses contact for a read or two when a dragging finger eases off. A
+     * release then, before LVGL's scroll limit, is a click on what the drag started on: report
+     * the press at its last point until no touch has been seen for TOUCH_RELEASE_DEBOUNCE_US. */
+    if (cnt > 0 || cb != NULL) {
+        s.touch_gap_us = 0;
+    } else if (s.touch_down && TOUCH_RELEASE_DEBOUNCE_US > 0) {
+        int64_t now = esp_timer_get_time();
+        if (s.touch_gap_us == 0) {
+            s.touch_gap_us = now;
+        }
+        if (now - s.touch_gap_us < TOUCH_RELEASE_DEBOUNCE_US) {
+            data->point.x = s.touch_x;      /* still pressed: LVGL's read timer keeps running */
+            data->point.y = s.touch_y;
+            data->state = LV_INDEV_STATE_PRESSED;
+            return;
+        }
+        s.touch_gap_us = 0;
+    }
+    s.touch_down = false;
+
     if (cnt == 0) {
         /* LVGL sees no press, so its read timer stops: the interrupt takes over again. While
          * the finger is still down (swallowed wake-up touch, calibration hook) look again in
@@ -619,7 +651,6 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         touch_irq_arm(s.touch_raw ? TOUCH_REARM_US : 0);
     }
 
-    display_touch_raw_cb_t cb = s.raw_cb;
     if (cb) {
         void *ctx = s.raw_ctx;
         data->state = LV_INDEV_STATE_RELEASED;
@@ -636,6 +667,9 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         data->point.x = pt[0].x;
         data->point.y = pt[0].y;
         data->state = LV_INDEV_STATE_PRESSED;
+        s.touch_down = true;
+        s.touch_x = pt[0].x;
+        s.touch_y = pt[0].y;
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
     }

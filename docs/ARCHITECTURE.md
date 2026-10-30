@@ -398,7 +398,10 @@ full speed, no light sleep). Both drop when the phone is idle again.
   - *touch*: the PENIRQ falling-edge interrupt of esp_lcd_touch is swapped for a level-low
     one (`display.c` `touch_isr`, masked until a read finds the panel released; while a
     finger is down but not reported, swallowed wake-up touch or calibration, it re-arms after
-    30 ms). It wakes the LVGL task only on a touch.
+    30 ms). It wakes the LVGL task only on a touch. A release is reported only after
+    `CONFIG_SIPWIRE_TOUCH_RELEASE_DEBOUNCE_MS` (80) without a touch, at the last point: the
+    resistive panel drops out for a read while a finger drags lightly, and that early release
+    used to turn a scroll into a tap on the item it started on.
   - *backlight*: the 500 ms dim/off check (`bl_tick`) runs only while the backlight is on or
     dimmed. *rtp_rx* waits for its socket without a 500 ms timeout.
   - *ui_bridge*: the 1 s refresh (clock, call timer, phone status snapshot) runs only while
