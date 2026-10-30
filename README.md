@@ -37,6 +37,13 @@ idf.py set-target esp32s3   # or your chip
 idf.py build flash monitor
 ```
 
+Flash is Quad I/O (`CONFIG_ESPTOOLPY_FLASHMODE_QIO`, 80 MHz). The bootloader sets that
+mode, so flash every unit over serial once with the full `idf.py -p PORT flash`
+(bootloader + partition table + otadata + app; settings and contacts are kept). OTA does
+not update the bootloader and refuses a QIO image on a unit still running a DIO build
+(`SPI flash mode mismatch`). An older local `sdkconfig` keeps DIO: delete its `FLASHMODE`
+lines and run `idf.py reconfigure`. Details: `docs/ARCHITECTURE.md` "Flash mode".
+
 ## Next steps
 
 - Verify display orientation, colour order and touch axes on the real board

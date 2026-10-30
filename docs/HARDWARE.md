@@ -127,7 +127,10 @@ defaults.
 | `STATUS_LED` | 48 | `LCD_MIRROR_X` | y |
 | `TOUCH_MIRROR_Y` | y (touch axes differ from the panel's) | | |
 
-`sdkconfig.defaults` also sets 16 MB flash and octal PSRAM
+`sdkconfig.defaults` also sets 16 MB flash in Quad I/O mode at 80 MHz
+(`CONFIG_ESPTOOLPY_FLASHMODE_QIO`: the N16R8's flash is quad, its WP/HD lines are wired to
+the module's SPIWP/SPIHD; the bootloader enables QIO, so flash each unit over serial once,
+see `docs/ARCHITECTURE.md` "Flash mode") and octal PSRAM
 (`CONFIG_SPIRAM_MODE_OCT`, malloc may use it; boot continues if absent).
 
 Status LED patterns (`components/status_led`): white = booting, red blink =

@@ -513,6 +513,48 @@ CONFIG_SIPWIRE_OTA_URL), `blf` (BLF keys, default none), `vm_number` (default `*
 `call_waiting` (default true), `dnd` (default false), `auto_answer` (default true).
 Set via UI settings, serial console (`sipwire>` REPL), or `config.json` on SD.
 
+## Flash mode (QIO, 80 MHz)
+`sdkconfig.defaults`: `CONFIG_ESPTOOLPY_FLASHMODE_QIO`, `CONFIG_ESPTOOLPY_FLASHFREQ_80M` (was
+DIO). Every flash cache miss (code not in IRAM, rodata, fonts) moves address and data over
+four lines instead of two, so a miss costs roughly half the time; nothing else changes (no
+HPM, no timing tuning at 80 MHz; the PSRAM is octal on its own pins).
+
+Who sets the mode:
+- The image header (offset 0x2, what esptool writes and the ROM reads) stays `dio` for a QIO
+  build (`CONFIG_ESPTOOLPY_FLASHMODE` = "dio"): the ROM loads the 2nd-stage bootloader in DIO.
+- The **bootloader** (built with QIO) reads the flash ID, sets the QE bit in the flash status
+  register (non-volatile; known chips by table, else the generic SR2 bit 1) and switches the
+  cache's SPI0 read mode to QIO before it loads the app. Boot log: `Enabling QIO for flash chip
+  ...` (or `Enabling default flash chip QIO`) and `SPI Mode : QIO`. If the QE bit does not
+  stick it logs `Failed to set QIE bit, not enabling QIO mode` and stays DIO.
+- The **app** never reprograms SPI0: code fetch runs in whatever mode the bootloader left.
+  Its own `esp_flash` driver (SPI1: NVS, FAT `storage`, OTA writes, partition reads) uses the
+  app's configured mode (log `spi_flash: flash io: qio`) and sets QE itself if needed.
+
+So the bootloader decides, and a unit has to be flashed over serial once (bootloader +
+partition table + otadata + app, `idf.py -p PORT flash`; NVS and `storage` are not touched,
+settings and contacts stay). Mixed cases:
+- DIO bootloader + QIO app (only `app-flash`, or an old unit): boots and works, the app sets
+  QE and its SPI1 accesses use QIO, but code still runs from a DIO cache (no gain) while the
+  app log says `flash io: qio`. Check the bootloader's `SPI Mode` line, not the app's.
+- OTA: `esp_https_ota` checks the app descriptor's `spi_flash_mode` against the running app
+  (`CONFIG_ESP_HTTPS_OTA_VERIFY_SPI_MODE`, default y; QIO = 1, DIO = 3). A DIO unit refuses
+  a QIO image at the first block (`SPI flash mode mismatch: running app has mode 3, new app
+  has mode 1`, `ESP_ERR_OTA_SPI_MODE_MISMATCH`, OTA FAILED before any image data is written,
+  boot slot unchanged) and a QIO unit
+  refuses a DIO image. OTA cannot migrate a unit, and cannot put a QIO app behind a DIO
+  bootloader; between QIO builds it works as before.
+
+QEMU (`tools/qemu/sdkconfig.qemu`) stays DIO: with QIO its flash controller model does not
+keep the quad read mode (bootloader `SPI Mode : SLOW READ`) and the FAT `storage` partition
+fails to mount even after formatting (smoke shards 30 and 40 fail). The QEMU smoke test
+therefore does not cover QIO; the handset does.
+
+An existing `sdkconfig` keeps its old choice over the new default. Delete every line
+containing `FLASHMODE` (`CONFIG_ESPTOOLPY_FLASHMODE_QIO/QOUT/DIO/DOUT`,
+`CONFIG_ESPTOOLPY_FLASHMODE`, `CONFIG_ESPTOOLPY_FLASHMODE_VAL` and the deprecated
+`CONFIG_FLASHMODE_QIO/QOUT/DIO/DOUT`), then `idf.py reconfigure`.
+
 ## OTA update (`components/ota`)
 `ota_start(url)` (console `ota [url]`, Settings > Update) downloads with
 `esp_https_ota` into the inactive slot (`partitions.csv`: ota_0 / ota_1, 3 MB
@@ -520,7 +562,9 @@ each) in its own task. Plain http is allowed (`CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP`,
 LAN update server; https uses the mbedtls cert bundle). Refused while a call is
 not idle or another update runs. After the first block and before anything
 else is written: the image header must be for esp32s3 (esp_https_ota rejects
-other chips) and the app descriptor's `project_name` must be `sipwire`. Events
+other chips, and an image whose flash mode differs from the running app's: see Flash mode)
+and the app descriptor's `project_name` must be `sipwire`. OTA never updates the
+bootloader. Events
 on `SIPWIRE_OTA_EVENT`: STARTED, PROGRESS {percent, bytes}, DONE, FAILED
 {esp_err, reason}; DONE reboots after 3 s.
 

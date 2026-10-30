@@ -75,6 +75,11 @@ CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 
 # Partitions: wifi + LVGL no longer fit the 1 MB default app slot
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+# Quad I/O flash at 80 MHz (the module's quad flash; was DIO). The 2nd-stage bootloader sets
+# the QE bit and switches the cache to QIO, so a unit needs the bootloader flashed over serial
+# once; OTA alone keeps the old DIO bootloader and esp_https_ota refuses a QIO image on a DIO
+# app (ESP_HTTPS_OTA_VERIFY_SPI_MODE). docs/ARCHITECTURE.md "Flash mode".
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
