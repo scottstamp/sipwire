@@ -13,5 +13,6 @@ esp_err_t console_register_command(const esp_console_cmd_t *cmd);
 void console_set_input_hook(void (*hook)(void));
 
 /** Start the `sipwire> ` REPL on the configured console (UART / USB-serial-JTAG / CDC)
- *  and register the built-in commands: cfg, wifi, ip, free, tasks, reboot, help. */
+ *  and register the built-in commands: cfg, wifi, ip, free, tasks, coredump, reboot, help.
+ *  Logs a warning when the last panic left a core dump in flash (`coredump` shows it). */
 esp_err_t console_start(void);

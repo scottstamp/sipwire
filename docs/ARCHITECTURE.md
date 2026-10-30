@@ -16,7 +16,7 @@ components/
                      REGISTER / INVITE / ACK / BYE / CANCEL / OPTIONS, SDP,
                      SUBSCRIBE/NOTIFY for BLF (dialog) and MWI (message-summary)
   power/             DFS policy (esp_pm, CPU_FREQ_MAX holds: call, display), console `power`
-  cli/               serial REPL (esp_console): cfg/wifi/ip/free/tasks; console_register_command()
+  cli/               serial REPL (esp_console): cfg/wifi/ip/free/tasks/coredump; console_register_command()
   net/               wifi manager, reconnect, SNTP, mDNS (optional)
   storage/           NVS config (settings)
   directory/         contacts (200), speed dial (keys 2-9), call history (100) on the `storage`
@@ -585,6 +585,62 @@ An existing `sdkconfig` keeps its old choice over the new default. Delete every 
 containing `FLASHMODE` (`CONFIG_ESPTOOLPY_FLASHMODE_QIO/QOUT/DIO/DOUT`,
 `CONFIG_ESPTOOLPY_FLASHMODE`, `CONFIG_ESPTOOLPY_FLASHMODE_VAL` and the deprecated
 `CONFIG_FLASHMODE_QIO/QOUT/DIO/DOUT`), then `idf.py reconfigure`.
+
+## Core dumps (`coredump` partition, console `coredump`)
+A panic (CPU exception, abort, assert, interrupt watchdog) writes an ELF core dump to flash before
+the usual reboot (`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH`; panic behaviour stays
+`ESP_SYSTEM_PANIC_PRINT_REBOOT`), so a crash can be read later without USB attached at the time.
+IDF 6 always writes ELF with a SHA256 checksum. Contents: per task the TCB, the used part of
+its stack (current SP to the top, not the whole stack) and its registers, plus the crashed
+task's exception registers. No `.bss`/`.data`/heap (`ESP_COREDUMP_CAPTURE_DRAM` would need
+>128 KB). All task stacks are internal RAM (see Memory and tasks); a PSRAM stack would be
+saved too.
+
+Partition: `coredump`, 0xE000 (56 KB) at 0x12000, the gap between `phy_init` and `ota_0`
+(app slots are 64 KB aligned). Nothing else moved, so NVS, otadata, both app slots and the FAT
+`storage` (contacts, history: wear levelling keeps its state at the partition end, so
+shrinking it would mean a reformat) keep their data. Size: QEMU, 15-16 tasks after calls:
+23.7-24.9 KB (~1.6 KB per task: 112 B TCB, ~0.8 KB registers note and headers, 0.6-1.3 KB of
+used stack while blocked). The device adds wifi, audio_tx, audio_rx, keypad (heapwatch, ota
+when running): ~20 tasks, ~32 KB typical, ~40 KB with a deep crashed stack. Even every task at
+its high-water mark at once (~38 KB of stacks + ~16 KB overhead) would just fit. A dump that
+does not fit is not written at all (IDF checks the size first), so watch this when adding
+tasks or growing stacks: `coredump` prints the size of each dump.
+
+Cost: ~4 KB internal RAM static (1.8 KB dedicated core dump stack, forced because
+`FREERTOS_TASK_CREATE_ALLOW_EXT_MEM` is on; +1.1 KB interrupt stack; register buffers),
+~6.5 KB flash code. `ESP_COREDUMP_LOGS` is off (another ~5 KB of DRAM strings): the panic
+output does not mention the dump; the boot warning and `coredump` report it.
+
+Reading it (`components/cli/console_coredump.c`):
+- Boot: `W console: core dump in flash: crash in task 'sip' at pc 0x42...` when one is stored.
+- `coredump`: size, checksum, task, PC, exception cause and address, backtrace, and an
+  `xtensa-esp32s3-elf-addr2line -pfiaC -e build/sipwire.elf <addrs>` line. Decode with the ELF
+  of the build that crashed (keep `build/sipwire.elf` of every released firmware; the
+  `elf sha256` line matches the boot log's `ELF file SHA256`).
+- `coredump dump`: the stored image in base64 between `CORE DUMP START/END` markers (log output
+  is muted meanwhile: esp-coredump decodes line by line). Save the lines in between as
+  `core.b64`, then `idf.py coredump-info -c core.b64` (all tasks, registers, stacks;
+  `idf.py coredump-debug -c core.b64` opens gdb). With USB attached, `idf.py -p PORT
+  coredump-info` reads the partition directly.
+- `coredump erase` clears it (otherwise the next panic overwrites it).
+- `coredump crash` panics on purpose (store to address 4, `StoreProhibited`) to test the path.
+
+Old partition table: the table is written only by a serial flash (OTA never touches it), so a
+unit updated by OTA keeps the table without `coredump`. The app then runs normally:
+`esp_core_dump_init` finds no partition, a panic skips the dump and reboots, and the console
+logs `no coredump partition (old partition table): crashes are not saved` at boot (verified
+in QEMU with the old table). One serial `idf.py -p PORT flash` adds it (same as the QIO
+change: one flash covers both); 0x12000-0x1FFFF was unused before, so the new partition
+normally starts blank (anything else shows as unreadable until `coredump erase`).
+
+QEMU: `smoke.d/60-transfer.txt` ends with `coredump` (none), `coredump crash`, the reboot
+warning, the decoded summary and `coredump erase`.
+
+An existing `sdkconfig` keeps `CONFIG_ESP_COREDUMP_ENABLE_TO_NONE=y` over the new default:
+delete every line containing `COREDUMP` (`CONFIG_ESP_COREDUMP_*` and the deprecated
+`CONFIG_ESP32_ENABLE_COREDUMP*`), then `idf.py reconfigure`. The build then shows
+`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y` and the console has `coredump`.
 
 ## OTA update (`components/ota`)
 `ota_start(url)` (console `ota [url]`, Settings > Update) downloads with

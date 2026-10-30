@@ -44,6 +44,17 @@ not update the bootloader and refuses a QIO image on a unit still running a DIO 
 (`SPI flash mode mismatch`). An older local `sdkconfig` keeps DIO: delete its `FLASHMODE`
 lines and run `idf.py reconfigure`. Details: `docs/ARCHITECTURE.md` "Flash mode".
 
+The partition table has a `coredump` partition (56 KB at 0x12000, the former gap before
+`ota_0`; no other partition moved). OTA does not write the partition table either, so the
+same one-time serial `idf.py -p PORT flash` adds it (one flash covers both changes; settings,
+contacts and history are kept). Until then the app runs normally and logs
+`no coredump partition`. After a crash, on the console: `coredump` shows the crashed task,
+PC, exception and backtrace with the `xtensa-esp32s3-elf-addr2line -e build/sipwire.elf ...`
+line to decode it (keep the `.elf` of every build you deploy); `coredump dump` prints the
+whole dump in base64 for `idf.py coredump-info -c core.b64`; `coredump erase` clears it.
+An older local `sdkconfig` keeps core dumps off: delete its `COREDUMP` lines and run
+`idf.py reconfigure`. Details: `docs/ARCHITECTURE.md` "Core dumps".
+
 ## Next steps
 
 - Verify display orientation, colour order and touch axes on the real board

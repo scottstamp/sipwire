@@ -42,3 +42,24 @@ expect call: idle 10
 # stack high-water marks after the scenario, for the log (docs/ARCHITECTURE.md "Memory and tasks")
 do free
 do tasks
+
+# core dump to flash (docs/ARCHITECTURE.md "Core dumps"): the partition is blank; a deliberate
+# panic saves a dump and reboots; the boot warns, `coredump` decodes it, `erase` clears it.
+# Last in the shard: the reboot ends the scenario state.
+do coredump
+expect ^no core dump \(partition 'coredump' @ 0x12000
+# `feed`: the panic prints no prompt for this line, the boot prompt after the reboot counts
+feed coredump crash
+expect Guru Meditation Error: Core\s+\d panic'ed \(StoreProhibited\) 10
+expect ESP-ROM:esp32s3 30
+expect console: core dump in flash: crash in task 'console_repl' at pc 0x4 40
+do coredump
+expect ^core dump: \d+ of 57344 bytes in partition 'coredump' @ 0x12000, checksum ok
+expect ^task:\s+console_repl
+expect ^exception: 29 \(StoreProhibited\), vaddr 0x00000004
+expect ^backtrace:( 0x[0-9a-f]{8}){3}
+expect ^decode:\s+xtensa-esp32s3-elf-addr2line
+do coredump erase
+expect ^core dump erased
+do coredump
+expect ^no core dump
