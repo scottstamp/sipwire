@@ -161,7 +161,11 @@ static void ota_task(void *arg)
     if (strncmp(url, "https://", 8) == 0) {
         http.crt_bundle_attach = esp_crt_bundle_attach;
     }
-    esp_https_ota_config_t cfg = { .http_config = &http };
+    /* Erase the image-sized region once, before the download, instead of one 4 KB sector
+     * ahead of each write: every erase parks the other core (~45 ms), and at Wi-Fi speed
+     * that kept CPU 0 parked nearly all the time (task_wdt: IDLE0 starved). The bulk erase
+     * yields between blocks (CONFIG_SPI_FLASH_YIELD_DURING_ERASE). */
+    esp_https_ota_config_t cfg = { .http_config = &http, .bulk_flash_erase = true };
 
     err = esp_https_ota_begin(&cfg, &h);
     if (err != ESP_OK) {
@@ -183,7 +187,7 @@ static void ota_task(void *arg)
     }
     ESP_LOGI(TAG, "version %s -> %s", esp_app_get_description()->version, nd.version);
 
-    set_status(OTA_STATE_RUNNING, 0, 0, "Downloading 0%");
+    set_status(OTA_STATE_RUNNING, 0, 0, "Erasing...");   /* first perform() erases */
     int last_pct = -1, last_log = -1;
     int size = esp_https_ota_get_image_size(h);
     while ((err = esp_https_ota_perform(h)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
