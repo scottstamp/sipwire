@@ -33,7 +33,13 @@ menu "Sipwire board"
             default y
         config SIPWIRE_LCD_PCLK_HZ
             int "LCD SPI clock (Hz)"
-            default 40000000
+            default 20000000
+            help
+                SPI clock for the ILI9341. The clock is 80 MHz divided by an
+                integer, so use 40000000, 26666666, 20000000, 16000000 or
+                13333333. 20 MHz (full-screen redraw ~61 ms) is the default
+                because 40 MHz gave horizontal-line glitches over the
+                hand-wired leads on the handset; raise it with short wires.
         config SIPWIRE_LCD_H_RES
             int "Native horizontal resolution"
             default 240

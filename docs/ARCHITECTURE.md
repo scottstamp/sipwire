@@ -216,7 +216,8 @@ internal heap) is the scarce resource; PSRAM (8 MB octal) is plentiful but has r
   larger buffers only tasks use.
 
 **DMA**: LCD draw buffers 2 x 1/20 screen (240 x 16 px x 2 B = 7.5 KB each, 15 KB internal DMA,
-double buffered so LVGL renders while SPI at 40 MHz flushes; was 2 x 1/10 = 30 KB: 15 KB of
+double buffered so LVGL renders while SPI at 20 MHz (`SIPWIRE_LCD_PCLK_HZ`; 40 MHz glitched over
+the handset's hand-wired leads) flushes; was 2 x 1/10 = 30 KB: 15 KB of
 internal heap back, a full-screen redraw now takes 20 flushes instead of 10);
 `max_transfer_sz` = 240 x 40 x 2 = 19.2 KB still covers one buffer in a single transaction. I2S: 4 descriptors x 160 frames (10 ms)
 per direction (TX 4 x 320 B, RX 4 x 640 B for 32-bit mic slots); the 40 ms TX ring is the AEC
