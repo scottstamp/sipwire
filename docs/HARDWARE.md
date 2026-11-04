@@ -30,9 +30,9 @@ build; [Firmware configuration](#firmware-configuration) lists them.
 | 0 | BOOT button | DevKit | strapping pin, no external load |
 | 1 | Keypad row 2 (4 5 6) | keypad ribbon pin 7 | |
 | 2 | Keypad row 3 (7 8 9) | keypad ribbon pin 6 | |
-| 5 | I2S data in | MS3625 SD | |
-| 6 | I2S data out | MAX98357A DIN | |
-| 7 | I2S word select (LRCLK) | MAX98357A LRC + MS3625 WS | shared |
+| 5 | I2S data in (mic) | MS3625 SD | |
+| 6 | I2S data out (amp) | MAX98357A DIN | |
+| 7 | I2S word select (LRCLK) | MAX98357A LRC + MS3625 WS | shared by amp and mic |
 | 8 | Backlight (PWM) | TFT LED | LEDC |
 | 9 | Display reset | TFT RESET | |
 | 10 | Display chip select | TFT CS | active low |
@@ -40,7 +40,7 @@ build; [Firmware configuration](#firmware-configuration) lists them.
 | 12 | SPI clock | TFT SCK + touch T_CLK | shared |
 | 13 | SPI MISO | TFT SDO + touch T_DO | shared |
 | 14 | Display data/command | TFT DC | |
-| 15 | I2S bit clock | MAX98357A BCLK + MS3625 SCK | shared |
+| 15 | I2S bit clock | MAX98357A BCLK + MS3625 SCK | shared by amp and mic |
 | 16 | Touch chip select | XPT2046 T_CS | active low |
 | 17 | Touch interrupt | XPT2046 T_IRQ | active low while touched |
 | 18 | Amp shutdown / enable | MAX98357A SD_MODE | high = on (left channel), low = shutdown |
@@ -64,6 +64,71 @@ Reserved / unused:
 The keypad ribbon pins 1–7 land in order on DevKit left-header pins 13–19
 (GPIO 38, 39, 40, 41, 42, 2, 1), so the ribbon solders straight across with
 no crossed wires. The ribbon order interleaves rows and columns.
+
+## Wiring by module
+
+Every pin of every module, including power and the pins tied off on the board.
+
+**Display module (ILI9341 + XPT2046)**
+
+| Module pin | Connects to | Notes |
+|---|---|---|
+| VCC | 5V | on-board 3.3V regulator |
+| GND | GND | |
+| CS | GPIO 10 | display chip select |
+| RESET | GPIO 9 | |
+| DC | GPIO 14 | |
+| SDI (MOSI) | GPIO 11 | bridged to T_DIN |
+| SCK | GPIO 12 | bridged to T_CLK |
+| LED | GPIO 8 | backlight PWM |
+| SDO (MISO) | GPIO 13 | bridged to T_DO |
+| T_CLK | GPIO 12 | via the SCK bridge |
+| T_CS | GPIO 16 | touch chip select |
+| T_DIN | GPIO 11 | via the SDI bridge |
+| T_DO | GPIO 13 | via the SDO bridge |
+| T_IRQ | GPIO 17 | |
+
+**MAX98357A amp**
+
+| Module pin | Connects to | Notes |
+|---|---|---|
+| Vin | 5V | |
+| GND | GND | |
+| SD (SD_MODE) | GPIO 18 | high = on (left channel), low = shutdown; 3V3 tie removed |
+| GAIN | GND | +12 dB |
+| DIN | GPIO 6 | I2S data out |
+| BCLK | GPIO 15 | shared with the mic SCK |
+| LRC | GPIO 7 | shared with the mic WS |
+| SPK+ / SPK− | speaker | 8 Ω (4 Ω also works) |
+
+**MS3625 microphone**
+
+| Module pin | Connects to | Notes |
+|---|---|---|
+| VDD | 3.3V | never 5V |
+| GND | GND | |
+| SD | GPIO 5 | I2S data in (`MIC_DIN`) |
+| SCK | GPIO 15 | shared with the amp BCLK (`SPK_BCLK`) |
+| WS | GPIO 7 | shared with the amp LRC (`SPK_WS`) |
+| L/R | GND | left slot (`MIC_SLOT_RIGHT=n`) |
+
+With `I2S_FULL_DUPLEX=n` the mic gets its own clocks: SCK on GPIO 47 (`MIC_BCLK`) and
+WS on GPIO 21 (`MIC_WS`); see [Audio](#audio).
+
+**Keypad ribbon (3x4 matrix)**
+
+| Ribbon pin | Line | GPIO |
+|---|---|---|
+| 1 | column 1 (1 4 7 *) | 38 |
+| 2 | row 1 (1 2 3) | 39 |
+| 3 | column 2 (2 5 8 0) | 40 |
+| 4 | row 4 (* 0 #) | 41 |
+| 5 | column 3 (3 6 9 #) | 42 |
+| 6 | row 3 (7 8 9) | 2 |
+| 7 | row 2 (4 5 6) | 1 |
+
+**On the DevKit:** WS2812 status LED on GPIO 48, BOOT button on GPIO 0, USB-UART
+console on GPIO 43/44, native USB on GPIO 19/20.
 
 ## Display and touch
 
@@ -125,7 +190,8 @@ defaults.
 | `TOUCH_CS` | 16 | `KP_MAP` | `123456789*0#` |
 | `TOUCH_IRQ` | 17 | `SD_ENABLE` | n |
 | `STATUS_LED` | 48 | `LCD_MIRROR_X` | y |
-| `TOUCH_MIRROR_Y` | y (touch axes differ from the panel's) | | |
+| `TOUCH_MIRROR_Y` | y (touch axes differ from the panel's) | `MIC_SHIFT` | 14 |
+| `LCD_BGR` | y | | |
 
 `sdkconfig.defaults` also sets 16 MB flash in Quad I/O mode at 80 MHz
 (`CONFIG_ESPTOOLPY_FLASHMODE_QIO`: the N16R8's flash is quad, its WP/HD lines are wired to
