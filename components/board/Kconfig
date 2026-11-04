@@ -210,13 +210,13 @@ menu "Sipwire board"
             int "Row 3 (* 0 #)"
             default 41
         config SIPWIRE_KP_COL0
-            int "Col 0"
-            default 38
-        config SIPWIRE_KP_COL1
-            int "Col 1"
+            int "Col 0 (1 4 7 *)"
             default 40
+        config SIPWIRE_KP_COL1
+            int "Col 1 (2 5 8 0)"
+            default 38
         config SIPWIRE_KP_COL2
-            int "Col 2"
+            int "Col 2 (3 6 9 #)"
             default 42
         config SIPWIRE_KP_MAP
             string "Key map, row-major (12 chars)"

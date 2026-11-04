@@ -44,9 +44,9 @@ build; [Firmware configuration](#firmware-configuration) lists them.
 | 16 | Touch chip select | XPT2046 T_CS | active low |
 | 17 | Touch interrupt | XPT2046 T_IRQ | active low while touched |
 | 18 | Amp shutdown / enable | MAX98357A SD_MODE | high = on (left channel), low = shutdown |
-| 38 | Keypad column 1 (1 4 7 *) | keypad ribbon pin 1 | free on this board (probed; LED is on 48) |
+| 38 | Keypad column 2 (2 5 8 0) | keypad ribbon pin 1 | free on this board (probed; LED is on 48) |
 | 39 | Keypad row 1 (1 2 3) | keypad ribbon pin 2 | |
-| 40 | Keypad column 2 (2 5 8 0) | keypad ribbon pin 3 | |
+| 40 | Keypad column 1 (1 4 7 *) | keypad ribbon pin 3 | |
 | 41 | Keypad row 4 (* 0 #) | keypad ribbon pin 4 | |
 | 42 | Keypad column 3 (3 6 9 #) | keypad ribbon pin 5 | |
 | 43 | UART0 TX | console (USB-UART bridge) | |
@@ -63,7 +63,9 @@ Reserved / unused:
 
 The keypad ribbon pins 1–7 land in order on DevKit left-header pins 13–19
 (GPIO 38, 39, 40, 41, 42, 2, 1), so the ribbon solders straight across with
-no crossed wires. The ribbon order interleaves rows and columns.
+no crossed wires. The ribbon order interleaves rows and columns, and on this
+keypad PCB ribbon pin 1 is column 2 and pin 3 is column 1 (the firmware
+swaps them in `KP_COL0`/`KP_COL1`).
 
 ## Wiring by module
 
@@ -119,9 +121,9 @@ WS on GPIO 21 (`MIC_WS`); see [Audio](#audio).
 
 | Ribbon pin | Line | GPIO |
 |---|---|---|
-| 1 | column 1 (1 4 7 *) | 38 |
+| 1 | column 2 (2 5 8 0) | 38 |
 | 2 | row 1 (1 2 3) | 39 |
-| 3 | column 2 (2 5 8 0) | 40 |
+| 3 | column 1 (1 4 7 *) | 40 |
 | 4 | row 4 (* 0 #) | 41 |
 | 5 | column 3 (3 6 9 #) | 42 |
 | 6 | row 3 (7 8 9) | 2 |
@@ -186,7 +188,7 @@ defaults.
 | `LCD_DC` | 14 | `MIC_DIN` | 5 |
 | `LCD_RST` | 9 | `MIC_SLOT_RIGHT` | n |
 | `LCD_BL` | 8 | `KP_ROW0` / `ROW1` / `ROW2` / `ROW3` | 39 / 1 / 2 / 41 |
-| `TOUCH_ENABLE` | y | `KP_COL0` / `COL1` / `COL2` | 38 / 40 / 42 |
+| `TOUCH_ENABLE` | y | `KP_COL0` / `COL1` / `COL2` | 40 / 38 / 42 |
 | `TOUCH_CS` | 16 | `KP_MAP` | `123456789*0#` |
 | `TOUCH_IRQ` | 17 | `SD_ENABLE` | n |
 | `STATUS_LED` | 48 | `LCD_MIRROR_X` | y |
